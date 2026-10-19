@@ -15,6 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+build = ["pyinstaller>=6"]
 
 [tool.setuptools]
 packages = ["mdviewer", "mdviewer.core"]

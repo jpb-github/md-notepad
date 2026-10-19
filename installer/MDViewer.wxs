@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Per-user MSI (no admin rights needed): installs the PyInstaller one-folder build
+  to %LOCALAPPDATA%\Programs\MD Viewer and adds a Start menu shortcut.
+  Built by scripts/build_msi.py, which passes -d SourceDir=<dist\MDViewer> -d Version=<x.y.z>
+  -d IconPath=<assets\mdviewer.ico>.
+  Keep UpgradeCode constant forever: it is what lets a newer MSI replace an older install.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="MD Viewer"
+           Manufacturer="MD Viewer"
+           Version="$(Version)"
+           UpgradeCode="631A68CA-DCD0-430A-B0A9-1852313E791A"
+           Scope="perUser"
+           Language="1033">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of MD Viewer is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="AppIcon.ico" SourceFile="$(IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="MD Viewer">
+          <Files Include="$(SourceDir)\**" />
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="*">
+        <Shortcut Id="MDViewerShortcut"
+                  Name="MD Viewer"
+                  Description="Markdown viewer and editor"
+                  Icon="AppIcon.ico"
+                  Target="[INSTALLFOLDER]MDViewer.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\MDViewer" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+  </Package>
+</Wix>
