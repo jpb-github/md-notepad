@@ -1,11 +1,12 @@
 """Main window: menus, mode switching, file operations, status bar."""
 
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QRect, QTimer
-from PySide6.QtGui import QActionGroup, QFont, QGuiApplication, QKeySequence
+from PySide6.QtGui import QActionGroup, QColor, QFont, QGuiApplication, QKeySequence, QPalette
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWidgets import (
     QApplication,
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mdviewer.core import encoding
+from mdviewer.core import encoding, themeservice
 from mdviewer.core.filewatch import Watcher, WatchEvent
 from mdviewer.editor import MarkdownEditor
 from mdviewer.findbar import FindBar
@@ -32,6 +33,24 @@ ZOOM_STEP = 1.25
 DEFAULT_SIZE = (900, 700)
 WARNING_MS = 10000
 POLL_MS = 1000
+THEME_POLL_MS = 2000
+THEME_LABELS = (("system", "&System (auto)"), ("light", "&Light"), ("dark", "&Dark"))
+DARK_PALETTE_COLORS = {
+    "window": "#202020",
+    "window_text": "#f0f0f0",
+    "base": "#191919",
+    "alternate_base": "#262626",
+    "text": "#f0f0f0",
+    "button": "#2b2b2b",
+    "button_text": "#f0f0f0",
+    "highlight": "#2f6fd6",
+    "highlighted_text": "#ffffff",
+    "link": "#4493f8",
+    "tooltip_base": "#2b2b2b",
+    "tooltip_text": "#f0f0f0",
+    "placeholder": "#9a9a9a",
+    "disabled_text": "#7a7a7a",
+}
 OPEN_FILTER = "Markdown (*.md *.markdown *.mdown *.txt);;All files (*)"
 SAVE_FILTER = "Markdown (*.md);;Text (*.txt);;All files (*)"
 ENCODING_LABELS = {
@@ -64,6 +83,48 @@ def pick_open_path(parent) -> str:
 def pick_save_path(parent, start: str) -> str:
     path, _ = QFileDialog.getSaveFileName(parent, "Save As", start, SAVE_FILTER)
     return path
+
+
+def read_system_theme() -> str:
+    """Seam: the Windows app theme; 'light' on any failure or off Windows."""
+    try:
+        reader = themeservice.system_theme_reader()
+    except ImportError:
+        return "light"
+    return themeservice.read_system_theme(reader)
+
+
+def _dark_palette() -> QPalette:
+    c = {key: QColor(value) for key, value in DARK_PALETTE_COLORS.items()}
+    role = QPalette.ColorRole
+    palette = QPalette()
+    for r, key in (
+        (role.Window, "window"), (role.WindowText, "window_text"), (role.Base, "base"),
+        (role.AlternateBase, "alternate_base"), (role.Text, "text"), (role.Button, "button"),
+        (role.ButtonText, "button_text"), (role.Highlight, "highlight"),
+        (role.HighlightedText, "highlighted_text"), (role.Link, "link"),
+        (role.ToolTipBase, "tooltip_base"), (role.ToolTipText, "tooltip_text"),
+        (role.PlaceholderText, "placeholder"),
+    ):
+        palette.setColor(r, c[key])
+    for r in (role.WindowText, role.Text, role.ButtonText):
+        palette.setColor(QPalette.ColorGroup.Disabled, r, c["disabled_text"])
+    return palette
+
+
+def _set_dark_title_bar(window, dark: bool) -> None:
+    """Best effort: match the Windows title bar (DWMWA_USE_IMMERSIVE_DARK_MODE = 20)."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        value = ctypes.c_int(1 if dark else 0)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            ctypes.c_void_p(int(window.winId())), 20, ctypes.byref(value), ctypes.sizeof(value)
+        )
+    except (AttributeError, OSError):
+        pass
 
 
 def _fmt_size(n: int) -> str:
@@ -153,6 +214,11 @@ class MainWindow(QMainWindow):
         self._watch_timer.timeout.connect(self._poll_disk)
         self._watch_timer.start()
 
+        self._theme_timer = QTimer(self)
+        self._theme_timer.setInterval(THEME_POLL_MS)
+        self._theme_timer.timeout.connect(self._poll_theme)
+        self._set_theme_choice(self._theme_choice)  # before the first paint: no light flash
+
     # --- Buffer ------------------------------------------------------------
 
     @property
@@ -224,6 +290,20 @@ class MainWindow(QMainWindow):
         self.act_zoom_in = self._action(m, "Zoom &In", "Ctrl+=", self._zoom_in)
         self.act_zoom_out = self._action(m, "Zoom &Out", "Ctrl+-", self._zoom_out)
         self.act_zoom_reset = self._action(m, "&Restore Default Zoom", "Ctrl+0", self._zoom_reset)
+        m.addSeparator()
+        theme_menu = m.addMenu("&Theme")
+        self.theme_group = QActionGroup(self)
+        self._theme_actions = {}
+        for choice, label in THEME_LABELS:
+            act = self._action(
+                theme_menu, label, slot=lambda _checked=False, c=choice: self._set_theme_choice(c),
+                checkable=True,
+            )
+            self.theme_group.addAction(act)
+            self._theme_actions[choice] = act
+        self.act_theme_system = self._theme_actions["system"]
+        self.act_theme_light = self._theme_actions["light"]
+        self.act_theme_dark = self._theme_actions["dark"]
 
         m = self.menu_help = bar.addMenu("&Help")
         self._action(m, "&About MD Viewer", slot=self._show_about)
@@ -590,3 +670,35 @@ class MainWindow(QMainWindow):
         cursor.setPosition(min(position, len(self.buffer)))
         self.editor.setTextCursor(cursor)
         self._update_chrome()
+
+    # --- Theme -----------------------------------------------------------------
+
+    def _set_theme_choice(self, choice: str) -> None:
+        self._theme_choice = choice
+        self._theme_actions[choice].setChecked(True)
+        if choice == "system":
+            self._theme_timer.start()
+        else:
+            self._theme_timer.stop()  # forced Light/Dark ignore the system theme
+        self._apply_theme(force=True)
+
+    def _poll_theme(self) -> None:
+        if self._theme_choice == "system":
+            self._apply_theme()
+
+    def _apply_theme(self, force: bool = False) -> None:
+        theme = read_system_theme() if self._theme_choice == "system" else self._theme_choice
+        if theme == self._effective_theme and not force:
+            return
+        self._effective_theme = theme
+        if theme == "dark":
+            # windowsvista paints native light controls whatever the palette says.
+            QApplication.setStyle("Fusion")
+            QApplication.setPalette(_dark_palette())
+        else:
+            QApplication.setStyle("windowsvista")
+            QApplication.setPalette(QApplication.style().standardPalette())
+        _set_dark_title_bar(self, theme == "dark")
+        self.editor.set_theme(theme)
+        if self.mode == self.PREVIEW:
+            self._render_preview(keep_scroll=True)  # same buffer, new CSS variables

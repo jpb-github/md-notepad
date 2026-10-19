@@ -45,6 +45,8 @@ main_window.ask = fake_ask
 main_window.show_error = lambda parent, text: ERRORS.append(text)
 main_window.pick_open_path = lambda parent: FAKE["open_path"]
 main_window.pick_save_path = lambda parent, start: FAKE["save_path"]
+FAKE["system_theme"] = "light"
+main_window.read_system_theme = lambda: FAKE["system_theme"]  # never read the real registry
 
 qt_app, window = app_module.build([])
 END = QTextCursor.MoveOperation.End
@@ -632,6 +634,65 @@ QTest.keyClick(bar.find_edit, Qt.Key.Key_Escape)
 check(not bar.isVisible(), "Esc closes the bar")
 FAKE["answer"] = S.Discard
 window.on_close()
+
+# --- Task 13: theme system ----------------------------------------------------------
+from PySide6.QtGui import QPalette  # noqa: E402
+
+
+def window_color() -> str:
+    return qt_app.palette().color(QPalette.ColorRole.Window).name()
+
+
+def heading_color(win) -> str:
+    return win.editor.highlighter._formats["heading"].foreground().color().name()
+
+
+DARK_WINDOW = main_window.DARK_PALETTE_COLORS["window"]
+check(
+    [a.text() for a in window.theme_group.actions()] == ["&System (auto)", "&Light", "&Dark"],
+    "View > Theme offers System (auto) / Light / Dark",
+)
+check(window.act_theme_system.isChecked(), "System (auto) is the default")
+check(window._theme_timer.isActive() and window._theme_timer.interval() == 2000, "System mode polls every 2000 ms")
+
+FAKE["answer"] = S.Discard
+window.open_file(sample)
+sample_before = sample.read_bytes()
+sample.write_bytes(sample_before + b"on disk only\r\n")  # not polled: a theme switch must not reload
+FAKE["system_theme"] = "dark"
+window._poll_theme()
+check(window._effective_theme == "dark", "System mode follows Windows switching to dark")
+check(qt_app.style().name().lower() == "fusion" and window_color() == DARK_WINDOW, "dark palette on the Fusion style")
+check("#0d1117" in window.preview.last_html, "preview re-rendered with dark CSS")
+check("on disk only" not in window.preview.last_html, "theme switch re-renders the buffer, not the disk")
+check(window.mode == "preview" and not window.dirty, "theme switch keeps mode and dirty state")
+check(heading_color(window) == editor_module.COLORS["dark"]["heading"], "editor recolored for dark")
+sample.write_bytes(sample_before)
+
+window.act_theme_light.trigger()
+check(window._effective_theme == "light" and window_color() != DARK_WINDOW, "forced Light applies the light palette")
+check(not window._theme_timer.isActive(), "forced Light stops the system poll")
+FAKE["system_theme"] = "dark"
+window._poll_theme()
+check(window._effective_theme == "light", "forced Light ignores the system theme")
+check(window.settings_snapshot()["theme"] == "light", "forced Light is saved")
+
+window.act_theme_dark.trigger()
+check(window._effective_theme == "dark" and not window._theme_timer.isActive(), "forced Dark applies without polling")
+FAKE["system_theme"] = "light"
+window._poll_theme()
+check(window._effective_theme == "dark", "forced Dark ignores the system theme")
+
+window.act_theme_system.trigger()
+check(window._effective_theme == "light", "System (auto) applies the current system theme immediately")
+check(window._theme_timer.isActive(), "System (auto) restarts the poll")
+check(window.settings_snapshot()["theme"] == "system", "System (auto) is saved")
+
+restarted = main_window.MainWindow({"theme": "dark", "window": None, "preview_zoom": 1.0})
+check(restarted.act_theme_dark.isChecked() and restarted._effective_theme == "dark", "saved Dark is restored")
+check("#0d1117" in restarted.preview.last_html, "startup preview is already dark")
+check(heading_color(restarted) == editor_module.COLORS["dark"]["heading"], "startup editor is already dark")
+window.act_theme_system.trigger()  # back to light for any later checks
 
 # --- Later tasks insert their checks directly above this line. ---
 
