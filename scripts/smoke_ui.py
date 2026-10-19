@@ -104,7 +104,7 @@ check(window.mode == "edit" and window.stack.currentIndex() == 1, "Edit Mode sho
 check(window.act_undo.isEnabled() and window.act_paste.isEnabled(), "edit actions enabled in edit mode")
 check(window.act_copy.isEnabled(), "Copy enabled in edit mode")
 check(not window.act_zoom_in.isEnabled(), "Zoom disabled in edit mode")
-check(not window.act_find.isEnabled(), "Find stays disabled until Task 12")
+check(window.act_find.isEnabled() and window.act_replace.isEnabled(), "Find/Replace enabled in edit mode")
 window.editor.moveCursor(START)
 check(window._left_label.text() == "Ln 1, Col 1", "status shows Ln 1, Col 1 at start")
 window.editor.moveCursor(END)
@@ -566,6 +566,72 @@ check(window.buffer == "new path changed\n", "watcher follows the Save As path")
 window.on_close()
 window._poll_disk()
 check(window._watcher is None, "no watcher for Untitled")
+
+# --- Task 12: find / replace ------------------------------------------------------
+bar = window.find_bar
+FAKE["answer"] = S.Discard
+window.on_close()
+check(not window.act_find.isEnabled() and not window.act_replace.isEnabled(), "Find/Replace disabled in preview")
+window.on_new()
+check(window.act_find.isEnabled() and window.act_replace.isEnabled(), "Find/Replace enabled in edit mode")
+check(not bar.isVisible(), "find bar hidden by default")
+
+
+def selected() -> str:
+    return window.editor.textCursor().selectedText()
+
+
+window.editor.setPlainText("\U0001F600 alpha beta Alpha\nalpha")
+window.editor.moveCursor(START)
+window.act_find.trigger()
+check(bar.isVisible() and not bar.replace_row.isVisible(), "Ctrl+F shows the find row only")
+bar.find_edit.setText("alpha")
+check(selected() == "alpha" and bar.count_label.text() == "1 of 3", "typing selects the first match after an emoji")
+bar.find_next()
+check(selected() == "Alpha" and bar.count_label.text() == "2 of 3", "Next is case-insensitive by default")
+bar.find_next()
+check(bar.count_label.text() == "3 of 3", "Next reaches the last match")
+bar.find_next()
+check(bar.count_label.text() == "1 of 3", "Next wraps to the first match")
+bar.find_previous()
+check(bar.count_label.text() == "3 of 3", "Previous wraps to the last match")
+bar.case_box.setChecked(True)
+check(bar.count_label.text() == "2 of 2", "Match case narrows the matches")
+bar.case_box.setChecked(False)
+bar.find_edit.setText("zzz")
+check(bar.count_label.text() == "No results", "no hits shows No results")
+check(window.buffer == "\U0001F600 alpha beta Alpha\nalpha", "a failed search leaves the text alone")
+bar.find_edit.setText("")
+check(bar.count_label.text() == "", "empty search clears the count")
+check(not bar.find_next(), "Next with an empty field does nothing")
+
+window.editor.moveCursor(START)
+window.act_replace.trigger()
+check(bar.isVisible() and bar.replace_row.isVisible(), "Ctrl+H shows the replace row")
+bar.find_edit.setText("beta")
+bar.replace_edit.setText("BETA")
+bar.replace_one()
+check(window.buffer == "\U0001F600 alpha BETA Alpha\nalpha", "Replace swaps the selected match")
+bar.find_edit.setText("a")
+bar.replace_edit.setText("aa")
+check(bar.replace_all() == 7, "Replace All counts every match once")
+check(window.buffer == "\U0001F600 aalphaa BETaa aalphaa\naalphaa", "Replace All terminates when the replacement contains the needle")
+check(bar.count_label.text() == "7 replaced", "Replace All reports the count")
+window.editor.undo()
+check(window.buffer == "\U0001F600 alpha BETA Alpha\nalpha", "one undo reverts Replace All")
+
+window.editor.setPlainText("one two")
+window.editor.moveCursor(START)
+cursor = window.editor.textCursor()
+cursor.movePosition(QTextCursor.MoveOperation.NextWord, QTextCursor.MoveMode.KeepAnchor)
+window.editor.setTextCursor(cursor)
+bar.close_bar()
+window.act_find.trigger()
+check(bar.find_edit.text().strip() == "one", "the editor selection seeds the find field")
+QTest.keyClick(bar.find_edit, Qt.Key.Key_Escape)
+check(not bar.isVisible(), "Esc closes the bar")
+FAKE["answer"] = S.Discard
+window.on_close()
 
 # --- Later tasks insert their checks directly above this line. ---
 

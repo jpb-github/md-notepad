@@ -15,11 +15,14 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QStackedWidget,
+    QVBoxLayout,
+    QWidget,
 )
 
 from mdviewer.core import encoding
 from mdviewer.core.filewatch import Watcher, WatchEvent
 from mdviewer.editor import MarkdownEditor
+from mdviewer.findbar import FindBar
 from mdviewer.preview import MarkdownPreview
 
 APP_NAME = "MD Viewer"
@@ -113,9 +116,18 @@ class MainWindow(QMainWindow):
         # Dropped files must reach MainWindow, not navigate the page.
         self.preview.setAcceptDrops(False)
 
+        self.find_bar = FindBar(self.editor)
+        self.find_bar.hide()
+        editor_page = QWidget()
+        page_layout = QVBoxLayout(editor_page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
+        page_layout.addWidget(self.editor)
+        page_layout.addWidget(self.find_bar)
+
         self.stack = QStackedWidget()
         self.stack.addWidget(self.preview)  # index 0
-        self.stack.addWidget(self.editor)  # index 1
+        self.stack.addWidget(editor_page)  # index 1: editor + find bar
         self.setCentralWidget(self.stack)
 
         self._left_label = QLabel()
@@ -190,11 +202,8 @@ class MainWindow(QMainWindow):
         self.act_copy = self._action(m, "&Copy", "Ctrl+C", self._copy)
         self.act_paste = self._action(m, "&Paste", "Ctrl+V", self.editor.paste)
         m.addSeparator()
-        # Find/Replace stay disabled and unconnected until Task 12 wires them.
-        self.act_find = self._action(m, "&Find...", "Ctrl+F")
-        self.act_replace = self._action(m, "&Replace...", "Ctrl+H")
-        self.act_find.setEnabled(False)
-        self.act_replace.setEnabled(False)
+        self.act_find = self._action(m, "&Find...", "Ctrl+F", self.find_bar.open_find)
+        self.act_replace = self._action(m, "&Replace...", "Ctrl+H", self.find_bar.open_replace)
         self.act_select_all = self._action(m, "Select &All", "Ctrl+A", self.editor.selectAll)
 
         m = self.menu_view = bar.addMenu("&View")
@@ -221,6 +230,7 @@ class MainWindow(QMainWindow):
 
         self._edit_only_actions = [
             self.act_undo, self.act_redo, self.act_cut, self.act_paste, self.act_select_all,
+            self.act_find, self.act_replace,
         ]
         self._preview_only_actions = [self.act_zoom_in, self.act_zoom_out, self.act_zoom_reset]
 
