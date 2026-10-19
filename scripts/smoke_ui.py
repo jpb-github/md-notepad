@@ -264,6 +264,61 @@ except OSError:
 settings.save = original_save
 check(survived, "save_settings swallows write errors on exit")
 
+# --- Task 9: preview rendering ------------------------------------------------
+from PySide6.QtCore import QUrl  # noqa: E402
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings  # noqa: E402
+
+from mdviewer import preview as preview_module  # noqa: E402
+from mdviewer.core import render  # noqa: E402
+
+check(isinstance(window.preview, preview_module.MarkdownPreview), "preview is a MarkdownPreview")
+check(
+    not window.preview.settings().testAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled),
+    "JavaScript is disabled in the preview",
+)
+doc = TMP / "doc.md"
+doc.write_text("# Title\n\n![pic](pic.png)\n\n[web](https://example.com)\n", encoding="utf-8")
+FAKE["answer"] = S.Discard
+check(window.open_file(doc), "open doc.md")
+rendered = window.preview.last_html
+check("<h1>Title</h1>" in rendered, "preview renders Markdown headings")
+check((TMP / "pic.png").as_uri() in rendered, "relative image resolved against the file's folder")
+check(window.preview.page_file.read_text(encoding="utf-8") == rendered, "page file holds the rendered HTML")
+check("#1f2328" in rendered, "light CSS by default")
+window._effective_theme = "dark"
+window._render_preview()
+check("#0d1117" in window.preview.last_html, "dark CSS when the effective theme is dark")
+window._effective_theme = "light"
+
+
+def boom(text, base_dir=None):
+    raise RuntimeError("renderer bug")
+
+
+original_render_body = render.render_body
+render.render_body = boom
+window.statusBar().clearMessage()
+window._render_preview()
+render.render_body = original_render_body
+check('<pre class="fallback">' in window.preview.last_html, "render failure falls back to <pre>")
+check("plain text" in window.statusBar().currentMessage(), "render failure shows a status warning")
+
+OPENED: list = []
+preview_module.open_external = OPENED.append
+LINK = QWebEnginePage.NavigationType.NavigationTypeLinkClicked
+page = window.preview.page()
+check(not page.acceptNavigationRequest(QUrl("https://example.com"), LINK, True), "web link does not navigate the preview")
+check(OPENED == [QUrl("https://example.com")], "web link opens externally")
+anchor = QUrl.fromLocalFile(str(window.preview.page_file))
+anchor.setFragment("fn-1")
+check(page.acceptNavigationRequest(anchor, LINK, True), "in-page anchor stays in the preview")
+check(len(OPENED) == 1, "in-page anchor does not open externally")
+
+big = TMP / "big.md"
+big.write_text("".join(f"Line {i} with some **bold** text.\n\n" for i in range(60000)), encoding="utf-8")
+check(window.open_file(big), "open a large document")
+check(window.preview.page_file.stat().st_size > 2 * 1024 * 1024, "pages over 2 MB are rendered")
+
 # --- Later tasks insert their checks directly above this line. ---
 
 shutil.rmtree(TMP, ignore_errors=True)

@@ -1,12 +1,10 @@
 """Main window: menus, mode switching, file operations, status bar."""
 
-import html
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QRect, QTimer
 from PySide6.QtGui import QActionGroup, QFont, QGuiApplication, QKeySequence
 from PySide6.QtWebEngineCore import QWebEnginePage
-from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
@@ -17,12 +15,14 @@ from PySide6.QtWidgets import (
 )
 
 from mdviewer.core import encoding
+from mdviewer.preview import MarkdownPreview
 
 APP_NAME = "MD Viewer"
 ZOOM_MIN = 0.25
 ZOOM_MAX = 3.0
 ZOOM_STEP = 1.25
 DEFAULT_SIZE = (900, 700)
+WARNING_MS = 10000
 OPEN_FILTER = "Markdown (*.md *.markdown *.mdown *.txt);;All files (*)"
 SAVE_FILTER = "Markdown (*.md);;Text (*.txt);;All files (*)"
 ENCODING_LABELS = {
@@ -92,6 +92,7 @@ class MainWindow(QMainWindow):
         self._size = 0
         self._zoom = float(data.get("preview_zoom") or 1.0)
         self._theme_choice = data.get("theme") or "system"
+        self._effective_theme = "light"  # Task 13 makes this follow System/Light/Dark
 
         self.editor = QPlainTextEdit()
         font = QFont("Consolas", 11)
@@ -99,7 +100,7 @@ class MainWindow(QMainWindow):
         self.editor.setFont(font)
         self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
 
-        self.preview = QWebEngineView()
+        self.preview = MarkdownPreview()
         # Dropped files must reach MainWindow, not navigate the page.
         self.preview.setAcceptDrops(False)
 
@@ -352,13 +353,14 @@ class MainWindow(QMainWindow):
             self.editor.setFocus()
         self._update_chrome()
 
-    def _render_preview(self) -> None:
-        """Placeholder until Task 9: the escaped buffer in a <pre>."""
-        self.preview.setHtml(
-            "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>"
-            "<pre style='white-space:pre-wrap;font:14px Consolas,monospace'>"
-            f"{html.escape(self.buffer)}</pre></body></html>"
-        )
+    def _render_preview(self, keep_scroll: bool = False) -> None:
+        base_dir = self.loaded_path.parent if self.loaded_path else None
+        if not self.preview.show_markdown(self.buffer, self._effective_theme, base_dir, keep_scroll):
+            self._warn("Preview could not render this document; showing plain text.")
+
+    def _warn(self, text: str) -> None:
+        """Transient status-bar warning (render fallback, missing file, read failure)."""
+        self.statusBar().showMessage(text, WARNING_MS)
 
     # --- View --------------------------------------------------------------
 
