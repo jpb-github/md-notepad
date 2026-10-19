@@ -1,0 +1,7 @@
+# Normalize text to LF in the repository; check out with CRLF (Windows project).
+* text=auto eol=crlf
+
+# Binary files: never convert.
+*.png binary
+*.ico binary
+*.jpg binary
