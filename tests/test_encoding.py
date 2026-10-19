@@ -60,3 +60,18 @@ def test_encode_windows_1252():
 def test_encode_unrepresentable_raises():
     with pytest.raises(UnicodeEncodeError):
         encode("日本語", "windows-1252")
+
+
+def test_windows_1252_undefined_bytes_do_not_raise():
+    # 0x81, 0x8D, 0x8F, 0x90, 0x9D are unassigned in Python's cp1252 codec;
+    # Windows maps them to the matching C1 control characters.
+    raw = b"caf\xe9 \x81\x8d\x8f\x90\x9d"
+    text, name = detect(raw)
+    assert name == "windows-1252"
+    assert text == "café \x81\x8d\x8f\x90\x9d"
+
+
+def test_windows_1252_undefined_bytes_round_trip():
+    raw = b"caf\xe9 \x81\x8d\x8f\x90\x9d"
+    text, name = detect(raw)
+    assert encode(text, name) == raw
