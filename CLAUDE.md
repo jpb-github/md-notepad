@@ -47,6 +47,12 @@ mdviewer/
     render.py              Markdown -> themed HTML page (mistune + Pygments)
 tests/                     pytest for mdviewer/core only
 scripts/smoke_ui.py        headless UI smoke test (prints SMOKE OK)
+scripts/build_exe.py       PyInstaller one-folder build -> dist/MDViewer/MDViewer.exe
+scripts/build_msi.py       builds the exe folder, then a per-user MSI (WiX)
+scripts/make_icon.py       draws assets/mdviewer.ico (+ .png preview) with QPainter
+assets/                    generated app icon, committed; used by the exe and MSI
+installer/MDViewer.wxs     WiX source for the MSI (keep UpgradeCode constant)
+.config/dotnet-tools.json  pins the repo-local WiX tool (dotnet tool restore)
 docs/superpowers/          spec and plan
 ```
 
@@ -65,7 +71,17 @@ docs/superpowers/          spec and plan
   `run_preferences`, `read_system_theme`) so the smoke script can fake them.
 - v1 non-goals (do not add): tabs/multiple documents, printing, cross-file
   search, default `.md` handler registration, WYSIWYG, custom CSS/themes,
-  localization, executable packaging.
+  localization, installers (MSI/MSIX/auto-update).
+- Packaging: the supported distribution artifact is the per-user MSI
+  `dist/MDViewer-<version>-x64.msi` built by `scripts/build_msi.py` from the
+  PyInstaller one-folder build (`scripts/build_exe.py`, `build` extra) and
+  `installer/MDViewer.wxs` (WiX 5, pinned in `.config/dotnet-tools.json`).
+  Do not make one-file the default: it unpacks ~200 MiB to %TEMP% on every
+  launch (~22 s vs ~2-4 s for one-folder); `--onefile` exists only as an
+  opt-in. Keep the build scripts in sync when adding runtime dependencies or
+  data files (bundle them explicitly; Pygments lexers are collected with
+  `--collect-submodules pygments`). `build/` and `dist/` are git-ignored;
+  never commit build output. Signing, MSIX and auto-update are out of scope.
 
 ## Commands (PowerShell, repo root)
 
@@ -77,6 +93,8 @@ python -m venv .venv
 .venv\Scripts\python scripts\smoke_ui.py       # UI smoke, expects SMOKE OK
 rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests   # must print nothing
 .venv\Scripts\python main.py path\to\file.md   # run the app
+.venv\Scripts\python scripts\build_exe.py      # dist\MDViewer\MDViewer.exe (needs pip install -e ".[build]")
+.venv\Scripts\python scripts\build_msi.py      # dist\MDViewer-<ver>-x64.msi (also needs the .NET SDK)
 ```
 
 The shell available to agents is Git Bash; use forward slashes there
