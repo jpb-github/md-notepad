@@ -1,0 +1,59 @@
+"""Persistence for MD Viewer user settings (%APPDATA%\\MDViewer\\settings.json)."""
+
+import json
+import os
+from pathlib import Path
+
+_VALID_THEMES = ("system", "light", "dark")
+_ZOOM_MIN = 0.25
+_ZOOM_MAX = 3.0
+_WINDOW_KEYS = ("x", "y", "width", "height")
+
+
+def default_path() -> Path:
+    appdata = os.environ.get("APPDATA")
+    base = Path(appdata) if appdata else Path.home() / ".config"
+    return base / "MDViewer" / "settings.json"
+
+
+def default_settings() -> dict:
+    return {"theme": "system", "window": None, "preview_zoom": 1.0}
+
+
+def _clean_window(value) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    for key in _WINDOW_KEYS:
+        if type(value.get(key)) is not int:
+            return None
+    return {key: value[key] for key in _WINDOW_KEYS}
+
+
+def _clean(data) -> dict:
+    result = default_settings()
+    if not isinstance(data, dict):
+        return result
+    if data.get("theme") in _VALID_THEMES:
+        result["theme"] = data["theme"]
+    window = _clean_window(data.get("window"))
+    if window is not None:
+        result["window"] = window
+    zoom = data.get("preview_zoom")
+    if isinstance(zoom, (int, float)) and not isinstance(zoom, bool):
+        result["preview_zoom"] = float(min(max(zoom, _ZOOM_MIN), _ZOOM_MAX))
+    return result
+
+
+def load(path: Path | None = None) -> dict:
+    path = path or default_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return default_settings()
+    return _clean(data)
+
+
+def save(path: Path | None, data: dict) -> None:
+    path = path or default_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_clean(data), indent=2), encoding="utf-8")
