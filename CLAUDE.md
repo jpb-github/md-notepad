@@ -22,8 +22,9 @@ when it changes on disk.
   task by task, in order. Later tasks edit earlier tasks' code by matching
   exact text, so do not freelance refactors while executing the plan.
 
-Status: the spec and the plan are committed; implementation has not started
-(no `mdviewer/` package yet). Check `git log` for which plan tasks are done.
+Status: plan Tasks 1-14 are done (the manual desktop checklist in `README.md`
+is not yet walked), plus the user-requested Open Recent, Preferences and
+packaging (one-folder build, MSI, icon) work. Check `git log` for details.
 
 ## Repository layout (target, per the plan)
 
