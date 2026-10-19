@@ -135,3 +135,92 @@ def test_cursor_before_marker_gives_no_continuation():
     assert should_continue_on_enter("- item", 0) is None
     assert should_continue_on_enter("1. item", 0) is None
     assert should_continue_on_enter("> q", 0) is None
+
+
+# --- editor helpers (Task 10) --------------------------------------------
+
+from mdviewer.core.completion import (  # noqa: E402
+    Suggestion,
+    apply_suggestion,
+    autoclose_action,
+    deletes_pair,
+    token_prefix,
+)
+
+
+def test_autoclose_pairs_at_line_end():
+    assert autoclose_action("", 0, "(") == "pair"
+    assert autoclose_action("", 0, "[") == "pair"
+
+
+def test_autoclose_types_over_matching_closer():
+    assert autoclose_action("()", 1, ")") == "over"
+    assert autoclose_action("`a`", 2, "`") == "over"
+
+
+def test_autoclose_skips_before_word():
+    assert autoclose_action("word", 0, "(") is None
+
+
+def test_autoclose_skips_marker_inside_word():
+    assert autoclose_action("my", 2, "_") is None
+    assert autoclose_action("a", 1, "*") is None
+
+
+def test_autoclose_skips_bullet_star():
+    assert autoclose_action("", 0, "*") is None
+    assert autoclose_action("  ", 2, "*") is None
+
+
+def test_autoclose_pairs_marker_after_space():
+    assert autoclose_action("a ", 2, "*") == "pair"
+    assert autoclose_action("a ", 2, "`") == "pair"
+    assert autoclose_action("", 0, "`") == "pair"
+
+
+def test_autoclose_third_backtick_is_plain():
+    assert autoclose_action("``", 2, "`") is None
+
+
+def test_autoclose_bracket_after_word():
+    assert autoclose_action("f", 1, "(") == "pair"
+    assert autoclose_action("!", 1, "[") == "pair"
+    assert autoclose_action("", 0, "a") is None
+
+
+def test_deletes_pair():
+    assert deletes_pair("()", 1)
+    assert deletes_pair("**", 1)
+    assert not deletes_pair("(a)", 1)
+    assert not deletes_pair("", 0)
+
+
+def test_token_prefix():
+    assert token_prefix("```py", 5) == "py"
+    assert token_prefix("  ```", 5) == ""
+    assert token_prefix("## x", 2) == ""
+
+
+def test_apply_suggestion_heading():
+    assert apply_suggestion("##", 2, Suggestion("### ", "token")) == ("### ", 4)
+    assert apply_suggestion("# Title", 1, Suggestion("## ", "token")) == ("## Title", 3)
+
+
+def test_apply_suggestion_fence_language():
+    assert apply_suggestion("```py", 5, Suggestion("python", "token")) == ("```python", 9)
+
+
+def test_apply_suggestion_task_list_keeps_indent():
+    assert apply_suggestion("  *", 3, Suggestion("- [ ] ", "token")) == ("  - [ ] ", 8)
+
+
+def test_apply_suggestion_quote():
+    assert apply_suggestion("> note", 2, Suggestion("> - ", "token")) == ("> - note", 4)
+
+
+def test_apply_suggestion_line_goes_below():
+    assert apply_suggestion("| a |", 5, Suggestion("| --- |", "line")) == ("| a |\n| --- |", 13)
+
+
+def test_apply_suggestion_fallback_inserts_at_cursor():
+    assert apply_suggestion("ab", 1, Suggestion("# ", "token")) == ("a# b", 3)

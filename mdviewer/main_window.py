@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from mdviewer.core import encoding
+from mdviewer.editor import MarkdownEditor
 from mdviewer.preview import MarkdownPreview
 
 APP_NAME = "MD Viewer"
@@ -94,7 +95,7 @@ class MainWindow(QMainWindow):
         self._theme_choice = data.get("theme") or "system"
         self._effective_theme = "light"  # Task 13 makes this follow System/Light/Dark
 
-        self.editor = QPlainTextEdit()
+        self.editor = MarkdownEditor()
         font = QFont("Consolas", 11)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self.editor.setFont(font)

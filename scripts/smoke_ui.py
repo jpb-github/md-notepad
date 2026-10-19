@@ -319,6 +319,140 @@ big.write_text("".join(f"Line {i} with some **bold** text.\n\n" for i in range(6
 check(window.open_file(big), "open a large document")
 check(window.preview.page_file.stat().st_size > 2 * 1024 * 1024, "pages over 2 MB are rendered")
 
+# --- Task 10: editor intelligence ---------------------------------------------
+from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtGui import QTextCharFormat  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
+
+from mdviewer import editor as editor_module  # noqa: E402
+
+ed = window.editor
+check(isinstance(ed, editor_module.MarkdownEditor), "editor is a MarkdownEditor")
+window.show()  # the completer popup only opens for a visible editor
+FAKE["answer"] = S.Discard
+window.on_new()
+qt_app.processEvents()
+LIGHT = editor_module.COLORS["light"]
+WAVE = QTextCharFormat.UnderlineStyle.WaveUnderline
+
+
+def reset(text: str = "") -> None:
+    ed.completer.popup().hide()
+    ed.setPlainText(text)
+    ed.moveCursor(END)
+    ed.highlighter.refresh_issues()
+
+
+def cur_line() -> str:
+    return ed.textCursor().block().text()
+
+
+def cur_col() -> int:
+    return ed.textCursor().positionInBlock()
+
+
+def block_formats(number: int):
+    # Copy each format: r.format dangles once the temporary FormatRange list is freed.
+    return [QTextCharFormat(r.format) for r in ed.document().findBlockByNumber(number).layout().formats()]
+
+
+def has_wave(number: int, color: str) -> bool:
+    return any(f.underlineStyle() == WAVE and f.underlineColor().name() == color for f in block_formats(number))
+
+
+# auto-close
+reset()
+QTest.keyClicks(ed, "(")
+check(ed.toPlainText() == "()" and cur_col() == 1, "( inserts a pair")
+QTest.keyClicks(ed, ")")
+check(ed.toPlainText() == "()" and cur_col() == 2, ") types over the closer")
+reset()
+QTest.keyClicks(ed, "[")
+QTest.keyClick(ed, Qt.Key.Key_Backspace)
+check(ed.toPlainText() == "", "Backspace removes an empty pair")
+reset()
+QTest.keyClicks(ed, "my_var")
+check(ed.toPlainText() == "my_var", "_ inside a word is not paired")
+reset()
+QTest.keyClicks(ed, "* item")
+check(ed.toPlainText() == "* item", "* bullet at line start is not paired")
+reset()
+QTest.keyClicks(ed, "a `")
+check(ed.toPlainText() == "a ``", "backtick after a space is paired")
+
+# completion popup
+reset()
+QTest.keyClicks(ed, "```")
+check(ed.toPlainText() == "```", "typing ``` gives exactly three backticks")
+check(ed.completer.popup().isVisible(), "``` opens the fence-language popup")
+QTest.keyClicks(ed, "py")
+check(ed.completer.completionCount() == 1, "typing narrows fence languages")
+ed._insert_completion("python")
+check(cur_line() == "```python" and cur_col() == 9, "fence language completes in place")
+reset()
+QTest.keyClicks(ed, "#")
+check(ed.completer.popup().isVisible() and ed.completer.completionCount() == 6, "# offers six heading levels")
+ed._insert_completion("## ")
+check(cur_line() == "## " and cur_col() == 3, "heading completion replaces the # run")
+reset()
+QTest.keyClicks(ed, "- ")
+check(not ed.completer.popup().isVisible(), "typing a space closes the popup")
+reset("| a | b |")
+QTest.keyClick(ed, Qt.Key.Key_Space, Qt.KeyboardModifier.ControlModifier)
+check(ed.completer.popup().isVisible(), "Ctrl+Space opens the popup")
+ed._insert_completion("| --- | --- |")
+check(ed.toPlainText() == "| a | b |\n| --- | --- |", "table separator row goes on a new line")
+reset("```python\n")
+QTest.keyClicks(ed, "#")
+check(not ed.completer.popup().isVisible(), "no heading popup inside a fenced block")
+
+# Enter continuation
+reset("- item")
+QTest.keyClick(ed, Qt.Key.Key_Return)
+check(ed.toPlainText() == "- item\n- ", "Enter continues a bullet list")
+QTest.keyClick(ed, Qt.Key.Key_Return)
+check(ed.toPlainText() == "- item\n\n", "Enter on an empty item exits the list")
+reset("1. one")
+QTest.keyClick(ed, Qt.Key.Key_Return)
+check(ed.toPlainText() == "1. one\n2. ", "Enter increments ordered lists")
+reset("> q")
+QTest.keyClick(ed, Qt.Key.Key_Return)
+check(ed.toPlainText() == "> q\n> ", "Enter continues a quote")
+reset("```\n- item")
+QTest.keyClick(ed, Qt.Key.Key_Return)
+check(ed.toPlainText() == "```\n- item\n", "no list continuation inside a fence")
+reset("- item")
+QTest.keyClick(ed, Qt.Key.Key_Return)
+ed.undo()
+check(ed.toPlainText() == "- item", "one undo reverts an Enter continuation")
+reset("a")
+QTest.keyClick(ed, Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
+check(window.buffer == "a\n", "Shift+Enter inserts a plain line break")
+
+# highlighting and underlines
+reset("# Title\n\ntext")
+check(any(f.foreground().color().name() == LIGHT["heading"] for f in block_formats(0)), "headings are colored")
+check(not any(f.underlineStyle() == WAVE for n in range(3) for f in block_formats(n)), "clean text has no underlines")
+reset("```python\nx = 1\n")
+check(has_wave(0, LIGHT["error"]), "unclosed fence gets a red wavy underline")
+check(ed.highlighter.message_at(1, 0) == "Unclosed fenced code block", "issue message available for the tooltip")
+reset("#Title")
+check(has_wave(0, LIGHT["warning"]), "heading without space gets an orange wavy underline")
+cursor = ed.textCursor()
+cursor.setPosition(1)
+cursor.insertText(" ")
+ed.highlighter.refresh_issues()
+check(not has_wave(0, LIGHT["warning"]), "fixing the line removes its underline")
+ed.set_theme("dark")
+reset("# T")
+check(
+    any(f.foreground().color().name() == editor_module.COLORS["dark"]["heading"] for f in block_formats(0)),
+    "dark theme recolors the editor",
+)
+ed.set_theme("light")
+FAKE["answer"] = S.Discard
+window.on_close()
+
 # --- Later tasks insert their checks directly above this line. ---
 
 shutil.rmtree(TMP, ignore_errors=True)
