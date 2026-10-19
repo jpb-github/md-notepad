@@ -8,6 +8,7 @@ _VALID_THEMES = ("system", "light", "dark")
 _ZOOM_MIN = 0.25
 _ZOOM_MAX = 3.0
 _WINDOW_KEYS = ("x", "y", "width", "height")
+MAX_RECENT = 10
 
 
 def default_path() -> Path:
@@ -17,7 +18,7 @@ def default_path() -> Path:
 
 
 def default_settings() -> dict:
-    return {"theme": "system", "window": None, "preview_zoom": 1.0}
+    return {"theme": "system", "window": None, "preview_zoom": 1.0, "recent_files": []}
 
 
 def _clean_window(value) -> dict | None:
@@ -27,6 +28,28 @@ def _clean_window(value) -> dict | None:
         if type(value.get(key)) is not int:
             return None
     return {key: value[key] for key in _WINDOW_KEYS}
+
+
+def _clean_recent(value) -> list[str]:
+    """Keep the first MAX_RECENT distinct, non-empty string paths."""
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    seen = set()
+    for item in value:
+        key = os.path.normcase(item) if isinstance(item, str) and item else None
+        if key is None or key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result[:MAX_RECENT]
+
+
+def add_recent(recent: list[str], path: str) -> list[str]:
+    """Return a new recent-files list with path first (paths compare like the OS does)."""
+    key = os.path.normcase(path)
+    rest = [item for item in recent if os.path.normcase(item) != key]
+    return [path, *rest][:MAX_RECENT]
 
 
 def _clean(data) -> dict:
@@ -41,6 +64,7 @@ def _clean(data) -> dict:
     zoom = data.get("preview_zoom")
     if isinstance(zoom, (int, float)) and not isinstance(zoom, bool):
         result["preview_zoom"] = float(min(max(zoom, _ZOOM_MIN), _ZOOM_MAX))
+    result["recent_files"] = _clean_recent(data.get("recent_files"))
     return result
 
 

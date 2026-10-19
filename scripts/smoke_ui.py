@@ -241,6 +241,7 @@ data = {
     "theme": "dark",
     "window": {"x": 100, "y": 120, "width": 640, "height": 480},
     "preview_zoom": 1.5,
+    "recent_files": [str(TMP / "r1.md"), str(TMP / "r2.md")],
 }
 restored = main_window.MainWindow(data)
 check(restored.settings_snapshot() == data, "settings snapshot round-trips constructor data")
@@ -693,6 +694,93 @@ check(restarted.act_theme_dark.isChecked() and restarted._effective_theme == "da
 check("#0d1117" in restarted.preview.last_html, "startup preview is already dark")
 check(heading_color(restarted) == editor_module.COLORS["dark"]["heading"], "startup editor is already dark")
 window.act_theme_system.trigger()  # back to light for any later checks
+
+# --- Open Recent (user-requested, between Tasks 13 and 14) -------------------------
+def recent_entries(win):
+    return [a for a in win.menu_recent.actions() if a.data()]
+
+
+def recent_paths(win) -> list[str]:
+    return [a.data() for a in recent_entries(win)]
+
+
+def abs_(path) -> str:
+    return os.path.abspath(str(path))
+
+
+gone = TMP / "gone.md"
+rw = main_window.MainWindow(
+    {"theme": "light", "window": None, "preview_zoom": 1.0, "recent_files": [abs_(gone), abs_(sample)]}
+)
+check(rw.menu_file.actions()[rw.menu_file.actions().index(rw.act_open) + 1].menu() is rw.menu_recent, "Open Recent sits right below Open")
+check(rw.menu_recent.title() == "Open &Recent", "submenu is titled Open Recent")
+check([a.text() for a in recent_entries(rw)] == ["&1 gone.md", "&2 sample.md"], "entries are numbered, newest first")
+check(recent_entries(rw)[1].toolTip() == abs_(sample), "tooltip shows the full path")
+check(rw.menu_recent.isEnabled(), "Open Recent enabled when there are entries")
+empty = main_window.MainWindow({"theme": "light", "window": None, "preview_zoom": 1.0})
+check(not empty.menu_recent.isEnabled(), "Open Recent disabled when empty")
+
+# opening records the file, de-duplicated, newest first
+rdoc = TMP / "a&b.md"
+rdoc.write_text("# R\n", encoding="utf-8")
+check(rw.open_file(str(rdoc)), "open a file with & in its name")
+check(recent_paths(rw) == [abs_(rdoc), abs_(gone), abs_(sample)], "opening a file puts it first")
+check(recent_entries(rw)[0].text() == "&1 a&&b.md", "& in a file name is escaped in the menu")
+check(rw.open_file(sample), "re-open sample")
+check(recent_paths(rw) == [abs_(sample), abs_(rdoc), abs_(gone)], "re-opening moves the entry to the front")
+check(rw.settings_snapshot()["recent_files"] == recent_paths(rw), "snapshot carries the recent list")
+
+# a failed open is not recorded
+ERRORS.clear()
+check(not rw.open_file(TMP / "never-existed.md"), "failed open returns False")
+check(abs_(TMP / "never-existed.md") not in recent_paths(rw), "failed open is not remembered")
+
+# clicking an entry opens it (through the unsaved-changes prompt)
+rw.act_edit.trigger()
+rw.editor.insertPlainText("dirty")
+FAKE["answer"] = S.Cancel
+ASKED.clear()
+recent_entries(rw)[1].trigger()
+check(len(ASKED) == 1 and rw.loaded_path == sample, "a dirty buffer is asked about before opening a recent file")
+FAKE["answer"] = S.Discard
+recent_entries(rw)[1].trigger()
+check(rw.loaded_path == rdoc and rw.mode == "preview", "clicking an entry opens it in preview")
+check(recent_paths(rw)[0] == abs_(rdoc), "the opened entry moves to the front")
+
+# a vanished file reports the error and drops its entry
+ERRORS.clear()
+entry = [a for a in recent_entries(rw) if a.data() == abs_(gone)][0]
+entry.trigger()
+check(len(ERRORS) == 1 and "File not found." in ERRORS[0], "a missing recent file shows the Notepad-style error")
+check(abs_(gone) not in recent_paths(rw), "a missing recent file is removed from the list")
+
+# Save As records the new path
+rw.on_new()
+rw.editor.insertPlainText("fresh")
+saved_as = TMP / "recent-saved.md"
+FAKE["save_path"] = str(saved_as)
+check(rw.on_save(), "Save As from Untitled")
+check(recent_paths(rw)[0] == abs_(saved_as), "a saved file is remembered")
+
+# capped at ten
+for i in range(12):
+    extra = TMP / f"extra{i}.md"
+    extra.write_text("x\n", encoding="utf-8")
+    FAKE["answer"] = S.Discard
+    rw.open_file(extra)
+check(len(recent_paths(rw)) == 10 and recent_paths(rw)[0] == abs_(TMP / "extra11.md"), "the list holds the ten newest files")
+
+# persisted and restored
+app_module.save_settings(rw)
+reloaded = main_window.MainWindow(settings.load())
+check(recent_paths(reloaded) == recent_paths(rw), "the recent list survives a restart")
+
+# Clear Recent Files
+clear_act = rw.menu_recent.actions()[-1]
+check(clear_act.text() == "&Clear Recent Files", "last item clears the list")
+clear_act.trigger()
+check(recent_paths(rw) == [] and not rw.menu_recent.isEnabled(), "Clear empties the list and disables the menu")
+check(rw.settings_snapshot()["recent_files"] == [], "the cleared list is what gets saved")
 
 # --- Later tasks insert their checks directly above this line. ---
 

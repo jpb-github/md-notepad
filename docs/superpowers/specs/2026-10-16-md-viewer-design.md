@@ -52,8 +52,8 @@ executable packaging (a PyInstaller note may be added to the README later).
 
 ### Menus and shortcuts
 
-- **File:** New (Ctrl+N), Open... (Ctrl+O), Save (Ctrl+S), Save As...
-  (Ctrl+Shift+S), Close (Ctrl+W), Exit (Alt+F4)
+- **File:** New (Ctrl+N), Open... (Ctrl+O), Open Recent (submenu), Save
+  (Ctrl+S), Save As... (Ctrl+Shift+S), Close (Ctrl+W), Exit (Alt+F4)
 - **Edit:** Undo (Ctrl+Z), Redo (Ctrl+Y), Cut (Ctrl+X), Copy (Ctrl+C),
   Paste (Ctrl+V), Find... (Ctrl+F), Replace... (Ctrl+H), Select All (Ctrl+A).
   Enabled only in edit mode, except Copy, which is also enabled in preview
@@ -66,6 +66,18 @@ executable packaging (a PyInstaller note may be added to the README later).
   - Theme submenu - checkable radio trio: **System (auto)** (default),
     **Light**, **Dark**.
 - **Help:** About
+
+### Open Recent
+
+- Submenu directly below Open...: up to 10 files, newest first, numbered
+  `&1`..`&9`, `1&0`; the tooltip shows the full path. Last item: Clear Recent
+  Files. The submenu is disabled while the list is empty.
+- A file enters the list (or moves to the front, no duplicates) when it is
+  opened successfully (any source) or saved. Failed opens are not recorded.
+- Choosing an entry behaves like Open...: it first offers the standard save
+  dialog for a dirty buffer. If the file no longer exists, the usual open error
+  is shown and the entry is removed.
+- The list persists as `recent_files` in `%APPDATA%\MDViewer\settings.json`.
 
 ### Theme menu behavior
 

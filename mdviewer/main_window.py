@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mdviewer.core import encoding, themeservice
+from mdviewer.core import encoding, settings, themeservice
 from mdviewer.core.filewatch import Watcher, WatchEvent
 from mdviewer.editor import MarkdownEditor
 from mdviewer.findbar import FindBar
@@ -165,6 +165,7 @@ class MainWindow(QMainWindow):
         self._busy = False  # a "File changed on disk" dialog is open
         self._zoom = float(data.get("preview_zoom") or 1.0)
         self._theme_choice = data.get("theme") or "system"
+        self._recent: list[str] = list(data.get("recent_files") or [])
         self._effective_theme = "light"  # Task 13 makes this follow System/Light/Dark
 
         self.editor = MarkdownEditor()
@@ -254,6 +255,8 @@ class MainWindow(QMainWindow):
         m = self.menu_file = bar.addMenu("&File")
         self.act_new = self._action(m, "&New", "Ctrl+N", self.on_new)
         self.act_open = self._action(m, "&Open...", "Ctrl+O", self.on_open)
+        self.menu_recent = m.addMenu("Open &Recent")
+        self.menu_recent.setToolTipsVisible(True)  # entries show the full path
         self.act_save = self._action(m, "&Save", "Ctrl+S", self.on_save)
         self.act_save_as = self._action(m, "Save &As...", "Ctrl+Shift+S", self.on_save_as)
         self.act_close = self._action(m, "&Close", "Ctrl+W", self.on_close)
@@ -308,6 +311,8 @@ class MainWindow(QMainWindow):
         m = self.menu_help = bar.addMenu("&Help")
         self._action(m, "&About MD Viewer", slot=self._show_about)
 
+        self._refresh_recent_menu()
+
         self._edit_only_actions = [
             self.act_undo, self.act_redo, self.act_cut, self.act_paste, self.act_select_all,
             self.act_find, self.act_replace,
@@ -324,6 +329,7 @@ class MainWindow(QMainWindow):
             show_error(self, _open_error_text(target, exc))
             return False
         self._load(target, raw)
+        self._remember_recent(target)
         self._show_mode(self.PREVIEW)
         return True
 
@@ -381,6 +387,7 @@ class MainWindow(QMainWindow):
         self.editor.document().setModified(False)
         self.dirty = False
         self._note_own_write(path)
+        self._remember_recent(path)
         self._update_chrome()
         return True
 
@@ -584,7 +591,44 @@ class MainWindow(QMainWindow):
             "theme": self._theme_choice,
             "window": {"x": pos.x(), "y": pos.y(), "width": size.width(), "height": size.height()},
             "preview_zoom": self._zoom,
+            "recent_files": list(self._recent),
         }
+
+    # --- Recent files --------------------------------------------------------
+
+    def _remember_recent(self, path) -> None:
+        self._recent = settings.add_recent(self._recent, os.path.abspath(str(path)))
+        self._refresh_recent_menu()
+
+    def _forget_recent(self, path: str) -> None:
+        key = os.path.normcase(path)
+        self._recent = [p for p in self._recent if os.path.normcase(p) != key]
+        self._refresh_recent_menu()
+
+    def _clear_recent(self) -> None:
+        self._recent = []
+        self._refresh_recent_menu()
+
+    def _refresh_recent_menu(self) -> None:
+        menu = self.menu_recent
+        menu.clear()
+        for number, path in enumerate(self._recent, start=1):
+            name = Path(path).name.replace("&", "&&")  # a lone & would become a mnemonic
+            prefix = f"&{number}" if number < 10 else f"{number // 10}&{number % 10}"
+            act = menu.addAction(f"{prefix} {name}")
+            act.setData(path)
+            act.setToolTip(path)
+            act.triggered.connect(lambda _checked=False, p=path: self._open_recent(p))
+        if self._recent:
+            menu.addSeparator()
+        menu.addAction("&Clear Recent Files", self._clear_recent)
+        menu.setEnabled(bool(self._recent))
+
+    def _open_recent(self, path: str) -> None:
+        if not self._ok_to_replace():
+            return
+        if not self.open_file(path) and not Path(path).exists():
+            self._forget_recent(path)  # the file is gone; don't keep offering it
 
     # --- File watching -------------------------------------------------------
 
