@@ -1,11 +1,14 @@
 """Main window: menus, mode switching, file operations, status bar."""
 
+import os
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QRect, QTimer
 from PySide6.QtGui import QActionGroup, QFont, QGuiApplication, QKeySequence
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QLabel,
     QMainWindow,
@@ -15,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from mdviewer.core import encoding
+from mdviewer.core.filewatch import Watcher, WatchEvent
 from mdviewer.editor import MarkdownEditor
 from mdviewer.preview import MarkdownPreview
 
@@ -24,6 +28,7 @@ ZOOM_MAX = 3.0
 ZOOM_STEP = 1.25
 DEFAULT_SIZE = (900, 700)
 WARNING_MS = 10000
+POLL_MS = 1000
 OPEN_FILTER = "Markdown (*.md *.markdown *.mdown *.txt);;All files (*)"
 SAVE_FILTER = "Markdown (*.md);;Text (*.txt);;All files (*)"
 ENCODING_LABELS = {
@@ -91,6 +96,9 @@ class MainWindow(QMainWindow):
         self.encoding = "utf-8"
         self.newline = "\n"
         self._size = 0
+        self._watcher: Watcher | None = None
+        self._pending_reload = False  # a preview re-read failed; retry on the next tick
+        self._busy = False  # a "File changed on disk" dialog is open
         self._zoom = float(data.get("preview_zoom") or 1.0)
         self._theme_choice = data.get("theme") or "system"
         self._effective_theme = "light"  # Task 13 makes this follow System/Light/Dark
@@ -128,6 +136,11 @@ class MainWindow(QMainWindow):
         self._restore_geometry(data.get("window"))
         self._update_chrome()
 
+        self._watch_timer = QTimer(self)
+        self._watch_timer.setInterval(POLL_MS)
+        self._watch_timer.timeout.connect(self._poll_disk)
+        self._watch_timer.start()
+
     # --- Buffer ------------------------------------------------------------
 
     @property
@@ -144,6 +157,7 @@ class MainWindow(QMainWindow):
         self.editor.setPlainText(text.replace("\r\n", "\n"))
         self.editor.document().setModified(False)
         self.dirty = False
+        self._watch(path)
 
     # --- Menus -------------------------------------------------------------
 
@@ -276,6 +290,7 @@ class MainWindow(QMainWindow):
         self._size = len(raw)
         self.editor.document().setModified(False)
         self.dirty = False
+        self._note_own_write(path)
         self._update_chrome()
         return True
 
@@ -480,3 +495,88 @@ class MainWindow(QMainWindow):
             "window": {"x": pos.x(), "y": pos.y(), "width": size.width(), "height": size.height()},
             "preview_zoom": self._zoom,
         }
+
+    # --- File watching -------------------------------------------------------
+
+    def _watch(self, path: Path | None) -> None:
+        self._pending_reload = False
+        self._watcher = Watcher(path, os.stat) if path is not None else None
+        if self._watcher is not None:
+            self._watcher.poll()  # baseline: the content we just loaded
+
+    def _note_own_write(self, path: Path) -> None:
+        """Expect the disk state our save produced so the next poll stays quiet."""
+        self._pending_reload = False
+        self._watcher = Watcher(path, os.stat)  # fresh: no stale "missing" state
+        try:
+            st = os.stat(path)
+        except OSError:
+            return  # first poll will baseline instead
+        self._watcher.note_write(st.st_mtime_ns, st.st_size)
+
+    def _read_disk(self) -> bytes | None:
+        try:
+            return self.loaded_path.read_bytes()
+        except OSError:
+            return None
+
+    def _poll_disk(self) -> None:
+        if self._watcher is None or self._busy or QApplication.activeModalWidget() is not None:
+            return  # unpolled changes are picked up on a later tick
+        event = self._watcher.poll()
+        if event == WatchEvent.MISSING:
+            self._warn(f'"{self.loaded_path.name}" was not found on disk.')
+        elif event == WatchEvent.CHANGED:
+            if self.mode == self.EDIT:
+                self._busy = True
+                try:
+                    self._ask_reload()
+                finally:
+                    self._busy = False
+            else:
+                self._reload_preview(warn=True)
+        elif self._pending_reload and self.mode == self.PREVIEW:
+            self._reload_preview(warn=False)
+
+    def _reload_preview(self, warn: bool) -> None:
+        raw = self._read_disk()
+        if raw is None:
+            self._pending_reload = True
+            if warn:
+                self._warn(f'Could not read "{self.loaded_path.name}"; showing the last version.')
+            return
+        self._load(self.loaded_path, raw)
+        self._render_preview(keep_scroll=True)
+        self._update_chrome()
+
+    def _ask_reload(self) -> None:
+        name = self.loaded_path.name
+        try:
+            stamp = datetime.fromtimestamp(os.stat(self.loaded_path).st_mtime)
+        except OSError:
+            stamp = datetime.now()
+        buttons = QMessageBox.StandardButton
+        box = QMessageBox(
+            QMessageBox.Icon.Warning,
+            "File changed on disk",
+            f'"{name}" was modified externally at {stamp:%H:%M:%S}. '
+            "Reload it now? Your unsaved changes will be lost.",
+            buttons.Yes | buttons.No,
+            self,
+        )
+        box.button(buttons.Yes).setText("Reload")
+        box.button(buttons.No).setText("Keep my version")
+        box.setDefaultButton(buttons.Yes)
+        if ask(box) != buttons.Yes:
+            self.editor.document().setModified(True)  # buffer now differs from disk
+            return
+        raw = self._read_disk()
+        if raw is None:
+            self._warn(f'Could not read "{name}"; your version is kept.')
+            return
+        position = self.editor.textCursor().position()
+        self._load(self.loaded_path, raw)
+        cursor = self.editor.textCursor()
+        cursor.setPosition(min(position, len(self.buffer)))
+        self.editor.setTextCursor(cursor)
+        self._update_chrome()

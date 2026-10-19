@@ -453,6 +453,120 @@ ed.set_theme("light")
 FAKE["answer"] = S.Discard
 window.on_close()
 
+# --- Task 11: file watching -----------------------------------------------------
+check(window._watch_timer.interval() == 1000 and window._watch_timer.isActive(), "watcher polls every 1000 ms")
+watched = TMP / "watched.md"
+watched.write_bytes(b"one\n")
+FAKE["answer"] = S.Discard
+window.open_file(watched)
+ASKED.clear()
+window._poll_disk()
+check(window.buffer == "one\n" and not ASKED, "unchanged file: nothing happens")
+
+# preview mode: silent re-render
+watched.write_bytes(b"two two\n")
+window._poll_disk()
+check(window.buffer == "two two\n" and "two two" in window.preview.last_html, "preview re-renders silently")
+check(not ASKED and not window.dirty, "silent re-render asks nothing")
+
+# own save is not an external change
+window.act_edit.trigger()
+window.editor.moveCursor(END)
+window.editor.insertPlainText("mine\n")
+check(window.on_save(), "save in edit mode")
+window._poll_disk()
+check(not ASKED, "own save does not trigger the dialog")
+
+# edit mode: dialog first, then Reload
+watched.write_bytes(b"external 1\n")
+FAKE["answer"] = S.Yes
+window._poll_disk()
+check(len(ASKED) == 1 and '"watched.md" was modified externally at' in ASKED[0], "edit mode asks before replacing")
+check(window.buffer == "external 1\n" and not window.dirty, "Reload loads the disk content")
+check(window.mode == "edit", "Reload stays in edit mode")
+
+# Keep my version
+ASKED.clear()
+watched.write_bytes(b"external 22\n")
+FAKE["answer"] = S.No
+window._poll_disk()
+check(len(ASKED) == 1 and window.buffer == "external 1\n", "Keep my version leaves the buffer")
+check(window.dirty and window.windowTitle().startswith("*"), "Keep my version marks the buffer unsaved")
+window._poll_disk()
+check(len(ASKED) == 1, "no repeat dialog without a new change")
+watched.write_bytes(b"external 333\n")
+window._poll_disk()
+check(len(ASKED) == 2, "the next external change asks again")
+
+# dialogs never stack
+ASKED.clear()
+
+
+def change_during_dialog():
+    watched.write_bytes(b"during the dialog\n")
+    window._poll_disk()
+
+
+FAKE["during_ask"] = change_during_dialog
+watched.write_bytes(b"external 4444\n")
+FAKE["answer"] = S.No
+window._poll_disk()
+check(len(ASKED) == 1, "polls while the dialog is open do not stack dialogs")
+FAKE["answer"] = S.Yes
+window._poll_disk()
+check(len(ASKED) == 2 and window.buffer == "during the dialog\n", "a change made during the dialog is picked up next")
+
+# missing file: one warning, then recovery
+window.act_preview.trigger()
+ASKED.clear()
+watched.unlink()
+window.statusBar().clearMessage()
+window._poll_disk()
+check("not found on disk" in window.statusBar().currentMessage(), "missing file warns")
+window.statusBar().clearMessage()
+window._poll_disk()
+check(window.statusBar().currentMessage() == "", "missing-file warning is shown once")
+watched.write_bytes(b"back again\n")
+window._poll_disk()
+check(window.buffer == "back again\n", "reappearing file re-renders")
+
+# Save recreates a deleted file without a false alarm
+window.act_edit.trigger()
+watched.unlink()
+window._poll_disk()
+window.editor.insertPlainText("x")
+check(window.on_save() and watched.exists(), "Save recreates a deleted file")
+window._poll_disk()
+check(not ASKED, "recreating save raises no change dialog")
+
+# preview read failure is retried on the next tick
+window.act_preview.trigger()
+window._read_disk = lambda: None
+watched.write_bytes(b"locked content!\n")
+window.statusBar().clearMessage()
+window._poll_disk()
+check("Could not read" in window.statusBar().currentMessage(), "read failure warns")
+check("locked content" not in window.preview.last_html, "read failure keeps the last render")
+del window._read_disk
+window._poll_disk()
+check(window.buffer == "locked content!\n", "the failed read is retried on the next tick")
+
+# Save As: the watcher follows the new path
+moved = TMP / "moved.md"
+FAKE["save_path"] = str(moved)
+check(window.on_save_as(), "Save As to a new path")
+watched.write_bytes(b"old path changed\n")
+window._poll_disk()
+check(window.loaded_path == moved and window.buffer == "locked content!\n", "old path is no longer watched")
+moved.write_bytes(b"new path changed\n")
+window._poll_disk()
+check(window.buffer == "new path changed\n", "watcher follows the Save As path")
+
+# Untitled: nothing to watch
+window.on_close()
+window._poll_disk()
+check(window._watcher is None, "no watcher for Untitled")
+
 # --- Later tasks insert their checks directly above this line. ---
 
 shutil.rmtree(TMP, ignore_errors=True)
