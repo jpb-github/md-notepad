@@ -1,0 +1,275 @@
+"""Headless UI smoke test for MD Viewer.
+
+Run: .venv\\Scripts\\python scripts\\smoke_ui.py  ->  prints SMOKE OK or the failed checks.
+Lives outside tests/ because tests/ must never import Qt.
+"""
+
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+TMP = Path(tempfile.mkdtemp(prefix="mdviewer-smoke-"))
+os.environ["APPDATA"] = str(TMP / "appdata")  # never touch the real settings.json
+
+from PySide6.QtGui import QCloseEvent, QTextCursor  # noqa: E402
+from PySide6.QtWidgets import QMessageBox, QPlainTextEdit  # noqa: E402
+
+from mdviewer import app as app_module  # noqa: E402
+from mdviewer import main_window  # noqa: E402
+from mdviewer.core import settings  # noqa: E402
+
+S = QMessageBox.StandardButton
+FAILURES: list[str] = []
+ERRORS: list[str] = []
+ASKED: list[str] = []
+FAKE = {"answer": S.Cancel, "open_path": "", "save_path": ""}
+
+
+def check(condition, label: str) -> None:
+    if not condition:
+        FAILURES.append(label)
+
+
+def fake_ask(box):
+    ASKED.append(box.text())
+    hook = FAKE.pop("during_ask", None)  # runs "while the dialog is open" (Task 11)
+    if hook:
+        hook()
+    return FAKE["answer"]
+
+
+main_window.ask = fake_ask
+main_window.show_error = lambda parent, text: ERRORS.append(text)
+main_window.pick_open_path = lambda parent: FAKE["open_path"]
+main_window.pick_save_path = lambda parent, start: FAKE["save_path"]
+
+qt_app, window = app_module.build([])
+END = QTextCursor.MoveOperation.End
+START = QTextCursor.MoveOperation.Start
+
+sample = TMP / "sample.md"
+sample.write_bytes("# Café\r\n\r\nline\u00a0two\r\n".encode("utf-8"))
+SAMPLE_TEXT = "# Café\n\nline\u00a0two\n"
+
+# --- Startup state ---------------------------------------------------------
+check(window.mode == "preview", "starts in preview mode")
+check(window.stack.currentIndex() == 0, "preview page shown at startup")
+check(window.windowTitle() == "Untitled - MD Viewer", "Untitled title at startup")
+
+# --- Menus and shortcuts (spec section 3) ----------------------------------
+check(
+    [a.text() for a in window.menuBar().actions()] == ["&File", "&Edit", "&View", "&Help"],
+    "menu bar is File / Edit / View / Help",
+)
+for act, keys in [
+    (window.act_new, "Ctrl+N"), (window.act_open, "Ctrl+O"),
+    (window.act_save, "Ctrl+S"), (window.act_save_as, "Ctrl+Shift+S"),
+    (window.act_close, "Ctrl+W"), (window.act_exit, "Alt+F4"),
+    (window.act_undo, "Ctrl+Z"), (window.act_redo, "Ctrl+Y"),
+    (window.act_cut, "Ctrl+X"), (window.act_copy, "Ctrl+C"),
+    (window.act_paste, "Ctrl+V"), (window.act_find, "Ctrl+F"),
+    (window.act_replace, "Ctrl+H"), (window.act_select_all, "Ctrl+A"),
+    (window.act_preview, "Ctrl+P"), (window.act_edit, "Ctrl+E"),
+    (window.act_zoom_in, "Ctrl+="), (window.act_zoom_out, "Ctrl+-"),
+    (window.act_zoom_reset, "Ctrl+0"),
+]:
+    check(act.shortcut().toString() == keys, f"{act.text()} shortcut is {keys}")
+check(window.act_copy.isEnabled(), "Copy enabled in preview mode")
+check(not window.act_paste.isEnabled(), "Paste disabled in preview mode")
+check(window.act_zoom_in.isEnabled(), "Zoom enabled in preview mode")
+check(window.act_wrap.isChecked(), "Word Wrap on by default")
+
+# --- Open: encoding, CRLF, NBSP, title, status bar --------------------------
+check(window.open_file(sample), "open_file returns True")
+check(window.buffer == SAMPLE_TEXT, "buffer uses \\n breaks and keeps NBSP")
+check(window.newline == "\r\n", "CRLF newline style detected")
+check(window.encoding == "utf-8", "UTF-8 detected")
+check(window.windowTitle() == "sample.md - MD Viewer", "title shows file name")
+check(window._left_label.text() == "Preview", "status left shows Preview")
+size = len(sample.read_bytes())
+check(window._right_label.text() == f"100% | UTF-8 | {size} B", "status right shows zoom, encoding, size")
+
+# --- Open failure keeps the current document --------------------------------
+ERRORS.clear()
+check(not window.open_file(TMP / "missing.md"), "missing file returns False")
+check(len(ERRORS) == 1 and "File not found." in ERRORS[0], "missing-file error uses Notepad wording")
+check(window.loaded_path == sample, "failed open keeps the current document")
+
+# --- Edit mode chrome -------------------------------------------------------
+window.act_edit.trigger()
+check(window.mode == "edit" and window.stack.currentIndex() == 1, "Edit Mode shows the editor page")
+check(window.act_undo.isEnabled() and window.act_paste.isEnabled(), "edit actions enabled in edit mode")
+check(window.act_copy.isEnabled(), "Copy enabled in edit mode")
+check(not window.act_zoom_in.isEnabled(), "Zoom disabled in edit mode")
+check(not window.act_find.isEnabled(), "Find stays disabled until Task 12")
+window.editor.moveCursor(START)
+check(window._left_label.text() == "Ln 1, Col 1", "status shows Ln 1, Col 1 at start")
+window.editor.moveCursor(END)
+check(window._left_label.text() == "Ln 4, Col 1", "status follows the cursor")
+
+# --- Dirty buffer, Edit -> Preview prompt: Cancel ---------------------------
+window.editor.insertPlainText("edited\n")
+check(window.dirty, "typing marks the buffer dirty")
+check(window.windowTitle() == "*sample.md - MD Viewer", "dirty title has * prefix")
+FAKE["answer"] = S.Cancel
+ASKED.clear()
+window.act_preview.trigger()
+check(ASKED == ["Save changes to sample.md?"], "Edit -> Preview asks to save")
+check(window.mode == "edit" and window.dirty, "Cancel stays in edit mode with edits")
+check(window.act_edit.isChecked() and not window.act_preview.isChecked(), "Cancel restores the Edit Mode radio")
+
+# --- Don't Save restores disk content ---------------------------------------
+FAKE["answer"] = S.Discard
+window.act_preview.trigger()
+check(window.mode == "preview" and window.stack.currentIndex() == 0, "Don't Save switches to preview")
+check(not window.dirty and window.buffer == SAMPLE_TEXT, "Don't Save restores the disk content")
+
+# --- Save keeps CRLF and NBSP -----------------------------------------------
+window.act_edit.trigger()
+window.editor.moveCursor(END)
+window.editor.insertPlainText("more\n")
+FAKE["answer"] = S.Save
+window.act_preview.trigger()
+check(
+    sample.read_bytes() == "# Café\r\n\r\nline\u00a0two\r\nmore\r\n".encode("utf-8"),
+    "save writes CRLF and NBSP exactly",
+)
+check(window.mode == "preview" and not window.dirty, "Save switches to preview and clears dirty")
+check(window.windowTitle() == "sample.md - MD Viewer", "title clean after save")
+
+# --- Unencodable text in a Windows-1252 file --------------------------------
+legacy = TMP / "legacy.md"
+legacy.write_bytes(b"caf\xe9\n")
+window.open_file(legacy)
+check(window.encoding == "windows-1252", "Windows-1252 detected")
+check("Windows-1252" in window._right_label.text(), "status shows Windows-1252")
+window.act_edit.trigger()
+window.editor.moveCursor(START)
+window.editor.insertPlainText("日本")
+FAKE["answer"] = S.Cancel
+check(not window.on_save(), "declined unencodable save returns False")
+check(legacy.read_bytes() == b"caf\xe9\n", "declined unencodable save leaves the file untouched")
+check(window.dirty, "declined unencodable save keeps the buffer dirty")
+FAKE["answer"] = S.Yes
+check(window.on_save(), "accepting the UTF-8 offer saves")
+check(legacy.read_bytes() == "日本café\n".encode("utf-8"), "file rewritten as UTF-8")
+check(window.encoding == "utf-8", "encoding switches to UTF-8 after the offer")
+
+# --- New / Save As on Untitled ----------------------------------------------
+window.on_new()
+check(window.mode == "edit" and window.stack.currentIndex() == 1, "New opens in edit mode")
+check(window.loaded_path is None and window.buffer == "", "New gives an empty Untitled buffer")
+check(window.windowTitle() == "Untitled - MD Viewer", "New shows Untitled title")
+window.editor.insertPlainText("hello")
+FAKE["save_path"] = ""
+check(not window.on_save(), "cancelled Save As returns False")
+check(window.dirty, "cancelled Save As keeps dirty")
+FAKE["save_path"] = str(TMP / "fresh")
+check(window.on_save(), "Save on Untitled acts as Save As")
+check((TMP / "fresh.md").read_bytes() == b"hello", "Save As appends .md and writes the buffer")
+check(window.windowTitle() == "fresh.md - MD Viewer", "title follows Save As path")
+
+# --- New while dirty: Cancel keeps the buffer -------------------------------
+window.editor.insertPlainText("!")
+FAKE["answer"] = S.Cancel
+window.on_new()
+check(window.loaded_path == TMP / "fresh.md" and window.dirty, "cancelled New keeps the buffer")
+
+# --- Open from edit mode lands in preview -----------------------------------
+FAKE["answer"] = S.Discard
+FAKE["open_path"] = str(sample)
+window.on_open()
+check(window.loaded_path == sample, "File > Open loads the picked file")
+check(window.mode == "preview" and window.stack.currentIndex() == 0, "open from edit mode shows preview")
+check(window.act_preview.isChecked(), "open from edit mode checks Preview Mode")
+
+# --- Drag-and-drop with a dirty buffer --------------------------------------
+window.act_edit.trigger()
+window.editor.insertPlainText("x")
+FAKE["answer"] = S.Cancel
+window._open_dropped([str(legacy)])
+check(window.loaded_path == sample and window.dirty, "cancelled drop keeps the document")
+FAKE["answer"] = S.Discard
+window._open_dropped([str(legacy)])
+check(window.loaded_path == legacy and window.mode == "preview", "drop opens the file in preview")
+
+# --- Window close with unsaved changes --------------------------------------
+window.act_edit.trigger()
+window.editor.insertPlainText("unsaved")
+FAKE["answer"] = S.Cancel
+event = QCloseEvent()
+window.closeEvent(event)
+check(not event.isAccepted(), "Cancel on close keeps the window open")
+FAKE["answer"] = S.Discard
+event = QCloseEvent()
+window.closeEvent(event)
+check(event.isAccepted(), "Don't Save on close lets the window close")
+
+# --- File > Close resets to a fresh state -----------------------------------
+window.on_close()  # still dirty: FAKE answer is Discard
+check(window.loaded_path is None and window.buffer == "", "Close empties the buffer")
+check(window.mode == "preview" and not window.dirty, "Close returns to clean preview")
+check(window.windowTitle() == "Untitled - MD Viewer", "Close shows Untitled title")
+
+# --- Zoom -------------------------------------------------------------------
+window._zoom_in()
+check(window._zoom == 1.25, "Zoom In multiplies by 1.25")
+check(window._left_label.text() == "Preview 125%", "status left shows zoom when not 100%")
+check(window._right_label.text().startswith("125% | "), "status right shows zoom")
+for _ in range(20):
+    window._zoom_in()
+check(window._zoom == 3.0, "zoom clamps at 300%")
+for _ in range(40):
+    window._zoom_out()
+check(window._zoom == 0.25, "zoom clamps at 25%")
+window._zoom_reset()
+check(window._zoom == 1.0 and window.preview.zoomFactor() == 1.0, "Zoom Reset returns to 100%")
+
+# --- Word Wrap --------------------------------------------------------------
+window.act_wrap.setChecked(False)
+check(window.editor.lineWrapMode() == QPlainTextEdit.LineWrapMode.NoWrap, "Word Wrap off")
+window.act_wrap.setChecked(True)
+check(window.editor.lineWrapMode() == QPlainTextEdit.LineWrapMode.WidgetWidth, "Word Wrap on")
+
+# --- Settings: geometry, zoom, theme ----------------------------------------
+data = {
+    "theme": "dark",
+    "window": {"x": 100, "y": 120, "width": 640, "height": 480},
+    "preview_zoom": 1.5,
+}
+restored = main_window.MainWindow(data)
+check(restored.settings_snapshot() == data, "settings snapshot round-trips constructor data")
+lost = main_window.MainWindow(
+    {"theme": "system", "window": {"x": -50000, "y": -50000, "width": 640, "height": 480}, "preview_zoom": 1.0}
+)
+check(lost.pos().x() > -50000, "off-screen geometry is not restored")
+app_module.save_settings(restored)
+check(settings.load() == data, "save_settings writes settings.json")
+original_save = settings.save
+
+
+def broken_save(path, data):
+    raise PermissionError("read-only")
+
+
+settings.save = broken_save
+try:
+    app_module.save_settings(restored)
+    survived = True
+except OSError:
+    survived = False
+settings.save = original_save
+check(survived, "save_settings swallows write errors on exit")
+
+# --- Later tasks insert their checks directly above this line. ---
+
+shutil.rmtree(TMP, ignore_errors=True)
+if FAILURES:
+    print("SMOKE FAILED:")
+    for label in FAILURES:
+        print(f"  - {label}")
+    sys.exit(1)
+print("SMOKE OK")
