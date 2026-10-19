@@ -36,6 +36,7 @@ mdviewer/
   preview.py               QWebEngineView wrapper (JS disabled, temp-file load)
   editor.py                QPlainTextEdit + highlighter + completer
   findbar.py               Find/Replace bar under the editor
+  preferences.py           Preferences dialog (theme, fixed-pitch editor font)
   core/                    Qt-free, unit-tested logic
     encoding.py            BOM/UTF-8/Windows-1252 detect + encode
     settings.py            %APPDATA%\MDViewer\settings.json
@@ -61,7 +62,7 @@ docs/superpowers/          spec and plan
   are UTF-16 units; Python offsets drift after emoji).
 - Every modal dialog goes through the seams in `mdviewer/main_window.py`
   (`ask`, `show_error`, `pick_open_path`, `pick_save_path`,
-  `read_system_theme`) so the smoke script can fake them.
+  `run_preferences`, `read_system_theme`) so the smoke script can fake them.
 - v1 non-goals (do not add): tabs/multiple documents, printing, cross-file
   search, default `.md` handler registration, WYSIWYG, custom CSS/themes,
   localization, executable packaging.

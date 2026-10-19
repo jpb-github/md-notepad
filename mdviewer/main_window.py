@@ -10,6 +10,7 @@ from PySide6.QtGui import QActionGroup, QColor, QFont, QGuiApplication, QKeySequ
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QFileDialog,
     QLabel,
     QMainWindow,
@@ -24,6 +25,7 @@ from mdviewer.core import encoding, settings, themeservice
 from mdviewer.core.filewatch import Watcher, WatchEvent
 from mdviewer.editor import MarkdownEditor
 from mdviewer.findbar import FindBar
+from mdviewer.preferences import PreferencesDialog
 from mdviewer.preview import MarkdownPreview
 
 APP_NAME = "MD Viewer"
@@ -34,7 +36,6 @@ DEFAULT_SIZE = (900, 700)
 WARNING_MS = 10000
 POLL_MS = 1000
 THEME_POLL_MS = 2000
-THEME_LABELS = (("system", "&System (auto)"), ("light", "&Light"), ("dark", "&Dark"))
 DARK_PALETTE_COLORS = {
     "window": "#202020",
     "window_text": "#f0f0f0",
@@ -83,6 +84,11 @@ def pick_open_path(parent) -> str:
 def pick_save_path(parent, start: str) -> str:
     path, _ = QFileDialog.getSaveFileName(parent, "Save As", start, SAVE_FILTER)
     return path
+
+
+def run_preferences(dialog) -> bool:
+    """Run the modal Preferences dialog; True when the user pressed OK."""
+    return dialog.exec() == QDialog.DialogCode.Accepted
 
 
 def read_system_theme() -> str:
@@ -166,12 +172,11 @@ class MainWindow(QMainWindow):
         self._zoom = float(data.get("preview_zoom") or 1.0)
         self._theme_choice = data.get("theme") or "system"
         self._recent: list[str] = list(data.get("recent_files") or [])
+        self._editor_font = {**settings.DEFAULT_FONT, **(data.get("editor_font") or {})}
         self._effective_theme = "light"  # Task 13 makes this follow System/Light/Dark
 
         self.editor = MarkdownEditor()
-        font = QFont("Consolas", 11)
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        self.editor.setFont(font)
+        self._apply_editor_font()
         self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
 
         self.preview = MarkdownPreview()
@@ -294,19 +299,7 @@ class MainWindow(QMainWindow):
         self.act_zoom_out = self._action(m, "Zoom &Out", "Ctrl+-", self._zoom_out)
         self.act_zoom_reset = self._action(m, "&Restore Default Zoom", "Ctrl+0", self._zoom_reset)
         m.addSeparator()
-        theme_menu = m.addMenu("&Theme")
-        self.theme_group = QActionGroup(self)
-        self._theme_actions = {}
-        for choice, label in THEME_LABELS:
-            act = self._action(
-                theme_menu, label, slot=lambda _checked=False, c=choice: self._set_theme_choice(c),
-                checkable=True,
-            )
-            self.theme_group.addAction(act)
-            self._theme_actions[choice] = act
-        self.act_theme_system = self._theme_actions["system"]
-        self.act_theme_light = self._theme_actions["light"]
-        self.act_theme_dark = self._theme_actions["dark"]
+        self.act_preferences = self._action(m, "Pre&ferences...", "Ctrl+,", self.on_preferences)
 
         m = self.menu_help = bar.addMenu("&Help")
         self._action(m, "&About MD Viewer", slot=self._show_about)
@@ -592,6 +585,7 @@ class MainWindow(QMainWindow):
             "window": {"x": pos.x(), "y": pos.y(), "width": size.width(), "height": size.height()},
             "preview_zoom": self._zoom,
             "recent_files": list(self._recent),
+            "editor_font": dict(self._editor_font),
         }
 
     # --- Recent files --------------------------------------------------------
@@ -715,11 +709,30 @@ class MainWindow(QMainWindow):
         self.editor.setTextCursor(cursor)
         self._update_chrome()
 
+    # --- Preferences -----------------------------------------------------------
+
+    def on_preferences(self) -> None:
+        dialog = PreferencesDialog(
+            self._theme_choice, self._editor_font["family"], self._editor_font["size"], self
+        )
+        if not run_preferences(dialog):
+            return
+        if dialog.theme_choice() != self._theme_choice:
+            self._set_theme_choice(dialog.theme_choice())
+        font = {"family": dialog.font_family(), "size": dialog.font_size()}
+        if font != self._editor_font:
+            self._editor_font = font
+            self._apply_editor_font()
+
+    def _apply_editor_font(self) -> None:
+        font = QFont(self._editor_font["family"], self._editor_font["size"])
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        self.editor.setFont(font)
+
     # --- Theme -----------------------------------------------------------------
 
     def _set_theme_choice(self, choice: str) -> None:
         self._theme_choice = choice
-        self._theme_actions[choice].setChecked(True)
         if choice == "system":
             self._theme_timer.start()
         else:

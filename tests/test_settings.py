@@ -9,6 +9,7 @@ def test_default_settings():
         "window": None,
         "preview_zoom": 1.0,
         "recent_files": [],
+        "editor_font": {"family": "Consolas", "size": 11},
     }
 
 
@@ -16,8 +17,10 @@ def test_default_settings_is_fresh_dict():
     first = settings.default_settings()
     first["theme"] = "dark"
     first["recent_files"].append("x.md")
+    first["editor_font"]["size"] = 99
     assert settings.default_settings()["theme"] == "system"
     assert settings.default_settings()["recent_files"] == []
+    assert settings.default_settings()["editor_font"]["size"] == 11
 
 
 def test_default_path_location():
@@ -38,6 +41,7 @@ def test_save_and_load_roundtrip(tmp_path):
         "window": {"x": 10, "y": 20, "width": 800, "height": 600},
         "preview_zoom": 1.5,
         "recent_files": ["C:/docs/a.md", "C:/docs/b.md"],
+        "editor_font": {"family": "Cascadia Mono", "size": 14},
     }
     settings.save(path, data)
     assert settings.load(path) == data
@@ -82,9 +86,50 @@ def test_load_bad_window_dropped(tmp_path):
 def test_load_unknown_keys_dropped(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text('{"theme": "light", "bogus": 1}', encoding="utf-8")
-    assert settings.load(path) == {
-        "theme": "light", "window": None, "preview_zoom": 1.0, "recent_files": [],
-    }
+    assert settings.load(path) == {**settings.default_settings(), "theme": "light"}
+
+
+def _font(tmp_path, raw):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"editor_font": raw}), encoding="utf-8")
+    return settings.load(path)["editor_font"]
+
+
+def test_load_editor_font_roundtrips_valid_values(tmp_path):
+    assert _font(tmp_path, {"family": "Courier New", "size": 9}) == {"family": "Courier New", "size": 9}
+
+
+def test_load_editor_font_must_be_a_dict(tmp_path):
+    assert _font(tmp_path, "Consolas") == settings.DEFAULT_FONT
+
+
+def test_load_editor_font_bad_family_falls_back(tmp_path):
+    assert _font(tmp_path, {"family": 7, "size": 12})["family"] == "Consolas"
+    assert _font(tmp_path, {"family": "   ", "size": 12})["family"] == "Consolas"
+    assert _font(tmp_path, {"family": "x" * 500, "size": 12})["family"] == "Consolas"
+
+
+def test_load_editor_font_family_is_trimmed(tmp_path):
+    assert _font(tmp_path, {"family": "  Lucida Console ", "size": 12})["family"] == "Lucida Console"
+
+
+def test_load_editor_font_size_clamped_and_typed(tmp_path):
+    assert _font(tmp_path, {"family": "A", "size": 1})["size"] == settings.FONT_SIZE_MIN
+    assert _font(tmp_path, {"family": "A", "size": 500})["size"] == settings.FONT_SIZE_MAX
+    assert _font(tmp_path, {"family": "A", "size": "big"})["size"] == 11
+    assert _font(tmp_path, {"family": "A", "size": True})["size"] == 11
+    assert _font(tmp_path, {"family": "A", "size": 12.7})["size"] == 12
+
+
+def test_load_editor_font_non_finite_size_does_not_crash(tmp_path):
+    for literal in ("NaN", "Infinity", "-Infinity"):
+        path = tmp_path / "settings.json"
+        path.write_text('{"editor_font": {"family": "A", "size": %s}}' % literal, encoding="utf-8")
+        assert settings.load(path)["editor_font"] == {"family": "A", "size": 11}
+
+
+def test_load_editor_font_unknown_keys_dropped(tmp_path):
+    assert _font(tmp_path, {"family": "A", "size": 10, "bold": True}) == {"family": "A", "size": 10}
 
 
 def test_load_recent_files_must_be_a_list(tmp_path):

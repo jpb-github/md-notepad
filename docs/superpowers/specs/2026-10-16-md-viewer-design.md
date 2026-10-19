@@ -63,8 +63,8 @@ executable packaging (a PyInstaller note may be added to the README later).
     Any opened file starts in Preview.
   - Word Wrap - checkable, default on, editor page only.
   - Zoom In (Ctrl+=), Zoom Out (Ctrl+-), Zoom Reset (Ctrl+0) - preview only.
-  - Theme submenu - checkable radio trio: **System (auto)** (default),
-    **Light**, **Dark**.
+  - Preferences... (Ctrl+,) - opens the Preferences dialog (theme and editor
+    font). Always enabled, in both modes.
 - **Help:** About
 
 ### Open Recent
@@ -79,15 +79,26 @@ executable packaging (a PyInstaller note may be added to the README later).
   is shown and the entry is removed.
 - The list persists as `recent_files` in `%APPDATA%\MDViewer\settings.json`.
 
-### Theme menu behavior
+### Preferences dialog
 
-- **System (auto):** follows the Windows theme via live registry polling
-  (section 6).
-- **Light / Dark:** forces the full app theme (Qt chrome palette + preview
-  CSS) regardless of the system theme; the system poll is ignored while a
-  forced choice is active.
-- The selection persists in `%APPDATA%\MDViewer\settings.json` (together
-  with window geometry and preview zoom) and is restored on startup.
+A modal dialog with OK / Cancel; nothing changes until OK, and Cancel
+discards every edit. It holds two groups:
+
+- **Theme** - radio trio (formerly the View > Theme submenu):
+  - **System (auto)** (default): follows the Windows theme via live registry
+    polling (section 6).
+  - **Light / Dark:** forces the full app theme (Qt chrome palette + preview
+    CSS) regardless of the system theme; the system poll is ignored while a
+    forced choice is active.
+- **Editor font** - a font list that offers **fixed-pitch fonts only**, a size
+  box (6-72 pt) and a sample line. Default Consolas 11. It applies to the
+  editor page only (the preview keeps its own CSS fonts) and takes effect
+  immediately on OK. If a hand-edited settings file names a font that is not
+  fixed-pitch or not installed, the editor still uses it, but the dialog shows
+  a listed fixed-pitch font instead.
+- Both choices persist in `%APPDATA%\MDViewer\settings.json` (as `theme` and
+  `editor_font`, together with window geometry, preview zoom and the recent
+  files) and are restored on startup.
 
 ### Title bar
 
@@ -104,8 +115,8 @@ executable packaging (a PyInstaller note may be added to the README later).
 
 ### Editor page
 
-- Monospace font (Consolas 11), word wrap on by default, no line numbers
-  (Notepad fidelity).
+- Monospace font (default Consolas 11, changeable in Preferences), word wrap
+  on by default, no line numbers (Notepad fidelity).
 - Cursor position drives the status bar Ln/Col.
 
 ### Find/Replace bar
@@ -231,7 +242,7 @@ highlighter model). Rule implementations live in Qt-free
 - **Theme source (System mode):** poll the registry key
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\AppsUseLightTheme`
   (DWORD: 1 = light, 0 = dark) every 2000 ms. The poll runs only while
-  View > Theme is **System (auto)**; a forced Light/Dark skips it.
+  the theme preference is **System (auto)**; a forced Light/Dark skips it.
 - Key missing or unreadable: assume light.
 - Effective theme change applies:
   - a light or dark `QPalette` to the whole app (chrome, editor, status bar),

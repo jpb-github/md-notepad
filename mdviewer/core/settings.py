@@ -1,6 +1,7 @@
 """Persistence for MD Viewer user settings (%APPDATA%\\MDViewer\\settings.json)."""
 
 import json
+import math
 import os
 from pathlib import Path
 
@@ -9,6 +10,10 @@ _ZOOM_MIN = 0.25
 _ZOOM_MAX = 3.0
 _WINDOW_KEYS = ("x", "y", "width", "height")
 MAX_RECENT = 10
+FONT_SIZE_MIN = 6
+FONT_SIZE_MAX = 72
+_FONT_FAMILY_MAX_LEN = 100
+DEFAULT_FONT = {"family": "Consolas", "size": 11}
 
 
 def default_path() -> Path:
@@ -18,7 +23,13 @@ def default_path() -> Path:
 
 
 def default_settings() -> dict:
-    return {"theme": "system", "window": None, "preview_zoom": 1.0, "recent_files": []}
+    return {
+        "theme": "system",
+        "window": None,
+        "preview_zoom": 1.0,
+        "recent_files": [],
+        "editor_font": dict(DEFAULT_FONT),
+    }
 
 
 def _clean_window(value) -> dict | None:
@@ -45,6 +56,20 @@ def _clean_recent(value) -> list[str]:
     return result[:MAX_RECENT]
 
 
+def _clean_font(value) -> dict:
+    """A {family, size} dict; anything unusable falls back to the default per field."""
+    font = dict(DEFAULT_FONT)
+    if not isinstance(value, dict):
+        return font
+    family = value.get("family")
+    if isinstance(family, str) and 0 < len(family.strip()) <= _FONT_FAMILY_MAX_LEN:
+        font["family"] = family.strip()
+    size = value.get("size")
+    if isinstance(size, (int, float)) and not isinstance(size, bool) and math.isfinite(size):
+        font["size"] = min(max(int(size), FONT_SIZE_MIN), FONT_SIZE_MAX)
+    return font
+
+
 def add_recent(recent: list[str], path: str) -> list[str]:
     """Return a new recent-files list with path first (paths compare like the OS does)."""
     key = os.path.normcase(path)
@@ -65,6 +90,7 @@ def _clean(data) -> dict:
     if isinstance(zoom, (int, float)) and not isinstance(zoom, bool):
         result["preview_zoom"] = float(min(max(zoom, _ZOOM_MIN), _ZOOM_MAX))
     result["recent_files"] = _clean_recent(data.get("recent_files"))
+    result["editor_font"] = _clean_font(data.get("editor_font"))
     return result
 
 

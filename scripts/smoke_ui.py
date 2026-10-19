@@ -13,6 +13,9 @@ from pathlib import Path
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 TMP = Path(tempfile.mkdtemp(prefix="mdviewer-smoke-"))
 os.environ["APPDATA"] = str(TMP / "appdata")  # never touch the real settings.json
+# The offscreen platform ships an empty font database; point it at the Windows fonts
+# so the Preferences font list (fixed-pitch filter) has something to filter.
+os.environ.setdefault("QT_QPA_FONTDIR", os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts"))
 
 from PySide6.QtGui import QCloseEvent, QTextCursor  # noqa: E402
 from PySide6.QtWidgets import QMessageBox, QPlainTextEdit  # noqa: E402
@@ -45,6 +48,21 @@ main_window.ask = fake_ask
 main_window.show_error = lambda parent, text: ERRORS.append(text)
 main_window.pick_open_path = lambda parent: FAKE["open_path"]
 main_window.pick_save_path = lambda parent, start: FAKE["save_path"]
+PREFS_DIALOGS: list = []
+
+
+def fake_prefs(dialog):
+    """Stand-in for the modal Preferences dialog. FAKE["prefs"] edits it, then 'OK'.
+
+    The hook may return False to cancel; no hook at all also cancels."""
+    PREFS_DIALOGS.append(dialog)
+    hook = FAKE.pop("prefs", None)
+    if hook is None:
+        return False
+    return hook(dialog) is not False
+
+
+main_window.run_preferences = fake_prefs
 FAKE["system_theme"] = "light"
 main_window.read_system_theme = lambda: FAKE["system_theme"]  # never read the real registry
 
@@ -242,6 +260,7 @@ data = {
     "window": {"x": 100, "y": 120, "width": 640, "height": 480},
     "preview_zoom": 1.5,
     "recent_files": [str(TMP / "r1.md"), str(TMP / "r2.md")],
+    "editor_font": {"family": "Courier New", "size": 14},
 }
 restored = main_window.MainWindow(data)
 check(restored.settings_snapshot() == data, "settings snapshot round-trips constructor data")
@@ -648,12 +667,14 @@ def heading_color(win) -> str:
     return win.editor.highlighter._formats["heading"].foreground().color().name()
 
 
+def choose_theme(choice: str) -> None:
+    """Pick a theme the way a user does: through the Preferences dialog, then OK."""
+    FAKE["prefs"] = lambda dialog: dialog.set_theme_choice(choice)
+    window.act_preferences.trigger()
+
+
 DARK_WINDOW = main_window.DARK_PALETTE_COLORS["window"]
-check(
-    [a.text() for a in window.theme_group.actions()] == ["&System (auto)", "&Light", "&Dark"],
-    "View > Theme offers System (auto) / Light / Dark",
-)
-check(window.act_theme_system.isChecked(), "System (auto) is the default")
+check(window._theme_choice == "system", "System (auto) is the default")
 check(window._theme_timer.isActive() and window._theme_timer.interval() == 2000, "System mode polls every 2000 ms")
 
 FAKE["answer"] = S.Discard
@@ -670,7 +691,7 @@ check(window.mode == "preview" and not window.dirty, "theme switch keeps mode an
 check(heading_color(window) == editor_module.COLORS["dark"]["heading"], "editor recolored for dark")
 sample.write_bytes(sample_before)
 
-window.act_theme_light.trigger()
+choose_theme("light")
 check(window._effective_theme == "light" and window_color() != DARK_WINDOW, "forced Light applies the light palette")
 check(not window._theme_timer.isActive(), "forced Light stops the system poll")
 FAKE["system_theme"] = "dark"
@@ -678,22 +699,22 @@ window._poll_theme()
 check(window._effective_theme == "light", "forced Light ignores the system theme")
 check(window.settings_snapshot()["theme"] == "light", "forced Light is saved")
 
-window.act_theme_dark.trigger()
+choose_theme("dark")
 check(window._effective_theme == "dark" and not window._theme_timer.isActive(), "forced Dark applies without polling")
 FAKE["system_theme"] = "light"
 window._poll_theme()
 check(window._effective_theme == "dark", "forced Dark ignores the system theme")
 
-window.act_theme_system.trigger()
+choose_theme("system")
 check(window._effective_theme == "light", "System (auto) applies the current system theme immediately")
 check(window._theme_timer.isActive(), "System (auto) restarts the poll")
 check(window.settings_snapshot()["theme"] == "system", "System (auto) is saved")
 
 restarted = main_window.MainWindow({"theme": "dark", "window": None, "preview_zoom": 1.0})
-check(restarted.act_theme_dark.isChecked() and restarted._effective_theme == "dark", "saved Dark is restored")
+check(restarted._theme_choice == "dark" and restarted._effective_theme == "dark", "saved Dark is restored")
 check("#0d1117" in restarted.preview.last_html, "startup preview is already dark")
 check(heading_color(restarted) == editor_module.COLORS["dark"]["heading"], "startup editor is already dark")
-window.act_theme_system.trigger()  # back to light for any later checks
+choose_theme("system")  # back to light for any later checks
 
 # --- Open Recent (user-requested, between Tasks 13 and 14) -------------------------
 def recent_entries(win):
@@ -781,6 +802,78 @@ check(clear_act.text() == "&Clear Recent Files", "last item clears the list")
 clear_act.trigger()
 check(recent_paths(rw) == [] and not rw.menu_recent.isEnabled(), "Clear empties the list and disables the menu")
 check(rw.settings_snapshot()["recent_files"] == [], "the cleared list is what gets saved")
+
+# --- Preferences dialog (user-requested, between Tasks 13 and 14) ----------------------
+from PySide6.QtGui import QFont, QFontDatabase  # noqa: E402
+
+check(not any(a.menu() for a in window.menu_view.actions()), "View no longer has a Theme submenu")
+check(window.act_preferences in window.menu_view.actions(), "Preferences is in the View menu")
+check(window.act_preferences.text() == "Pre&ferences...", "Preferences action text")
+check(window.act_preferences.shortcut().toString() == "Ctrl+,", "Preferences shortcut is Ctrl+,")
+check(window.act_preferences.isEnabled(), "Preferences enabled in preview mode")
+window.act_edit.trigger()
+check(window.act_preferences.isEnabled(), "Preferences enabled in edit mode")
+window.act_preview.trigger()
+
+seen: dict = {}
+
+
+def inspect(dialog):
+    seen["theme"] = dialog.theme_choice()
+    seen["family"] = dialog.font_family()
+    seen["size"] = dialog.font_size()
+    seen["entries"] = [dialog.font_box.itemText(i) for i in range(dialog.font_box.count())]
+    seen["labels"] = [b.text() for b in dialog.theme_buttons.values()]
+    return False  # Cancel
+
+
+FAKE["prefs"] = inspect
+before_font = window.editor.font()
+window.act_preferences.trigger()
+check(seen["theme"] == "system" and window._theme_choice == "system", "dialog opens on the current theme")
+check(seen["labels"] == ["&System (auto)", "&Light", "&Dark"], "dialog offers System (auto) / Light / Dark")
+check(seen["family"] == "Consolas" and seen["size"] == 11, "dialog opens on the current editor font")
+proportional = [f for f in QFontDatabase.families() if not QFontDatabase.isFixedPitch(f)]
+check(seen["entries"] and all(QFontDatabase.isFixedPitch(f) for f in seen["entries"]), "font list has only fixed-pitch fonts")
+check(proportional and not set(proportional) & set(seen["entries"]), "proportional fonts are not offered")
+check("Consolas" in seen["entries"] and "Courier New" in seen["entries"], "common fixed-pitch fonts are offered")
+check(window.editor.font() == before_font, "Cancel leaves the editor font alone")
+
+# OK applies and persists the font
+FAKE["prefs"] = lambda d: (d.font_box.setCurrentFont(QFont("Courier New")), d.size_box.setValue(15))
+window.act_preferences.trigger()
+check(window.editor.font().family() == "Courier New" and window.editor.font().pointSize() == 15, "OK applies the editor font")
+check(window.settings_snapshot()["editor_font"] == {"family": "Courier New", "size": 15}, "the font is saved")
+
+# changing the font in a dialog that is then cancelled changes nothing
+FAKE["prefs"] = lambda d: (d.size_box.setValue(30), False)[1]
+window.act_preferences.trigger()
+check(window.editor.font().pointSize() == 15, "a cancelled font change is discarded")
+
+# a font change does not disturb theme, mode, text or dirty state
+check(window._theme_choice == "system" and window.mode == "preview" and not window.dirty, "font change keeps theme, mode and dirty state")
+
+# restored at startup, and written by save_settings
+app_module.save_settings(window)
+font_restart = main_window.MainWindow(settings.load())
+check(font_restart.editor.font().family() == "Courier New" and font_restart.editor.font().pointSize() == 15, "the editor font survives a restart")
+
+# a saved proportional font is still applied at startup, and the dialog falls back to a listed one
+odd = main_window.MainWindow(
+    {"theme": "light", "window": None, "preview_zoom": 1.0, "editor_font": {"family": proportional[0], "size": 10}}
+)
+check(odd.editor.font().family() == proportional[0], "a hand-edited proportional font is still applied")
+FAKE["prefs"] = inspect
+odd.act_preferences.trigger()
+check(seen["family"] in seen["entries"], "the dialog never shows a font outside its fixed-pitch list")
+
+# size limits
+FAKE["prefs"] = inspect
+window.act_preferences.trigger()
+sizes = PREFS_DIALOGS[-1].size_box
+check((sizes.minimum(), sizes.maximum()) == (settings.FONT_SIZE_MIN, settings.FONT_SIZE_MAX), "size spin box uses the settings limits")
+choose_theme("system")
+check(window._theme_choice == "system", "theme choice still works after font changes")
 
 # --- Later tasks insert their checks directly above this line. ---
 
