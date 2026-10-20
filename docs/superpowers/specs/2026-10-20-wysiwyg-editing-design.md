@@ -265,7 +265,7 @@ channel signals):
 | `setDocument(json, keepScroll)` | Replace the document; new EditorState (empty undo history) |
 | `getDocument() -> json` | Return the current document (async callback in Python) |
 | `command(name, args)` | Run a toolbar/menu command, e.g. `("toggleMark", "strong")`, `("setBlock", {"type": "heading", "level": 2})`, `("insertTable", {"rows": 3, "cols": 3})` |
-| `setTheme(theme)` | Swap CSS variables and code-highlight variant, no reload |
+| `setTheme(css)` | Swap the theme stylesheet (`render.page_css(theme)`: CSS variables and code-highlight colors), no reload |
 | `focusBlock(index)` | Place caret at the start of top-level block `index` |
 
 JS -> Python (`Bridge` signals/slots):
@@ -372,7 +372,7 @@ kept byte-exact as
 
 ### 6.7 Theming and zoom
 
-A theme change (`light`, `dark` or `gray`, v1.1) calls `setTheme(theme)`:
+A theme change (`light`, `dark` or `gray`, v1.1) calls `setTheme(render.page_css(theme))`:
 the page's theme stylesheet (CSS variables plus the theme's Pygments style
 from `render.page_css`) is swapped in place. No reload, and code-block
 markup is unchanged. Zoom

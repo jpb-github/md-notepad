@@ -9,6 +9,7 @@ Run it after every scripts/build_web.py.
 import base64
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -16,6 +17,7 @@ import time
 from pathlib import Path
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
+os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")  # the view is shown: no GPU log noise
 
 from PySide6.QtCore import QEventLoop, QObject, QUrl, Slot  # noqa: E402
 from PySide6.QtWebChannel import QWebChannel  # noqa: E402
@@ -41,22 +43,68 @@ def check(condition, label: str) -> None:
 
 
 class Bridge(QObject):
+    """Stands in for richview.Bridge: records every call from the page as [name, *args]."""
+
     def __init__(self):
         super().__init__()
-        self.ready_calls = 0
+        self.calls: list[list] = []
+
+    def args(self, name: str, start: int = 0) -> list:
+        """Argument lists of the calls to `name` from index `start` of `calls` on."""
+        return [call[1:] for call in self.calls[start:] if call[0] == name]
 
     @Slot()
     def ready(self) -> None:
-        self.ready_calls += 1
+        self.calls.append(["ready"])
+
+    @Slot()
+    def changed(self) -> None:
+        self.calls.append(["changed"])
+
+    @Slot("QVariantMap")
+    def selectionState(self, state: dict) -> None:
+        self.calls.append(["selectionState", state])
+
+    @Slot(str, str)
+    def requestLinkDialog(self, text: str, href: str) -> None:
+        self.calls.append(["requestLinkDialog", text, href])
+
+    @Slot()
+    def requestImageDialog(self) -> None:
+        self.calls.append(["requestImageDialog"])
+
+    @Slot(str)
+    def openLink(self, href: str) -> None:
+        self.calls.append(["openLink", href])
+
+    @Slot(str)
+    def hoverLink(self, href: str) -> None:
+        self.calls.append(["hoverLink", href])
+
+    @Slot(int)
+    def editProtected(self, index: int) -> None:
+        self.calls.append(["editProtected", index])
+
+    @Slot(int)
+    def caretBlock(self, index: int) -> None:
+        self.calls.append(["caretBlock", index])
 
 
 class Page(QWebEnginePage):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.console: list[str] = []
+        self.page_url = QUrl()
+        self.navigations: list[str] = []  # main-frame navigations away from the page, all refused
 
     def javaScriptConsoleMessage(self, level, message, line, source) -> None:
         self.console.append(message)
+
+    def acceptNavigationRequest(self, url, nav_type, is_main_frame) -> bool:
+        if is_main_frame and url != self.page_url:
+            self.navigations.append(url.toString())
+            return False
+        return True
 
 
 def pump(app: QApplication, predicate, timeout_s: float) -> bool:
@@ -67,9 +115,9 @@ def pump(app: QApplication, predicate, timeout_s: float) -> bool:
 
 
 def run_js(app: QApplication, view: QWebEngineView, script: str):
-    """Evaluates `script` in the page's main world; the value must be JSON-serializable."""
+    """Evaluates `script` in the page's main world; the value must be JSON-serializable (undefined -> None)."""
     box: list = []
-    view.page().runJavaScript(f"JSON.stringify({script})", 0, box.append)
+    view.page().runJavaScript(f"JSON.stringify(({script}) ?? null)", 0, box.append)
     pump(app, lambda: box, 3)
     return json.loads(box[0]) if box and box[0] is not None else None
 
@@ -193,18 +241,6 @@ def every_node_doc() -> dict:
     ]}
 
 
-def without_cell_extras(node):
-    """`node` without prosemirror-tables' cell attrs (Task 9's getDocument removes them itself)."""
-    if isinstance(node, list):
-        return [without_cell_extras(child) for child in node]
-    if not isinstance(node, dict):
-        return node
-    copy = {key: without_cell_extras(value) for key, value in node.items()}
-    if copy.get("type") in ("table_header", "table_cell"):
-        copy["attrs"] = {key: value for key, value in copy["attrs"].items() if key not in CELL_EXTRAS}
-    return copy
-
-
 def without_lines_and_highlight(node):
     """`node` as a paste rebuilds it: no source lines, no precomputed highlight."""
     if isinstance(node, list):
@@ -245,7 +281,7 @@ def set_doc(app: QApplication, view: QWebEngineView, doc: dict) -> None:
 
 
 def get_doc(app: QApplication, view: QWebEngineView):
-    return without_cell_extras(run_js(app, view, "window.mdEditor.getDocument()"))
+    return run_js(app, view, "window.mdEditor.getDocument()")
 
 
 def code_block_state(app: QApplication, view: QWebEngineView) -> dict:
@@ -262,7 +298,7 @@ def code_block_state(app: QApplication, view: QWebEngineView) -> dict:
     }})()""")
 
 
-def check_editor(app: QApplication, view: QWebEngineView, folder: Path) -> None:
+def check_editor(app: QApplication, view: QWebEngineView, folder: Path, bridge: Bridge) -> None:
     if not run_js(app, view, "Boolean(window.mdEditor && window.mdEditor.schema && window.mdEditor.setDocument)"):
         check(False, "window.mdEditor exposes schema and setDocument")
         return
@@ -272,10 +308,12 @@ def check_editor(app: QApplication, view: QWebEngineView, folder: Path) -> None:
 
     run_js(app, view, "(window.frameMessages = [], addEventListener('message', (e) => frameMessages.push(e.data)), 0)")
     doc = every_node_doc()
-    check(docschema.validate(without_cell_extras(doc)) == [], "the every-node document is valid in Python")
+    check(docschema.validate(doc) == [], "the every-node document is valid in Python")
+    mark = len(bridge.calls)
     set_doc(app, view, doc)
     check(get_doc(app, view) == doc, "every node type comes back unchanged from setDocument/getDocument")
-    check(run_js(app, view, "window.mdEditor.events.length") == 0, "loading a document sends no events")
+    pump(app, lambda: False, 0.3)  # a change report would arrive by now
+    check(bridge.args("changed", mark) == [], "loading a document does not report a change")
 
     # Code block: highlight overlay while the caret is elsewhere, plain text inside, cleared on edit.
     state = code_block_state(app, view)
@@ -350,15 +388,16 @@ def check_editor(app: QApplication, view: QWebEngineView, folder: Path) -> None:
           "raw HTML never enters the editor DOM")
 
     # Double-click on protected nodes reports the top-level block index.
+    mark = len(bridge.calls)
     run_js(app, view, """(() => {
       const hit = (selector) => document.querySelector('#editor ' + selector)
         .dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
       ['.md-front-matter', '.md-html-inline', '.md-html-block .md-shield', '.md-footnote-def'].forEach(hit);
       return 0;
     })()""")
-    events = run_js(app, view, "window.mdEditor.events")
-    check(events == [["editProtected", 0], ["editProtected", 2], ["editProtected", 10], ["editProtected", 12]],
-          f"double-click on protected nodes ({events})")
+    pump(app, lambda: len(bridge.args("editProtected", mark)) >= 4, 3)
+    events = bridge.args("editProtected", mark)
+    check(events == [[0], [2], [10], [12]], f"double-click on protected nodes calls bridge.editProtected ({events})")
 
     # Copy and paste inside the editor keeps every node (front matter aside: it is only valid first).
     body = {"type": "doc", "content": doc["content"][1:]}
@@ -400,6 +439,194 @@ def check_editor(app: QApplication, view: QWebEngineView, folder: Path) -> None:
     ], f"pasted HTML: unsafe URLs dropped, task box, code language and cell align kept ({pasted})")
 
 
+# --- Task 9: bridge and document lifecycle ---------------------------------------------------
+
+LINK_HREF = "https://example.com/a?b=1"
+# Positions in bridge_doc(): inside "plain ", inside "bold", inside "link", inside the code.
+PLAIN, BOLD, LINK, CODE = 9, 16, 21, 26
+TABLE_INDEX, RULE_INDEX = 3, 4
+NO_UNDO = {"undo": False, "redo": False}
+# Defines select(from, to = from); needs window.TextSelection (set by check_bridge).
+SELECT_JS = """(window.select = (from, to = from) => {
+  const view = window.mdEditor.view;
+  view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, from, to)));
+  return 0;
+}, 0)"""
+
+
+def bridge_doc() -> dict:
+    """Heading, marked text and a link, code, a table, a rule and raw HTML."""
+    def text(value, *marks):
+        node = {"type": "text", "text": value}
+        if marks:
+            node["marks"] = list(marks)
+        return node
+
+    link = {"type": "link", "attrs": {"href": LINK_HREF, "title": None}}
+    return {"type": "doc", "content": [
+        {"type": "heading", "attrs": {"level": 2, "line": 1}, "content": [text("Title")]},
+        {"type": "paragraph", "attrs": {"line": 3}, "content": [
+            text("plain "), text("bold", {"type": "strong"}, {"type": "em"}), text(" "), text("link", link),
+        ]},
+        {"type": "code_block", "attrs": {"language": "", "highlight": "", "line": 5}, "content": [text("x = 1")]},
+        {"type": "table", "attrs": {"line": 9}, "content": [{"type": "table_row", "content": [
+            {"type": "table_header", "attrs": {"align": None}, "content": [text("h")]},
+        ]}]},
+        {"type": "horizontal_rule", "attrs": {"line": 12}},
+        {"type": "html_block", "attrs": {"source": "<p>raw</p>", "line": 14}},
+    ]}
+
+
+def latest_state(app: QApplication, bridge: Bridge) -> dict | None:
+    """The last selectionState sent, once the throttle has flushed."""
+    pump(app, lambda: False, 0.2)
+    states = bridge.args("selectionState")
+    return states[-1][0] if states else None
+
+
+def mouse(selector: str, kind: str, ctrl: bool = False) -> str:
+    return (f"(document.querySelector({json.dumps(selector)}).dispatchEvent(new MouseEvent({json.dumps(kind)}, "
+            f"{{ bubbles: true, cancelable: true, button: 0, ctrlKey: {json.dumps(ctrl)} }})), 0)")
+
+
+def js_calls() -> list[str]:
+    """The CALLS list of web-src/src/bridge.js: every call the page makes on the Bridge."""
+    source = (WEB.parent.parent / "web-src" / "src" / "bridge.js").read_text(encoding="utf-8")
+    match = re.search(r"^export const CALLS = (\[.*?^\]);$", source, flags=re.S | re.M)
+    return json.loads(match.group(1)) if match else []
+
+
+def check_bridge(app: QApplication, view: QWebEngineView, page: Page, bridge: Bridge) -> None:
+    if not run_js(app, view, "typeof window.mdEditor?.command === 'function'"):
+        check(False, "window.mdEditor exposes command and setTheme")
+        return
+    meta = Bridge.staticMetaObject
+    slots = {bytes(meta.method(i).name()).decode() for i in range(meta.methodOffset(), meta.methodCount())}
+    check(js_calls() and set(js_calls()) <= slots, f"the Bridge has a slot for every call in bridge.js ({slots})")
+    doc = bridge_doc()
+    check(docschema.validate(doc) == [], "the bridge document is valid in Python")
+    mark = len(bridge.calls)
+    set_doc(app, view, doc)
+    pump(app, lambda: False, 0.2)
+    calls = bridge.calls[mark:]
+    check(calls == [["caretBlock", 0],
+                    ["selectionState", {"marks": [], "block": {"type": "heading", "level": 2}, "can": NO_UNDO}]],
+          f"setDocument reports the caret block and the selection state, nothing else ({calls})")
+    get_doc(app, view)
+    check(run_js(app, view, "window.mdEditor.view.state.doc.child(3).child(0).child(0).attrs.colspan") == 1,
+          "getDocument leaves the live table cell attrs alone")
+
+    # Selection state: at most one report per 50 ms, with the latest state; caretBlock at once.
+    run_js(app, view, "(window.mdEditor.focusBlock(0), "
+                      "window.TextSelection = window.mdEditor.view.state.selection.constructor, 0)")
+    run_js(app, view, SELECT_JS)
+    pump(app, lambda: False, 0.2)
+    mark = len(bridge.calls)
+    run_js(app, view, f"(select({PLAIN}), select({CODE}), select(3), select({BOLD}), 0)")
+    pump(app, lambda: False, 0.2)
+    states = bridge.args("selectionState", mark)
+    check(bridge.args("caretBlock", mark) == [[1], [2], [0], [1]], "caretBlock follows every block change at once")
+    check(states == [[{"marks": ["strong", "em"], "block": {"type": "paragraph"}, "can": NO_UNDO}]],
+          f"four quick selection changes send one selectionState with the last one ({states})")
+    expected = {
+        f"select({PLAIN})": ([], {"type": "paragraph"}),
+        f"select({LINK})": (["link"], {"type": "paragraph"}),
+        f"select({PLAIN}, {LINK})": (["strong", "em", "link"], {"type": "paragraph"}),
+        f"select({CODE})": ([], {"type": "code_block"}),
+        f"window.mdEditor.focusBlock({TABLE_INDEX})": ([], {"type": "table_header"}),
+        f"window.mdEditor.focusBlock({RULE_INDEX})": ([], None),
+    }
+    for script, (marks, block) in expected.items():
+        run_js(app, view, f"({script}, 0)")
+        state = latest_state(app, bridge)
+        check(state == {"marks": marks, "block": block, "can": NO_UNDO}, f"selectionState after {script} ({state})")
+    check(bridge.args("changed", mark) == [], "selection changes do not report a change")
+
+    # changed: once per load. Undo history: per load, through command().
+    mark = len(bridge.calls)
+    run_js(app, view, f"""(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('A', {PLAIN})),
+        window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('B', {PLAIN})), 0)""")
+    state = latest_state(app, bridge)
+    check(bridge.args("changed", mark) == [[]], "two edits after a load report changed once")
+    check(state and state["can"] == {"undo": True, "redo": False}, f"an edit can be undone ({state})")
+    check(run_js(app, view, "window.mdEditor.command('undo')") is True and get_doc(app, view) == doc,
+          "command('undo') restores the loaded document")
+    state = latest_state(app, bridge)
+    check(state and state["can"] == {"undo": False, "redo": True}, f"an undone edit can be redone ({state})")
+    check(run_js(app, view, "window.mdEditor.command('redo')") is True
+          and get_doc(app, view)["content"][1]["content"][0]["text"] == "pBAlain ",
+          "command('redo') reapplies the edit")
+    check(run_js(app, view, "window.mdEditor.command('noSuchCommand')") is False, "an unknown command returns false")
+    check(any("unknown command noSuchCommand" in message for message in page.console),
+          "an unknown command logs a warning")
+    set_doc(app, view, doc)
+    check(run_js(app, view, "window.mdEditor.command('undo')") is False, "setDocument starts a new undo history")
+    state = latest_state(app, bridge)
+    check(state and state["can"] == NO_UNDO, f"after setDocument nothing can be undone ({state})")
+    mark = len(bridge.calls)
+    run_js(app, view, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('C', {PLAIN})), 0)")
+    pump(app, lambda: bridge.args("changed", mark), 3)
+    check(bridge.args("changed", mark) == [[]], "the first edit after another load reports changed again")
+
+    # setTheme: swaps the theme stylesheet and the raw HTML frame colors, without a reload.
+    set_doc(app, view, doc)
+    frame_fg = """(() => {
+      const fg = getComputedStyle(document.documentElement).getPropertyValue('--fg').trim();
+      return document.querySelector('#editor .md-html-block iframe').srcdoc.includes('color:' + fg);
+    })()"""
+    light_fg = run_js(app, view, "getComputedStyle(document.documentElement).getPropertyValue('--fg').trim()")
+    check(run_js(app, view, frame_fg) is True, "the raw HTML frame uses the page's text color")
+    run_js(app, view, "(window.notReloaded = true, 0)")
+    pump(app, lambda: False, 0.2)
+    mark = len(bridge.calls)
+    run_js(app, view, f"(window.mdEditor.setTheme({json.dumps(render.page_css('dark'))}), 0)")
+    pump(app, lambda: False, 0.2)
+    background = run_js(app, view, "getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()")
+    dark_fg = run_js(app, view, "getComputedStyle(document.documentElement).getPropertyValue('--fg').trim()")
+    check((background or "").lower() == render.PAGE_BACKGROUND["dark"].lower()
+          and run_js(app, view, "window.notReloaded") is True,
+          f"setTheme swaps the theme CSS without reloading (--bg = {background!r})")
+    check(dark_fg != light_fg and run_js(app, view, frame_fg) is True, "setTheme refreshes the raw HTML frames")
+    check(bridge.calls[mark:] == [] and get_doc(app, view) == doc, "setTheme leaves the document alone")
+    run_js(app, view, f"(window.mdEditor.setTheme({json.dumps(render.page_css('light'))}), 0)")
+
+    # Links: hover shows the href; Ctrl+click opens it; a plain click never navigates.
+    mark = len(bridge.calls)
+    for script in (mouse("#editor a", "mouseover"), mouse("#editor a", "mouseover"),
+                   mouse("#editor h2", "mouseover"), mouse("#editor a", "mouseover")):
+        run_js(app, view, script)
+    run_js(app, view, "(document.querySelector('#editor .ProseMirror').dispatchEvent(new MouseEvent('mouseleave')), 0)")
+    pump(app, lambda: len(bridge.args("hoverLink", mark)) >= 4, 3)
+    hovers = bridge.args("hoverLink", mark)
+    check(hovers == [[LINK_HREF], [""], [LINK_HREF], [""]], f"hovering links reports their href ({hovers})")
+    for script in (mouse("#editor a", "mousedown"), mouse("#editor a", "click"),
+                   mouse("#editor a", "mousedown", ctrl=True), mouse("#editor a", "click", ctrl=True)):
+        run_js(app, view, script)
+    pump(app, lambda: bridge.args("openLink", mark), 3)
+    pump(app, lambda: False, 0.3)  # a navigation would be requested by now
+    check(bridge.args("openLink", mark) == [[LINK_HREF]], f"only Ctrl+click opens a link ({bridge.calls[mark:]})")
+    check(page.navigations == [], f"clicking a link never navigates the page ({page.navigations})")
+    run_js(app, view, mouse("#editor a", "mouseover"))
+    mark = len(bridge.calls)
+    set_doc(app, view, doc)
+    pump(app, lambda: bridge.args("hoverLink", mark), 3)
+    check(bridge.args("hoverLink", mark) == [[""]], "setDocument clears the hovered link")
+
+    # keepScroll: an external reload keeps the scroll offset; other loads scroll to the top.
+    long_doc = {"type": "doc", "content": [
+        {"type": "paragraph", "attrs": {"line": None}, "content": [{"type": "text", "text": f"paragraph {i}"}]}
+        for i in range(200)
+    ]}
+    set_doc(app, view, long_doc)
+    scroll_top = "document.scrollingElement.scrollTop"
+    run_js(app, view, f"({scroll_top} = 600, 0)")
+    check(run_js(app, view, scroll_top) == 600, "the long document scrolls")
+    run_js(app, view, f"(window.mdEditor.setDocument({json.dumps(long_doc)}, true), 0)")
+    check(run_js(app, view, scroll_top) == 600, "setDocument(doc, true) keeps the scroll offset")
+    run_js(app, view, f"(window.mdEditor.setDocument({json.dumps(long_doc)}, false), 0)")
+    check(run_js(app, view, scroll_top) == 0, "setDocument(doc, false) scrolls to the top")
+
+
 def main() -> int:
     app = QApplication([])
     folder = Path(tempfile.mkdtemp(prefix="mdviewer-webcheck-"))
@@ -411,10 +638,14 @@ def main() -> int:
     channel.registerObject("bridge", bridge)
     page.setWebChannel(channel)
 
-    view.load(QUrl.fromLocalFile(str(build_page(folder))))
-    check(pump(app, lambda: bridge.ready_calls > 0, READY_TIMEOUT_S), "bridge.ready() received within 5 s")
+    # Shown like the app's view: Chromium throttles the timers of hidden pages to one per second.
+    view.resize(900, 700)
+    view.show()
+    page.page_url = QUrl.fromLocalFile(str(build_page(folder)))
+    view.load(page.page_url)
+    check(pump(app, lambda: bridge.args("ready"), READY_TIMEOUT_S), "bridge.ready() received within 5 s")
     pump(app, lambda: False, 0.3)  # a duplicate ready() would arrive by now
-    check(bridge.ready_calls == 1, f"ready() called exactly once (got {bridge.ready_calls})")
+    check(bridge.calls == [["ready"]], f"ready() is the first and only call after loading ({bridge.calls})")
 
     check(run_js(app, view, "window.inlineScriptRan === true") is False, "CSP blocks the inline <script>")
     check(
@@ -437,7 +668,8 @@ def main() -> int:
     )
     doc = run_js(app, view, "window.mdEditor.getDocument()")
     check(isinstance(doc, dict) and doc.get("type") == "doc", f"mdEditor.getDocument() returns a doc ({doc!r})")
-    check_editor(app, view, folder)
+    check_editor(app, view, folder, bridge)
+    check_bridge(app, view, page, bridge)
 
     console = list(page.console)
     del page, view  # the page is the view's child; release both before removing the folder

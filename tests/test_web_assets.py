@@ -76,3 +76,13 @@ def test_code_block_languages_match_the_source_editor():
     match = re.search(r"^export const FENCE_LANGUAGES = (\[.*?^\]);$", source, flags=re.S | re.M)
     assert match, "nodeviews.js has no 'export const FENCE_LANGUAGES = [...];' block"
     assert json.loads(match.group(1)) == list(FENCE_LANGUAGES)
+
+
+def test_bridge_calls_match_the_spec():
+    source = (ROOT / "web-src" / "src" / "bridge.js").read_text(encoding="utf-8")
+    match = re.search(r"^export const CALLS = (\[.*?^\]);$", source, flags=re.S | re.M)
+    assert match, "bridge.js has no 'export const CALLS = [...];' block"
+    assert json.loads(match.group(1)) == [
+        "ready", "changed", "selectionState", "requestLinkDialog", "requestImageDialog",
+        "openLink", "hoverLink", "editProtected", "caretBlock",
+    ]
