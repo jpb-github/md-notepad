@@ -844,7 +844,7 @@ written into this plan (56 passed).
     every corpus document. Task 8 parses `web-src/src/schema.js` and compares
     its names and attrs with these tables (`line` excluded).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_docschema.py`:
 
@@ -1214,12 +1214,12 @@ def test_reports_every_problem_in_document_order():
     ]
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_docschema.py -v`
 Expected: collection error, `ModuleNotFoundError: No module named 'mdviewer.core.docschema'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `mdviewer/core/docschema.py`:
 
@@ -1436,12 +1436,12 @@ def _check_content(node: dict, name: str, path: str, problems: list[str]) -> Non
         _check_node(child, child_path, name, problems)
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_docschema.py -v`
 Expected: 56 passed.
 
-- [ ] **Step 5: Run the full suite and the Qt-import check**
+- [x] **Step 5: Run the full suite and the Qt-import check**
 
 Run:
 
@@ -1452,7 +1452,7 @@ rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests
 
 Expected: all tests pass; the `rg` line prints nothing.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add mdviewer/core/docschema.py tests/test_docschema.py
