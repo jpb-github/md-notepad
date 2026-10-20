@@ -16371,7 +16371,7 @@ of Task 16 as committed (`05d4cf3`), then reverted. Results:
     `right_click(selector)`, `pick(menu, text)`, `EDIT_ITEMS`,
     `TABLE_TEXTS`.
 
-- [ ] **Step 1: Write the failing smoke checks**
+- [x] **Step 1: Write the failing smoke checks**
 
 The interim Rendered-mode checks of Tasks 12-13 change. Replace
 
@@ -16658,13 +16658,13 @@ window.on_new()
 `QApplication`, `richview`, `selected`, `type_rendered`, `page_doc` and
 `HAS_HL` are defined by earlier sections.)
 
-- [ ] **Step 2: Run the smoke to verify it fails**
+- [x] **Step 2: Run the smoke to verify it fails**
 
 Run: `.venv/Scripts/python scripts/smoke_ui.py`
 Expected: the run dies with `AttributeError: 'MainWindow' object has no
 attribute 'act_paste_plain'`.
 
-- [ ] **Step 3: Write the failing page check**
+- [x] **Step 3: Write the failing page check**
 
 In `scripts/check_web.py`, `check_editor`, directly after
 
@@ -16687,7 +16687,7 @@ Expected: the run dies in `check_editor` at
 `json.decoder.JSONDecodeError: Expecting value` (`setFinding` is not a
 function yet, so the script answers nothing).
 
-- [ ] **Step 4: Add `setFinding` and `selectAll` to the page, then rebuild the bundle**
+- [x] **Step 4: Add `setFinding` and `selectAll` to the page, then rebuild the bundle**
 
 In `web-src/src/editor.css`, the code block comment and overlay rule become:
 
@@ -16734,7 +16734,7 @@ git status --short mdviewer/web
 Expected: `Built ...mdviewer\web`; `WEB OK`; only `editor.js` and
 `editor.css` changed under `mdviewer/web`.
 
-- [ ] **Step 5: Add `selection_state`, `set_finding` and the custom menu policy to `mdviewer/richview.py`**
+- [x] **Step 5: Add `selection_state`, `set_finding` and the custom menu policy to `mdviewer/richview.py`**
 
 - Before `_HEADINGS_JS`:
 
@@ -16762,7 +16762,7 @@ Expected: `Built ...mdviewer\web`; `WEB OK`; only `editor.js` and
     bar is open, code blocks show plain text only, so find-in-page counts
     each match once; kept across `restart()`.
 
-- [ ] **Step 6: Add the web mode to `mdviewer/findbar.py`**
+- [x] **Step 6: Add the web mode to `mdviewer/findbar.py`**
 
 The module docstring names both modes: Source is the plain-text
 Find/Replace via `QTextDocument.find` (the UTF-16 note stays); Rendered
@@ -16800,7 +16800,7 @@ Find/Replace via `QTextDocument.find` (the UTF-16 note stays); Rendered
 
 `replace_row.setVisible(replace)` stays as it is.
 
-- [ ] **Step 7: Route the Edit menu, Find and the context menu in `mdviewer/main_window.py`**
+- [x] **Step 7: Route the Edit menu, Find and the context menu in `mdviewer/main_window.py`**
 
 Imports: `QPoint` (`PySide6.QtCore`), `QMenu` (`PySide6.QtWidgets`).
 
@@ -16905,12 +16905,12 @@ Replace `_copy` with a section `# --- Edit menu and context menu ---`:
   `triggered` -> `_run_format_command(command, args)`, binding both as
   lambda defaults).
 
-- [ ] **Step 8: Run the smoke to verify it passes**
+- [x] **Step 8: Run the smoke to verify it passes**
 
 Run: `.venv/Scripts/python scripts/smoke_ui.py`
 Expected: `SMOKE OK`.
 
-- [ ] **Step 9: Run the full verification**
+- [x] **Step 9: Run the full verification**
 
 Run:
 
@@ -16924,7 +16924,7 @@ rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests
 Expected: all tests pass (763 at the time of writing); `SMOKE OK`;
 `WEB OK`; the `rg` line prints nothing.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add web-src/src/editor.js web-src/src/editor.css mdviewer/web/editor.js mdviewer/web/editor.css scripts/check_web.py mdviewer/richview.py mdviewer/findbar.py mdviewer/main_window.py scripts/smoke_ui.py
