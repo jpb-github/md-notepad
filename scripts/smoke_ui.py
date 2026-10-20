@@ -2244,6 +2244,29 @@ check(window.context_menu is None, "no menu once the window has left Rendered mo
 FAKE["answer"] = S.Discard
 window.on_new()
 
+# Ctrl+Shift+V with the focus in a find field pastes into the field, not the document (review fix)
+field_md = TMP / "field.md"
+field_md.write_bytes(b"keep\n")
+window.open_file(field_md)
+pump(lambda: window.rich.is_ready, 3)
+QApplication.clipboard().setText("PASTED")
+window.activateWindow()  # shortcuts only fire in the active window
+pump(lambda: window.isActiveWindow(), 3)
+for mode_action, mode_name in ((window.act_rendered, "Rendered"), (window.act_source, "Source")):
+    mode_action.trigger()
+    pump(lambda: window.mode == mode_name.lower() and (mode_name == "Source" or window.rich.is_ready), 5)
+    window.find_bar.open_find()
+    window.find_bar.find_edit.clear()
+    window.find_bar.find_edit.setFocus()
+    QTest.sendKeyEvent(QTest.KeyAction.Click, window.find_bar.find_edit, Qt.Key.Key_V, "\x16", CTRL | SHIFT)
+    pump(lambda: False, 0.3)
+    check(window.find_bar.find_edit.text() == "PASTED" and not window.dirty and window.buffer == "keep\n",
+          f"{mode_name}: Ctrl+Shift+V in the find field pastes into the field ({window.find_bar.find_edit.text()!r}, {window.buffer!r})")
+    window.find_bar.close_bar()
+QApplication.clipboard().clear()
+FAKE["answer"] = S.Discard
+window.on_new()
+
 # --- Later tasks insert their checks directly above this line. ---
 
 shutil.rmtree(TMP, ignore_errors=True)

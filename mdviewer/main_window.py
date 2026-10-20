@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -830,7 +831,12 @@ class MainWindow(QMainWindow):
 
     def _edit(self, name: str) -> None:
         """An Edit item: the text editor in Source mode; in Rendered mode a page command or a web
-        action, and the page keeps the focus."""
+        action, and the page keeps the focus. Ctrl+Shift+V in a find or replace field pastes into
+        the field (a QLineEdit does not claim that key, so the window-wide action would win)."""
+        field = self.focusWidget()
+        if name == "paste_plain" and isinstance(field, QLineEdit) and self.find_bar.isAncestorOf(field):
+            field.paste()
+            return
         if self.mode == self.SOURCE:
             getattr(self.editor, SOURCE_EDITS[name])()
             return
