@@ -278,6 +278,7 @@ class MainWindow(QMainWindow):
         self.loaded_path = path
         self._size = len(raw)
         self._doc_number += 1
+        self._pending_pull = False  # the pull in flight is discarded; it must not block this document
         self._rendered_text = text.replace("\r\n", "\n")
         self._block_lines = None
         self.editor.setPlainText(self._rendered_text)
@@ -432,7 +433,7 @@ class MainWindow(QMainWindow):
         self.loaded_path = path
         self._size = len(raw)
         self.editor.document().setModified(False)
-        self.dirty = False
+        self.dirty = self.mode == self.RENDERED and self.rich.modified  # an edit made since the pull
         self._note_own_write(path)
         self._remember_recent(path)
         self._update_chrome()
@@ -505,9 +506,9 @@ class MainWindow(QMainWindow):
         self.rich.request_document(lambda doc: self._pulled(doc, fn, number))
 
     def _pulled(self, doc: dict | None, fn: Callable[[str], None], number: int) -> None:
-        self._pending_pull = False
         if number != self._doc_number:
             return  # another document was loaded meanwhile: this one is gone
+        self._pending_pull = False
         if doc is None:
             self._warn(PULL_FAILED_NOTE)  # Task 14: the stopped-responding dialog
             return
@@ -524,6 +525,9 @@ class MainWindow(QMainWindow):
 
     def _enter_source(self, text: str) -> None:
         """Rendered -> Source with `text`, the Rendered buffer (unchanged text keeps the editor's)."""
+        if self.mode == self.RENDERED and self.rich.modified:
+            self.with_buffer(self._enter_source)  # typed since the pull's snapshot: pull again
+            return
         line = self._line_of_block(self._caret_block)
         if self.editor.document().toRawText().replace("\u2029", "\n") != text:
             self.editor.setPlainText(text)
@@ -554,6 +558,7 @@ class MainWindow(QMainWindow):
         except Exception:  # an unmappable construct must not block the file: Source still works
             return False
         self._doc_number += 1
+        self._pending_pull = False
         self._rendered_text = text
         self._block_lines = [block["attrs"].get("line") for block in doc.get("content", [])]
         self.rich.set_document(doc, keep_scroll)

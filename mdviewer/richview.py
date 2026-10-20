@@ -134,7 +134,8 @@ class RichView(QWebEngineView):
         # one it follows, so a change from before a load or pull is never taken for a new one.
         self._epoch = 0
         self.modified = False  # the page has changed since the last set_document or pull
-        self._pulls: dict[int, tuple[Callable[[dict | None], None], bool]] = {}
+        self._load_epoch = 0  # the epoch of the latest set_document or restart
+        self._pulls: dict[int, tuple[Callable[[dict | None], None], bool, int]] = {}
         self._waiting: list[int] = []  # pulls whose timeout starts when the page is idle
         self._next_pull = 0
         self.restart()
@@ -147,6 +148,7 @@ class RichView(QWebEngineView):
         self.failed = False
         self._crashed = False
         self._epoch += 1
+        self._load_epoch = self._epoch
         self.modified = False
         self._queue.append((f"window.mdEditor.markClean({self._epoch}), 0", None))
         self.page().setBackgroundColor(QColor(render.PAGE_BACKGROUND[self._theme]))
@@ -216,6 +218,7 @@ class RichView(QWebEngineView):
         """Replace the document (new undo history). keep_scroll: external reload."""
         payload = json.dumps(doc)
         self._epoch += 1
+        self._load_epoch = self._epoch
         self.modified = False
         self._sent += 1
         number = self._sent
@@ -244,7 +247,7 @@ class RichView(QWebEngineView):
             return
         self._next_pull += 1
         number = self._next_pull
-        self._pulls[number] = (callback, self.modified)
+        self._pulls[number] = (callback, self.modified, self._load_epoch)
         self._epoch += 1
         self.modified = False
         self._call(_PULL_JS.format(self._epoch), lambda value: self._on_pulled(number, value))
@@ -275,16 +278,17 @@ class RichView(QWebEngineView):
         if number in self._waiting:
             self._waiting.remove(number)
         if pull is not None:
-            callback, was_modified = pull
-            if doc is None:
+            callback, was_modified, load_epoch = pull
+            if doc is None and load_epoch == self._load_epoch:  # not across a load: that page is clean
                 self.modified = self.modified or was_modified
             callback(doc)
 
     def _fail_pulls(self) -> None:
         pulls, self._pulls = self._pulls, {}
         self._waiting.clear()
-        for callback, was_modified in pulls.values():
-            self.modified = self.modified or was_modified
+        for callback, was_modified, load_epoch in pulls.values():
+            if load_epoch == self._load_epoch:
+                self.modified = self.modified or was_modified
             callback(None)
 
     def command(self, name: str, args=None) -> None:

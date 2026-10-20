@@ -484,6 +484,66 @@ pump(lambda: False, 1)
 check(window.buffer == RENDERED_SAVED and doc_md.read_text(encoding="utf-8").startswith("# Title"),
       "a pull from a document replaced meanwhile is discarded")
 
+# a load drops the pull in flight: the new document saves at once, and the dropped pull's late
+# timeout does not mark it modified (an unedited file must never be rewritten)
+window.rich.focus_block(0)
+window.rich.command("setBlock", {"type": "heading", "level": 1})
+pump(lambda: window.dirty, 3)
+richview.PULL_TIMEOUT_MS = 300
+window.rich.page().runJavaScript("(() => { const t = Date.now(); while (Date.now() - t < 1200); })()", 0)
+window.on_save()
+check(window._pending_pull, "a pull is in flight")
+window.open_file(sample)
+check(not window._pending_pull, "a load clears the pull in flight")
+pump(lambda: False, 1.8)
+richview.PULL_TIMEOUT_MS = saved_timeout
+check(not window.rich.modified and not window.dirty, "a late timeout of a dropped pull leaves the new document clean")
+
+# an edit that lands between a pull's snapshot and its callback is not lost
+PULLS: list = []
+_request_document = richview.RichView.request_document
+
+
+def _counted_request_document(self, callback):
+    PULLS.append(1)
+    _request_document(self, callback)
+
+
+richview.RichView.request_document = _counted_request_document
+
+
+def edit_after_next_snapshot() -> None:
+    """The next pull's snapshot is followed by a keystroke before Python's callback runs."""
+    real = window.rich.request_document  # the counted class method, bound
+
+    def request(callback):
+        del window.rich.request_document
+
+        def late(doc):
+            window.rich.modified = True  # changed() arrives after the snapshot
+            window._on_rendered_changed()
+            callback(doc)
+        real(late)
+    window.rich.request_document = request
+
+
+window.rich.focus_block(0)
+window.rich.command("setBlock", {"type": "heading", "level": 2})
+pump(lambda: window.dirty, 3)
+edit_after_next_snapshot()
+window.on_save()
+check(pump(lambda: not window._pending_pull, 5) and sample.read_bytes().startswith(b"## "), "the snapshot is saved")
+check(window.dirty and window.windowTitle().startswith("*"), "an edit made after the snapshot keeps the buffer dirty")
+window.open_file(sample)
+window.rich.focus_block(0)
+window.rich.command("setBlock", {"type": "heading", "level": 3})
+pump(lambda: window.dirty, 3)
+PULLS.clear()
+edit_after_next_snapshot()
+window.act_source.trigger()
+check(pump(lambda: window.mode == "source", 5), "the switch to Source completes")
+check(len(PULLS) == 2 and not window.rich.modified, "a switch pulls again when an edit landed after the snapshot")
+
 # a page that never loads: Source mode only, with a warning
 saved_web = render.WEB_DIR
 render.WEB_DIR = TMP / "no-web"
