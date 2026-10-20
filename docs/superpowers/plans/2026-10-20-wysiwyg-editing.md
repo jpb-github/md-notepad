@@ -3710,7 +3710,7 @@ from this plan. Results:
     - `_task6_only` in `tests/test_serialize.py` limits the repo round trip
       to the node types handled so far; Task 7 widens it to all types.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_serialize.py` (the block uses a four-backtick fence because
 a test string contains triple backticks):
@@ -4226,12 +4226,12 @@ def test_random_inline_content_round_trips(flanked):
         assert round_trip(markdown) == (markdown or ""), markdown
 ````
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_serialize.py -v`
 Expected: collection error, `ModuleNotFoundError: No module named 'mdviewer.core.serialize'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `mdviewer/core/serialize.py`:
 
@@ -4678,12 +4678,12 @@ def _line_start_escapes(text: str, line_end: bool) -> set[int]:
     return set()
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_serialize.py -v`
 Expected: 185 passed.
 
-- [ ] **Step 5: Run the full suite and the Qt-import check**
+- [x] **Step 5: Run the full suite and the Qt-import check**
 
 Run:
 
@@ -4694,7 +4694,7 @@ rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests
 
 Expected: all tests pass; the `rg` line prints nothing.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add mdviewer/core/serialize.py tests/test_serialize.py
