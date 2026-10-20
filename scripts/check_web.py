@@ -596,6 +596,12 @@ def check_bridge(app: QApplication, view: QWebEngineView, page: Page, bridge: Br
     run_js(app, view, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('G', {PLAIN})), 0)")
     pump(app, lambda: bridge.args("changed", mark), 3)
     check(bridge.args("changed", mark) == [[9]], "setDocument without an epoch keeps the current one")
+    # A setDocument the page rejects keeps the old document, but its epoch is still adopted: edits report it.
+    mark = len(bridge.calls)
+    run_js(app, view, "((() => { try { window.mdEditor.setDocument({type: 'doc', content: [{type: 'bogus'}]}, false, 12); } catch (e) { } })(), 0)")
+    run_js(app, view, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('H', {PLAIN})), 0)")
+    pump(app, lambda: bridge.args("changed", mark), 3)
+    check(bridge.args("changed", mark) == [[12]], "a rejected setDocument still moves changed() to the new epoch")
     run_js(app, view, "(window.mdEditor.markClean(0), 0)")
 
     # setTheme: swaps the theme stylesheet and the raw HTML frame colors, without a reload.

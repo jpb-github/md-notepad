@@ -11254,6 +11254,11 @@ committed Task 11 code. Results:
     `markClean(cleanEpoch = epoch)`.
   - `markClean` also resets `sent.changed`. `dispatchTransaction` sends
     `changed(epoch)`.
+  - `setDocument` adopts the epoch and resets `sent.changed` *before* it
+    builds the state. A document the page rejects (it throws; the old one
+    stays) then still reports later edits as `changed(epoch)`; otherwise
+    Python, already on the new epoch, would ignore them and the stale page
+    could be edited without a dirty flag (final review, I2).
   - Without the argument, both keep the current epoch, so `check_web.py`'s
     direct calls keep working.
   - `bridge.js` and `CALLS` do not change.
@@ -11298,6 +11303,10 @@ committed Task 11 code. Results:
     session; that is `MainWindow`'s decision (Task 13).
 - **`crashed`:** `renderProcessTerminated`. Pending pulls get `None` first,
   then the signal is emitted.
+  - Until `restart()`, the view behaves as failed for calls: they do
+    nothing and `request_document` answers `None` at once. A Save pressed
+    while a crash dialog is up must not wait for a page that is gone (final
+    review, I1).
   - `restart()` loads a fresh page with an empty document. It does not
     restore the document: Task 14 calls `restart()` then `set_document`
     from the buffer, as spec section 7 says.
@@ -11313,6 +11322,10 @@ committed Task 11 code. Results:
     (MB of the last document JSON sent or pulled), that is 3000 ms + 100 ms
     per MB: 3.3 s for 2.8 MB, 5.8 s for 27.9 MB.
   - A late answer is ignored. Step 13 records this in spec section 7.
+  - A backstop counts from the request: `PULL_HARD_TIMEOUT_MS = 60000`
+    answers `None` even when the page hangs inside an earlier `set_document`
+    (its own timer would never start, and no crash signal fires). Final
+    review, I3.
 - **Navigation guard** (`_Page.acceptNavigationRequest`):
   - main frame: allowed only when the URL without its fragment is the page
     file (our loads, reloads, in-page anchors);
@@ -11367,7 +11380,8 @@ committed Task 11 code. Results:
     `editor_page(theme: str) -> str`.
   - `mdviewer/richview.py`:
     - `RUNTIME_FILES`, `READY_TIMEOUT_MS = 5000`, `PULL_TIMEOUT_MS = 3000`,
-      `PULL_MS_PER_MB = 100` (module constants; the smoke patches them)
+      `PULL_MS_PER_MB = 100`, `PULL_HARD_TIMEOUT_MS = 60000` (module
+      constants; the smoke patches them)
     - `Bridge(QObject)`: the channel object; private to `richview`
     - `RichView(QWebEngineView)`:
       - `RichView(theme: str = "light", parent=None)`
@@ -11487,6 +11501,12 @@ change") now expect `[[0]]`. Directly below the second of them, add:
     run_js(app, view, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('G', {PLAIN})), 0)")
     pump(app, lambda: bridge.args("changed", mark), 3)
     check(bridge.args("changed", mark) == [[9]], "setDocument without an epoch keeps the current one")
+    # A setDocument the page rejects keeps the old document, but its epoch is still adopted: edits report it.
+    mark = len(bridge.calls)
+    run_js(app, view, "((() => { try { window.mdEditor.setDocument({type: 'doc', content: [{type: 'bogus'}]}, false, 12); } catch (e) { } })(), 0)")
+    run_js(app, view, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('H', {PLAIN})), 0)")
+    pump(app, lambda: bridge.args("changed", mark), 3)
+    check(bridge.args("changed", mark) == [[12]], "a rejected setDocument still moves changed() to the new epoch")
     run_js(app, view, "(window.mdEditor.markClean(0), 0)")
 ```
 
@@ -11526,9 +11546,12 @@ function setDocument(json, keepScroll = false) {
 with:
 
 ```js
+// The epoch is adopted first: Python has moved to it already, so if the document is
+// rejected (it throws and the old one stays) edits must still be reported as changed(epoch).
 function setDocument(json, keepScroll = false, docEpoch = epoch) {
-  const state = createState(json);
   epoch = docEpoch;
+  sent.changed = false;
+  const state = createState(json);
 ```
 
 In `window.mdEditor`, directly below the `getDocument` line, add:
@@ -11785,6 +11808,22 @@ richview.PULL_TIMEOUT_MS = saved_timeout
 check(pull(rich)[0]["content"][0] == docmodel.from_markdown("[web](https://example.com/page)\n")["content"][0],
       "pulls work again afterwards")
 
+# A page that hangs inside set_document: the pull's own timer starts only after loads finish, so a
+# hard limit from the request time answers it (and restores `modified`).
+saved_hard = richview.PULL_HARD_TIMEOUT_MS
+richview.PULL_HARD_TIMEOUT_MS = 800
+rich.command("insertRule")
+pump(lambda: rich.modified, 3)
+rich.page().runJavaScript("(() => { const t = Date.now(); while (Date.now() - t < 3000); })()", 0)
+rich.set_document(docmodel.from_markdown("hung\n"))
+started = time.monotonic()
+hung = pull(rich, 2.5)
+check(hung == [None] and time.monotonic() - started < 2.5, f"a pull behind a hung set_document is answered anyway ({hung})")
+richview.PULL_HARD_TIMEOUT_MS = saved_hard
+pump(lambda: False, 3)  # the page recovers; the stale answers are dropped
+rich.set_document(docmodel.from_markdown("recovered\n"))
+check(pull(rich)[0] == docmodel.from_markdown("recovered\n"), "pulls work again after the hang")
+
 # Renderer crash: crashed(), the pending pull gets None, restart() brings a working page back.
 rich.command("insertRule")  # this document's change is reported before the crash
 check(pump(lambda: "changed" in names(seen), 3), "an edit reports changed")
@@ -11795,6 +11834,11 @@ rich.request_document(crash_pull.append)
 os.kill(rich.page().renderProcessPid(), signal.SIGTERM)
 check(pump(lambda: "crashed" in names(seen), 5), "a killed renderer emits crashed")
 check(crash_pull == [None] and not rich.is_ready, "the pull in flight gets None and the view is not ready")
+dead_pull: list = []
+rich.request_document(dead_pull.append)  # Save pressed while a crash dialog is up
+check(dead_pull == [None], "a pull between the crash and restart() is answered at once")
+rich.set_document(docmodel.from_markdown("lost\n"))
+rich.command("insertRule")
 rich.restart()
 check(pump(lambda: rich.is_ready, 5), "restart() loads a fresh page")
 rich.command("insertRule")
@@ -11863,6 +11907,9 @@ READY_TIMEOUT_MS = 5000  # spec: page ready() within 5 s
 # (~2 s for 28 MB of document JSON), so each MB of the last document JSON adds this much.
 PULL_TIMEOUT_MS = 3000
 PULL_MS_PER_MB = 100
+# Backstop counted from the request: a page that hangs inside set_document never lets the
+# pull's own timer start (it waits for the load), and no crash signal fires for a hang.
+PULL_HARD_TIMEOUT_MS = 60000
 _MAIN_WORLD = 0  # QWebEngineScript.ScriptWorldId.MainWorld: where window.mdEditor lives
 # PySide6 types adjusted()'s parameter as ComponentFormattingOption, so the bare
 # UrlFormattingOption.RemoveFragment is rejected; OR-ing in PrettyDecoded is accepted.
@@ -11980,6 +12027,7 @@ class RichView(QWebEngineView):
         """Load a fresh editor page (start, or after `crashed`); the document is empty."""
         self._forget_page()
         self.failed = False
+        self._crashed = False
         self._epoch += 1
         self.modified = False
         self._queue.append((f"window.mdEditor.markClean({self._epoch}), 0", None))
@@ -12015,6 +12063,7 @@ class RichView(QWebEngineView):
         self.load_failed.emit()
 
     def _on_crash(self, _status, _code) -> None:
+        self._crashed = True  # until restart(): calls are no-ops, pulls answer None (as when failed)
         self._forget_page()
         self.crashed.emit()
 
@@ -12035,8 +12084,9 @@ class RichView(QWebEngineView):
             self.page().runJavaScript(script, _MAIN_WORLD, callback)
 
     def _call(self, script: str, callback: Callable | None = None) -> bool:
-        """Runs `script` now, or queues it until ready(); False once loading has failed."""
-        if self.failed:
+        """Runs `script` now, or queues it until ready(); False once loading has failed or the
+        render process has crashed (until restart())."""
+        if self.failed or self._crashed:
             return False
         if self.is_ready:
             self._js(script, callback)
@@ -12071,7 +12121,7 @@ class RichView(QWebEngineView):
         load failure. Called exactly once, never synchronously from a working page.
         The page counts as clean from then on (`modified` False): the caller keeps the
         document's text. A failed pull leaves `modified` as it was."""
-        if self.failed:
+        if self.failed or self._crashed:
             callback(None)
             return
         self._next_pull += 1
@@ -12082,6 +12132,7 @@ class RichView(QWebEngineView):
         self._call(_PULL_JS.format(self._epoch), lambda value: self._on_pulled(number, value))
         self._waiting.append(number)
         self._arm_waiting()
+        QTimer.singleShot(PULL_HARD_TIMEOUT_MS, self, lambda n=number: self._finish_pull(n, None))
 
     def _arm_waiting(self) -> None:
         """Start the timeouts of waiting pulls once the page has run every earlier load."""

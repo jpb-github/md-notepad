@@ -163,9 +163,12 @@ const view = new EditorView(document.getElementById("editor"), {
 
 // New EditorState: empty undo history, caret at the start. With keepScroll the page
 // keeps its scroll offset (external reload), otherwise it scrolls to the top.
+// The epoch is adopted first: Python has moved to it already, so if the document is
+// rejected (it throws and the old one stays) edits must still be reported as changed(epoch).
 function setDocument(json, keepScroll = false, docEpoch = epoch) {
-  const state = createState(json);
   epoch = docEpoch;
+  sent.changed = false;
+  const state = createState(json);
   const scroller = document.scrollingElement;
   const top = scroller.scrollTop;
   view.updateState(state);

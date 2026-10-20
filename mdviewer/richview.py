@@ -25,6 +25,9 @@ READY_TIMEOUT_MS = 5000  # spec: page ready() within 5 s
 # (~2 s for 28 MB of document JSON), so each MB of the last document JSON adds this much.
 PULL_TIMEOUT_MS = 3000
 PULL_MS_PER_MB = 100
+# Backstop counted from the request: a page that hangs inside set_document never lets the
+# pull's own timer start (it waits for the load), and no crash signal fires for a hang.
+PULL_HARD_TIMEOUT_MS = 60000
 _MAIN_WORLD = 0  # QWebEngineScript.ScriptWorldId.MainWorld: where window.mdEditor lives
 # PySide6 types adjusted()'s parameter as ComponentFormattingOption, so the bare
 # UrlFormattingOption.RemoveFragment is rejected; OR-ing in PrettyDecoded is accepted.
@@ -142,6 +145,7 @@ class RichView(QWebEngineView):
         """Load a fresh editor page (start, or after `crashed`); the document is empty."""
         self._forget_page()
         self.failed = False
+        self._crashed = False
         self._epoch += 1
         self.modified = False
         self._queue.append((f"window.mdEditor.markClean({self._epoch}), 0", None))
@@ -177,6 +181,7 @@ class RichView(QWebEngineView):
         self.load_failed.emit()
 
     def _on_crash(self, _status, _code) -> None:
+        self._crashed = True  # until restart(): calls are no-ops, pulls answer None (as when failed)
         self._forget_page()
         self.crashed.emit()
 
@@ -197,8 +202,9 @@ class RichView(QWebEngineView):
             self.page().runJavaScript(script, _MAIN_WORLD, callback)
 
     def _call(self, script: str, callback: Callable | None = None) -> bool:
-        """Runs `script` now, or queues it until ready(); False once loading has failed."""
-        if self.failed:
+        """Runs `script` now, or queues it until ready(); False once loading has failed or the
+        render process has crashed (until restart())."""
+        if self.failed or self._crashed:
             return False
         if self.is_ready:
             self._js(script, callback)
@@ -233,7 +239,7 @@ class RichView(QWebEngineView):
         load failure. Called exactly once, never synchronously from a working page.
         The page counts as clean from then on (`modified` False): the caller keeps the
         document's text. A failed pull leaves `modified` as it was."""
-        if self.failed:
+        if self.failed or self._crashed:
             callback(None)
             return
         self._next_pull += 1
@@ -244,6 +250,7 @@ class RichView(QWebEngineView):
         self._call(_PULL_JS.format(self._epoch), lambda value: self._on_pulled(number, value))
         self._waiting.append(number)
         self._arm_waiting()
+        QTimer.singleShot(PULL_HARD_TIMEOUT_MS, self, lambda n=number: self._finish_pull(n, None))
 
     def _arm_waiting(self) -> None:
         """Start the timeouts of waiting pulls once the page has run every earlier load."""

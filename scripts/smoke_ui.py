@@ -1099,6 +1099,22 @@ richview.PULL_TIMEOUT_MS = saved_timeout
 check(pull(rich)[0]["content"][0] == docmodel.from_markdown("[web](https://example.com/page)\n")["content"][0],
       "pulls work again afterwards")
 
+# A page that hangs inside set_document: the pull's own timer starts only after loads finish, so a
+# hard limit from the request time answers it (and restores `modified`).
+saved_hard = richview.PULL_HARD_TIMEOUT_MS
+richview.PULL_HARD_TIMEOUT_MS = 800
+rich.command("insertRule")
+pump(lambda: rich.modified, 3)
+rich.page().runJavaScript("(() => { const t = Date.now(); while (Date.now() - t < 3000); })()", 0)
+rich.set_document(docmodel.from_markdown("hung\n"))
+started = time.monotonic()
+hung = pull(rich, 2.5)
+check(hung == [None] and time.monotonic() - started < 2.5, f"a pull behind a hung set_document is answered anyway ({hung})")
+richview.PULL_HARD_TIMEOUT_MS = saved_hard
+pump(lambda: False, 3)  # the page recovers; the stale answers are dropped
+rich.set_document(docmodel.from_markdown("recovered\n"))
+check(pull(rich)[0] == docmodel.from_markdown("recovered\n"), "pulls work again after the hang")
+
 # Renderer crash: crashed(), the pending pull gets None, restart() brings a working page back.
 rich.command("insertRule")  # this document's change is reported before the crash
 check(pump(lambda: "changed" in names(seen), 3), "an edit reports changed")
@@ -1109,6 +1125,11 @@ rich.request_document(crash_pull.append)
 os.kill(rich.page().renderProcessPid(), signal.SIGTERM)
 check(pump(lambda: "crashed" in names(seen), 5), "a killed renderer emits crashed")
 check(crash_pull == [None] and not rich.is_ready, "the pull in flight gets None and the view is not ready")
+dead_pull: list = []
+rich.request_document(dead_pull.append)  # Save pressed while a crash dialog is up
+check(dead_pull == [None], "a pull between the crash and restart() is answered at once")
+rich.set_document(docmodel.from_markdown("lost\n"))
+rich.command("insertRule")
 rich.restart()
 check(pump(lambda: rich.is_ready, 5), "restart() loads a fresh page")
 rich.command("insertRule")
