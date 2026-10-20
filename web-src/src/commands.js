@@ -79,17 +79,20 @@ function linkTarget(state) {
 // Inserts block `node` after the textblock (or selected block) at the selection, at the
 // first level up that allows it; an empty paragraph is replaced instead. The caret goes
 // into the new block (its first cell for a table) or, for an atom, to the next textblock:
-// `trailingParagraph` adds an empty paragraph when nothing follows the new block.
-function insertBlock(state, dispatch, node, trailingParagraph = false) {
+// `trailingParagraph` adds an empty paragraph when nothing follows the new block;
+// `topLevel` only allows the document level (the parser reads tables nowhere else).
+function insertBlock(state, dispatch, node, trailingParagraph = false, topLevel = false) {
   const { $from, $to, empty } = state.selection;
   const tr = state.tr;
   let pos = null;
   if (empty && $from.parent.type === nodes.paragraph && $from.parent.content.size === 0
+      && (!topLevel || $from.depth === 1)
       && $from.node(-1).canReplaceWith($from.index(-1), $from.index(-1) + 1, node.type)) {
     pos = $from.before();
     tr.replaceWith(pos, $from.after(), node);
   } else {
     for (let depth = $to.depth; depth >= 0 && pos === null; depth--) {
+      if (topLevel && depth > 0) continue;
       const index = $to.indexAfter(depth);
       if ($to.node(depth).canReplaceWith(index, index, node.type)) {
         pos = depth === $to.depth ? $to.pos : $to.after(depth + 1);
@@ -170,10 +173,12 @@ function setLink(state, dispatch, args) {
   const target = linkTarget(state);
   const link = marks.link.create({ href, title: args.title ?? target.mark?.attrs.title ?? null });
   const current = state.doc.textBetween(target.from, target.to);
-  const text = String(args.text ?? "") || current || href;
+  const wanted = String(args.text ?? "");
+  const text = wanted || current || href;
   const tr = state.tr;
   const $start = state.doc.resolve(target.from);
-  if (text === current || !$start.sameParent(state.doc.resolve(target.to))) {
+  // Unchanged or empty text keeps the selection (an image has no text): only the mark is added.
+  if (text === current || (!wanted && target.from < target.to) || !$start.sameParent(state.doc.resolve(target.to))) {
     tr.addMark(target.from, target.to, link);
   } else {
     // New text: it takes the marks of the text it replaces, plus the link.
@@ -247,9 +252,9 @@ export const FORMATTING_COMMANDS = {
       const table = nodes.table.create(null, [
         row(nodes.table_header), ...Array.from({ length: rows - 1 }, () => row(nodes.table_cell)),
       ]);
-      return insertBlock(state, dispatch, table);
+      return insertBlock(state, dispatch, table, false, true);
     },
-    can: (state) => insertBlock(state, null, nodes.table.createAndFill()),
+    can: (state) => insertBlock(state, null, nodes.table.createAndFill(), false, true),
   },
   // args: {src, display_src?, alt?, title?}: src as written in Markdown, display_src resolved by Python
   insertImage: {

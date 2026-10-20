@@ -682,6 +682,12 @@ COMMAND_CASES = [
     ("a\n", "place('a', 1)", "insertTable", {"rows": 2, "cols": 2}, "a\n\n|  |  |\n| --- | --- |\n|  |  |\n"),
     ("a\n", "place('a', 1)", "insertRule", None, "a\n\n---\n"),
     ("- a\n", "place('a', 1)", "insertRule", None, "- a\n  ___\n"),
+    # Tables go at document level: the parser reads a table in a list item or quote back as text.
+    ("- a\n", "place('a', 1)", "insertTable", {"rows": 2, "cols": 1}, "- a\n\n|  |\n| --- |\n|  |\n"),
+    ("> a\n", "place('a', 1)", "insertTable", {"rows": 2, "cols": 1}, "> a\n\n|  |\n| --- |\n|  |\n"),
+    # An image-only selection gets the link (the dialog sends no text for it); the image stays.
+    ("a ![X](x.png) b\n", "select(findText('a ') + 2, findText('a ') + 3)", "setLink",
+     {"text": "", "href": "https://e.com/"}, "a [![X](x.png)](https://e.com/) b\n"),
     ("a b\n", "place('a', 1)", "insertImage",
      {"src": "pics/x.png", "display_src": "file:///C:/pics/x.png", "alt": "X"}, "a![X](pics/x.png) b\n"),
     ("a word\n", "place('word', 0, 4)", "setLink", {"text": "word", "href": "https://e.com/"},
@@ -743,6 +749,9 @@ KEY_CASES = [
     ("x\n", "place('x', 0, 1)", ["a `c` d"], "a `c` d\n"),
     ("x\n", "place('x', 0, 1)", ["a ~~s~~ d"], "a ~~s~~ d\n"),
     ("x\n", "place('x', 0, 1)", ["2*3*4"], "2\\*3\\*4\n"),
+    # A mark rule leaves a range alone that holds an image or other marks (it would flatten them).
+    ("*see ![X](p.png) here\n", "place('here', 4)", ["*"], "\\*see ![X](p.png) here\\*\n"),
+    ("*it **bd** x\n", "place('x', 1)", ["*"], "\\*it **bd** x\\*\n"),
     ("x\n", "place('x', 0, 1)", ["```py", (K.Key_Return, None), "x"], "```py\nx\n```\n"),
     ("x\n", "place('x', 0, 1)", ["---", (K.Key_Return, None), "x"], "---\n\nx\n"),
     ("x\n", "place('x', 0, 1)", ["# ", (K.Key_Backspace, None)], "\\#\n"),

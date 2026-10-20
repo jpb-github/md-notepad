@@ -6,6 +6,7 @@ import { gapCursor } from "prosemirror-gapcursor";
 import { redo, undo } from "prosemirror-history";
 import { InputRule, inputRules, textblockTypeInputRule, undoInputRule, wrappingInputRule } from "prosemirror-inputrules";
 import { keymap } from "prosemirror-keymap";
+import { Mark } from "prosemirror-model";
 import { liftListItem, sinkListItem, splitListItem } from "prosemirror-schema-list";
 import { Plugin, TextSelection } from "prosemirror-state";
 import { FORMATTING_COMMANDS } from "./commands.js";
@@ -17,11 +18,25 @@ const CODE_INDENT = "    ";
 const bind = (name, args) => (state, dispatch, view) => FORMATTING_COMMANDS[name].run(state, dispatch, view, args);
 const inCode = (state) => Boolean(state.selection.$from.parent.type.spec.code);
 
+// True when the range holds only text carrying one set of marks: the mark rules rewrite the
+// range as one text node, which would flatten images, hard breaks, chips and mixed marks.
+function isUniformText(doc, start, end) {
+  let first = null;
+  let uniform = true;
+  doc.nodesBetween(start, end, (node) => {
+    if (!node.isInline) return true;
+    if (!node.isText || (first && !Mark.sameSet(first.marks, node.marks))) uniform = false;
+    first ??= node;
+    return false;
+  });
+  return uniform;
+}
+
 // `**text**`, `*text*`, `~~text~~`, `` `text` `` typed inline: the markers become the mark.
 function markRule(regexp, type) {
   return new InputRule(regexp, (state, match, start, end) => {
     const $start = state.doc.resolve(start);
-    if (!$start.parent.type.allowsMarkType(type)) return null;
+    if (!$start.parent.type.allowsMarkType(type) || !isUniformText(state.doc, start, end)) return null;
     return state.tr
       .replaceWith(start, end, schema.text(match[1], type.create().addToSet($start.marks())))
       .removeStoredMark(type);
