@@ -959,11 +959,20 @@ NESTED_PASTE_HTML = (
     "<!--EndFragment--></body></html>"
 )
 NESTED_PASTE_MD = "- x\n\n| h |\n| --- |\n| c |\n"
+# Word, Confluence and Docs wrap cell text in <p>, <ul> or <div>: the cell keeps one line of text.
+CELL_PASTE_HTML = (
+    "<html><body><!--StartFragment--><table><tr><th><p>Name</p></th><th><p>Age</p></th></tr>"
+    "<tr><td><p>Ann</p></td><td><ul><li>3</li><li>0</li></ul></td></tr></table><!--EndFragment--></body></html>"
+)
+CELL_PASTE_MD = "| Name | Age |\n| --- | --- |\n| Ann | 3 0 |\n"
+LINES_PASTE_HTML = "<html><body><!--StartFragment--><p>one</p><p>two</p><!--EndFragment--></body></html>"
+LINES_PASTED_MD = "| h | i |\n| --- | --- |\n| cone two | d |\n"
 
 
-def to_clipboard(html: str, text: str) -> None:
+def to_clipboard(html: str | None, text: str) -> None:
     mime = QMimeData()
-    mime.setData("text/html", html.encode("utf-8"))
+    if html is not None:
+        mime.setData("text/html", html.encode("utf-8"))
     mime.setText(text)
     QApplication.clipboard().setMimeData(mime)
 
@@ -1027,6 +1036,22 @@ def check_tables(app: QApplication, view: QWebEngineView, page: Page, bridge: Br
     press(app, view, [(K.Key_V, CTRL | SHIFT, "\x16")])
     result = as_markdown(app, view)
     check(result == "bold bad ok\n", f"Ctrl+Shift+V pastes plain text ({result!r})")
+    load_md(app, view, "x\n")
+    run_js(app, view, "(place('x', 0, 1), 0)")
+    to_clipboard(CELL_PASTE_HTML, "Name Age Ann 3 0")
+    press(app, view, [(K.Key_V, CTRL)])
+    result = as_markdown(app, view)
+    check(result == CELL_PASTE_MD, f"a pasted table with <p> and <ul> in its cells keeps its shape ({result!r})")
+    # Several lines pasted into a cell join into that cell, as text, HTML paragraphs or plain text.
+    for html in (None, LINES_PASTE_HTML):
+        for stroke in ((K.Key_V, CTRL), (K.Key_V, CTRL | SHIFT, "\x16")):
+            load_md(app, view, TABLE_MD)
+            run_js(app, view, "(place('c', 1), 0)")
+            to_clipboard(html, "one\ntwo")
+            press(app, view, [stroke])
+            result = as_markdown(app, view)
+            check(result == LINES_PASTED_MD,
+                  f"several lines pasted into a cell stay in it ({'html' if html else 'text'}, {stroke[1]!r}): {result!r}")
     QApplication.clipboard().clear()  # a clipboard still owning our data crashes Qt at exit
 
     # Right-click: the caret moves to the clicked cell before Qt's context menu request, so

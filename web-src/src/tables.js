@@ -1,6 +1,7 @@
 // Tables in the Rendered editor: prosemirror-tables (cell selection, arrow keys), Tab
 // between cells, the commands of the cell context menu, and Markdown's table shape.
 import { keymap } from "prosemirror-keymap";
+import { Fragment, Slice } from "prosemirror-model";
 import { Plugin, TextSelection } from "prosemirror-state";
 import {
   addColumnAfter, addColumnBefore, addRowAfter, addRowBefore, deleteColumn, deleteRow, deleteTable,
@@ -133,9 +134,52 @@ const tableShapePlugin = new Plugin({
   },
 });
 
+const CELL_BLOCKS = "p, div, ul, ol, li, h1, h2, h3, h4, h5, h6, blockquote, pre, section, article, header, footer, figure";
+
+// Word, Confluence and Docs wrap the text of a cell in <p>, <ul> or <div>, which a Markdown
+// cell cannot hold (it would fall apart into paragraphs and empty tables): unwrap those
+// blocks, separated by spaces, in an inert template.
+function flattenPastedCells(html) {
+  if (!/<t[dh][\s>]/i.test(html)) return html;
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  for (const cell of template.content.querySelectorAll("td, th")) {
+    for (const block of [...cell.querySelectorAll(CELL_BLOCKS)].reverse()) {
+      block.after(" ");
+      block.replaceWith(...block.childNodes);
+    }
+  }
+  return template.innerHTML;
+}
+
+// Several lines or paragraphs pasted into a cell join into one line of inline content, as a
+// cell holds nothing else (the table would split). A pasted table is left to tableEditing().
+function flattenForCell(slice, view) {
+  const parent = view.state.selection.$from.parent;
+  if (parent.type !== nodes.table_cell && parent.type !== nodes.table_header) return slice;
+  let hasTable = false;
+  let hasBlock = false;
+  slice.content.forEach((node) => { hasBlock ||= !node.isInline; });
+  slice.content.descendants((node) => { hasTable ||= node.type === nodes.table; });
+  if (hasTable || !hasBlock) return slice;
+  const parts = [];
+  const walk = (node) => {
+    if (node.isInline) parts.push(node);
+    else if (node.isTextblock) {
+      if (!node.childCount) return;
+      if (parts.length) parts.push(schema.text(" "));
+      node.forEach((child) => parts.push(child.isText ? child.withText(child.text.replace(/\n/g, " ")) : child));
+    } else node.forEach(walk);
+  };
+  slice.content.forEach(walk);
+  return new Slice(Fragment.from(parts), 0, 0);
+}
+
+const tablePastePlugin = new Plugin({ props: { transformPastedHTML: flattenPastedCells, transformPasted: flattenForCell } });
+
 // The shape plugin goes before tableEditing(), whose own table fixing would otherwise
 // rearrange merged cells first; the keymap goes before the other keymaps, so Tab and
 // Shift+Tab move between cells inside tables.
 export function tablePlugins() {
-  return [tableShapePlugin, tableEditing(), keymap({ Tab: nextCell, "Shift-Tab": goToNextCell(-1) })];
+  return [tableShapePlugin, tableEditing(), tablePastePlugin, keymap({ Tab: nextCell, "Shift-Tab": goToNextCell(-1) })];
 }
