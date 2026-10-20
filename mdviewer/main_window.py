@@ -706,6 +706,8 @@ class MainWindow(QMainWindow):
         for act in self._rendered_only_actions:
             act.setEnabled(not source)
         self.toolbar.setVisible(not source and self._show_toolbar)
+        if not self.rich.is_ready:
+            self.toolbar.update_state({})  # a click would queue behind the page's setDocument
 
         pct = round(self._zoom * 100)
         if source:

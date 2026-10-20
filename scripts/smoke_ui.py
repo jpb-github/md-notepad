@@ -1753,6 +1753,19 @@ check(pump(lambda: "strong" in (page_js(window.rich, "window.mdEditor.selectionS
 window.act_toolbar.trigger()
 
 
+# a page that is restarting leaves no live controls: a click would queue behind setDocument
+RESTART_STATE: list = []
+window.rich.crashed.connect(lambda: RESTART_STATE.append((window.rich.is_ready, tb.buttons["table"].isEnabled(), box.isEnabled())))
+check(pump(lambda: tb.buttons["table"].isEnabled() and box.isEnabled(), 3), "the controls are live before the crash")
+ASKED.clear()
+ANSWERS[:] = [S.Retry]
+os.kill(window.rich.page().renderProcessPid(), signal.SIGTERM)
+check(pump(lambda: RESTART_STATE, 5), "a crash with the toolbar shown")
+check(RESTART_STATE == [(False, False, False)], f"a restarting page leaves every control disabled ({RESTART_STATE})")
+check(pump(lambda: window.rich.is_ready and tb.buttons["table"].isEnabled() and box.isEnabled(), 8),
+      "the restarted page's first report enables them again")
+
+
 # glyphs follow the theme's text color
 def glyph_lightness(act) -> int:
     image = act.icon().pixmap(16, 16).toImage()
