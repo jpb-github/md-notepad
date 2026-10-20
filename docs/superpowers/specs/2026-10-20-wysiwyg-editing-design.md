@@ -309,8 +309,12 @@ ProseMirror JSON: `{"type", "attrs", "content", "marks", "text"}`.
   Pygments style of the current theme (`light`, `dark`, `gray`). It is
   display-only and ignored by the serializer. When a code block's text or
   language changes, JS clears the attr; the block then displays without
-  highlighting until the next `setDocument` (mode switch or reload; a save keeps the editor state),
-  which recomputes it in Python.
+  highlighting while the caret is in it. Once the caret moves to another
+  top-level block, Python recomputes the highlight of the edited blocks (the
+  page lists them, `render.highlight_code` colors them, the page applies the
+  markup). That update is neither a change nor an undo step, and a block
+  edited in the meantime is skipped. A load (`setDocument`) recomputes every
+  highlight too.
 - `display_src` is the resolved `file:` URI (v1 `_Renderer._resolve` logic);
   `src` is kept as written and is what the serializer emits.
 - Every top-level node carries a transient `line` attr (source start line)

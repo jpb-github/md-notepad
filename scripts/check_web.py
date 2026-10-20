@@ -337,6 +337,30 @@ def check_editor(app: QApplication, view: QWebEngineView, folder: Path, bridge: 
     check(state["highlight"] == "" and "md-has-highlight" not in state["classes"],
           f"typing in a code block clears its highlight ({state})")
 
+    # Leaving the edited block: Python recomputes the highlight (staleCodeBlocks asks, applyHighlights
+    # answers). The answer is neither a change nor an undo step, and only fits an unedited block.
+    check(run_js(app, view, "window.mdEditor.staleCodeBlocks()") == [], "a code block holding the caret is not offered for highlighting")
+    run_js(app, view, "(window.mdEditor.focusBlock(1), 0)")
+    stale = run_js(app, view, "window.mdEditor.staleCodeBlocks()")
+    check([(item["language"], item["code"]) for item in stale] == [("python", "xpass")],
+          f"an edited code block is offered once the caret has left it ({stale})")
+    check(run_js(app, view, "window.mdEditor.staleCodeBlocks()") == [], "and only once")
+    restored = '<span class="n">xpass</span>'
+    update = {**stale[0], "markup": restored}
+    run_js(app, view, "(window.mdEditor.markClean(), 0)")
+    mark = len(bridge.calls)
+    run_js(app, view, f"(window.mdEditor.applyHighlights([{json.dumps(update)}]), 0)")
+    state = code_block_state(app, view)
+    check(state["highlight"] == restored and state["overlay"] == "block" and "md-has-highlight" in state["classes"],
+          f"applyHighlights shows the recomputed highlight ({state})")
+    pump(app, lambda: False, 0.3)
+    check(bridge.args("changed", mark) == [], "restoring a highlight does not report a change")
+    run_js(app, view, "(window.mdEditor.command('undo'), 0)")
+    check(get_doc(app, view)["content"][CODE_INDEX]["content"][0]["text"] == "pass",
+          "restoring a highlight is not an undo step: one undo reverts the typing")
+    run_js(app, view, f"(window.mdEditor.applyHighlights([{json.dumps(update)}]), 0)")
+    check(code_block_state(app, view)["highlight"] == "", "a highlight for text that has changed meanwhile is dropped")
+
     set_doc(app, view, doc)
     run_js(app, view, """(() => {
       const field = document.querySelectorAll('#editor .md-code-block')[1].querySelector('input');

@@ -34,6 +34,8 @@ _MAIN_WORLD = 0  # QWebEngineScript.ScriptWorldId.MainWorld: where window.mdEdit
 _NO_FRAGMENT = QUrl.ComponentFormattingOption.PrettyDecoded | QUrl.UrlFormattingOption.RemoveFragment
 # A pull reads the document and marks the page clean in one step: no edit falls in between.
 _PULL_JS = "(() => {{ const json = JSON.stringify(window.mdEditor.getDocument()); window.mdEditor.markClean({}); return json; }})()"
+# Edited code blocks the caret has left, as [{pos, language, code}] (nodeviews.js staleCodeBlocks).
+_STALE_CODE_JS = "JSON.stringify(window.mdEditor.staleCodeBlocks())"
 # Each top-level block's heading text, null for other blocks (in-page #anchor links).
 _HEADINGS_JS = (
     "(() => { const out = []; window.mdEditor.view.state.doc.forEach("
@@ -128,6 +130,7 @@ class RichView(QWebEngineView):
         self._channel.registerObject("bridge", self._bridge)
         self.page().setWebChannel(self._channel)
         self.page().renderProcessTerminated.connect(self._on_crash)
+        self.caretBlock.connect(lambda _index: self._refresh_highlights())
         self._ready_timer = QTimer(self)
         self._ready_timer.setSingleShot(True)
         self._ready_timer.timeout.connect(self._fail)
@@ -317,3 +320,17 @@ class RichView(QWebEngineView):
             if isinstance(value, str):
                 callback(json.loads(value))
         self._call(_HEADINGS_JS, done)
+
+    def _refresh_highlights(self) -> None:
+        """The caret moved to another top-level block: edited code blocks it left get their
+        highlight back, computed here with Pygments and applied by the page. The answer is
+        neither a change nor an undo step, and the page skips a block edited meanwhile."""
+        def done(value):
+            if not isinstance(value, str):
+                return
+            updates = [{**block, "markup": render.highlight_code(block["code"], block["language"])}
+                       for block in json.loads(value)]
+            updates = [update for update in updates if update["markup"]]
+            if updates:
+                self._call(f"window.mdEditor.applyHighlights({json.dumps(updates)}), 0")
+        self._call(_STALE_CODE_JS, done)

@@ -12,7 +12,10 @@ import { EditorView } from "prosemirror-view";
 import { connectBridge, send } from "./bridge.js";
 import { FORMATTING_COMMANDS } from "./commands.js";
 import { inputPlugins } from "./input.js";
-import { createNodeViews, displayPlugins, flushLanguageFields, refreshFrames } from "./nodeviews.js";
+import {
+  HIGHLIGHT_META, applyHighlights, createNodeViews, displayPlugins, flushLanguageFields, refreshFrames, resetStaleCode,
+  staleCodeBlocks,
+} from "./nodeviews.js";
 import { schema } from "./schema.js";
 import { TABLE_COMMANDS, tablePlugins } from "./tables.js";
 
@@ -160,7 +163,7 @@ const view = new EditorView(document.getElementById("editor"), {
   dispatchTransaction(tr) {
     const before = view.state.doc;
     view.updateState(view.state.apply(tr));
-    if (view.state.doc !== before) reportChange();
+    if (view.state.doc !== before && !tr.getMeta(HIGHLIGHT_META)) reportChange();
     report(view.state);
   },
 });
@@ -173,6 +176,7 @@ function setDocument(json, keepScroll = false, docEpoch = epoch) {
   epoch = docEpoch;
   sent.changed = false;
   const state = createState(json);
+  resetStaleCode();
   const scroller = document.scrollingElement;
   const top = scroller.scrollTop;
   view.updateState(state);
@@ -219,6 +223,9 @@ window.mdEditor = {
     if (done) view.focus();
     return done;
   },
+  // Edited code blocks the caret has left, for Python to highlight; applyHighlights answers.
+  staleCodeBlocks: () => staleCodeBlocks(view.state),
+  applyHighlights: (updates) => applyHighlights(view, updates),
   // `css` is render.page_css(theme); the frames re-read the theme colors.
   setTheme(css) {
     document.getElementById("theme").textContent = css;

@@ -1986,6 +1986,24 @@ check(window.dirty and window.buffer == "intro\n\n<div>\nraw\n</div>\n\nafterX\n
 FAKE["answer"] = S.Discard
 window.on_new()
 
+# --- Code block highlight comes back after editing ---------------------------------
+hl_md = TMP / "highlight.md"
+hl_md.write_bytes(b"intro\n\n```python\nx = 1\n```\n\nafter\n")
+window.open_file(hl_md)
+HAS_HL = "document.querySelector('#editor .md-code-block').classList.contains('md-has-highlight')"
+check(window.mode == "rendered" and pump(lambda: window.rich.is_ready and page_js(window.rich, HAS_HL), 3),
+      "a code block shows its highlight after loading")
+window.rich.focus_block(1)
+page_js(window.rich, "(() => { const v = window.mdEditor.view; v.dispatch(v.state.tr.insertText('y', v.state.selection.from)); return 0; })()")
+check(pump(lambda: window.dirty, 3) and page_js(window.rich, HAS_HL) is False, "typing in a code block drops its highlight")
+window.rich.focus_block(2)
+check(pump(lambda: page_js(window.rich, HAS_HL), 3), "leaving the edited code block restores its highlight")
+check(page_js(window.rich, "document.querySelector('#editor .md-code-highlight').textContent").strip() == "yx = 1",
+      "the restored highlight is for the edited text")
+check(window.dirty, "restoring the highlight leaves the edit pending")
+FAKE["answer"] = S.Discard
+window.on_new()
+
 # --- Later tasks insert their checks directly above this line. ---
 
 shutil.rmtree(TMP, ignore_errors=True)

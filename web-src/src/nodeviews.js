@@ -115,7 +115,7 @@ class CodeBlockView {
     this.language.value = language;
     const pos = this.getPos();
     if (pos === undefined || language === this.node.attrs.language) return;
-    // The highlight belongs to the old language: drop it (Python recomputes it on the next load).
+    // The highlight belongs to the old language: drop it (Python recomputes it once the caret is elsewhere).
     this.view.dispatch(this.view.state.tr.setNodeMarkup(pos, null, { ...this.node.attrs, language, highlight: "" }));
   }
 
@@ -288,23 +288,74 @@ const activeCodePlugin = new Plugin({
   },
 });
 
+// Transactions that only restore a highlight (applyHighlights): not an edit, not an undo step.
+export const HIGHLIGHT_META = "mdHighlight";
+
+// A code block was edited since the last setDocument or staleCodeBlocks(): its highlight is
+// gone and Python may recompute it.
+let staleCode = false;
+
+export function resetStaleCode() {
+  staleCode = false;
+}
+
 // Clears `highlight` on every code block inside the changed range: the markup no
-// longer matches the text (or language) and Python recomputes it on the next load.
+// longer matches the text (or language). Python recomputes it once the caret has left the
+// block (staleCodeBlocks / applyHighlights) or on the next load.
 const staleHighlightPlugin = new Plugin({
   appendTransaction(transactions, oldState, newState) {
-    if (!transactions.some((tr) => tr.docChanged)) return null;
+    if (!transactions.some((tr) => tr.docChanged) || transactions.some((tr) => tr.getMeta(HIGHLIGHT_META))) return null;
     const start = oldState.doc.content.findDiffStart(newState.doc.content);
     if (start === null) return null;
     const end = Math.max(start, oldState.doc.content.findDiffEnd(newState.doc.content).b);
     const tr = newState.tr;
     newState.doc.nodesBetween(start, end, (node, pos) => {
-      if (node.type.name === "code_block" && node.attrs.highlight) {
-        tr.setNodeMarkup(pos, null, { ...node.attrs, highlight: "" });
-      }
+      if (node.type.name !== "code_block") return;
+      staleCode = true;
+      if (node.attrs.highlight) tr.setNodeMarkup(pos, null, { ...node.attrs, highlight: "" });
     });
     return tr.docChanged ? tr : null;
   },
 });
+
+// The edited code blocks that have a language, no highlight and no caret in them:
+// [{ pos, language, code }]. Each is offered once; one holding the caret waits for it to leave.
+export function staleCodeBlocks(state) {
+  if (!staleCode) return [];
+  const { from, to } = state.selection;
+  const found = [];
+  let waiting = false;
+  state.doc.descendants((node, pos) => {
+    if (node.type.name !== "code_block") return true;
+    if (node.attrs.highlight === "" && node.attrs.language) {
+      const end = pos + node.nodeSize;
+      if ((from > pos && from < end) || (to > pos && to < end)) waiting = true;
+      else found.push({ pos, language: node.attrs.language, code: node.textContent });
+    }
+    return false;
+  });
+  staleCode = waiting;
+  return found;
+}
+
+// Python's answer to staleCodeBlocks: [{ pos, language, code, markup }]. A block that changed
+// meanwhile (moved, edited, other language, already highlighted) is skipped.
+export function applyHighlights(view, updates) {
+  const tr = view.state.tr;
+  for (const { pos, language, code, markup } of updates) {
+    let node = null;
+    try {
+      node = view.state.doc.nodeAt(pos);
+    } catch {
+      continue; // pos is outside the document now
+    }
+    if (node?.type.name === "code_block" && node.attrs.language === language && node.attrs.highlight === ""
+        && node.textContent === code) {
+      tr.setNodeMarkup(pos, null, { ...node.attrs, highlight: markup });
+    }
+  }
+  if (tr.docChanged) view.dispatch(tr.setMeta(HIGHLIGHT_META, true).setMeta("addToHistory", false));
+}
 
 // Double-click on a protected block or chip asks Python to show it in Source mode.
 // callbacks.editProtected(index) receives the index of the enclosing top-level block.
