@@ -270,18 +270,19 @@ channel signals):
 
 | Call | Purpose |
 |---|---|
-| `setDocument(json, keepScroll)` | Replace the document; new EditorState (empty undo history) |
+| `setDocument(json, keepScroll, epoch)` | Replace the document; new EditorState (empty undo history). `epoch` numbers the load for `changed` |
 | `getDocument() -> json` | Return the current document (async callback in Python) |
+| `markClean(epoch)` | The document was just pulled: start epoch `epoch`; the next edit reports `changed` again (keeps the undo history) |
 | `command(name, args)` | Run a toolbar/menu command, e.g. `("toggleMark", "strong")`, `("setBlock", {"type": "heading", "level": 2})`, `("insertTable", {"rows": 3, "cols": 3})` |
 | `setTheme(css)` | Swap the theme stylesheet (`render.page_css(theme)`: CSS variables and code-highlight colors), no reload |
 | `focusBlock(index)` | Place caret at the start of top-level block `index` |
 
-JS -> Python (`Bridge` signals/slots):
+JS -> Python (`Bridge` slots, re-emitted as `RichView` signals of the same names):
 
 | Call | Purpose |
 |---|---|
 | `ready()` | Page and bundle loaded, channel connected |
-| `changed()` | First change since the last `setDocument` (sets dirty) |
+| `changed(epoch)` | First change since the last `setDocument` or `markClean` (sets dirty); Python ignores older epochs |
 | `selectionState(dict)` | `{marks, block, can}` throttled to ~50 ms; drives the toolbar |
 | `requestLinkDialog(text, href)` / `requestImageDialog()` | Python runs the seam, then calls `command` with the result |
 | `openLink(href)` | Ctrl+click; Python validates the scheme and calls `open_external` |
@@ -308,7 +309,7 @@ ProseMirror JSON: `{"type", "attrs", "content", "marks", "text"}`.
   Pygments style of the current theme (`light`, `dark`, `gray`). It is
   display-only and ignored by the serializer. When a code block's text or
   language changes, JS clears the attr; the block then displays without
-  highlighting until the next `setDocument` (mode switch, reload or save),
+  highlighting until the next `setDocument` (mode switch or reload; a save keeps the editor state),
   which recomputes it in Python.
 - `display_src` is the resolved `file:` URI (v1 `_Renderer._resolve` logic);
   `src` is kept as written and is what the serializer emits.
@@ -394,7 +395,7 @@ uses `setZoomFactor` as in v1 and persists as before.
 | `from_markdown` raises | File opens in Source mode; status warning `Opened in Source mode: the rendered editor could not load this file.` |
 | Page or bundle fails to load (`ready()` never arrives within 5 s) | Rendered mode disabled for the session (menu item greyed), status warning; Source works |
 | Serializer raises during a pull | Pending action aborted; message box; document stays dirty |
-| Pull callback missing after 3 s (renderer crash) | Message box: `The rendered editor stopped responding.` with **Switch to Source** (uses the last pulled buffer; edits since then are lost - stated in the box) or **Retry** |
+| Pull callback missing after 3 s plus 0.1 s per MB of document JSON, counted once earlier document loads have finished (renderer hang) | Message box: `The rendered editor stopped responding.` with **Switch to Source** (uses the last pulled buffer; edits since then are lost - stated in the box) or **Retry** |
 | Renderer process crash (`renderProcessTerminated`) | Same as above; the view is reloaded from the buffer afterwards |
 
 v1 error handling (open/read failures, watch-time read failures, deleted

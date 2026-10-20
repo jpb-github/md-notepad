@@ -58,9 +58,9 @@ class Bridge(QObject):
     def ready(self) -> None:
         self.calls.append(["ready"])
 
-    @Slot()
-    def changed(self) -> None:
-        self.calls.append(["changed"])
+    @Slot(int)
+    def changed(self, epoch: int) -> None:
+        self.calls.append(["changed", epoch])
 
     @Slot("QVariantMap")
     def selectionState(self, state: dict) -> None:
@@ -126,9 +126,8 @@ def run_js(app: QApplication, view: QWebEngineView, script: str):
 def build_page(folder: Path) -> Path:
     for name in RUNTIME_FILES:
         shutil.copy2(WEB / name, folder / name)
-    shell = (WEB / "editor.html").read_text(encoding="utf-8")
-    check(shell.count(THEME_SLOT) == 1 and shell.count(FIRST_SCRIPT) == 1, "editor.html has the expected slots")
-    shell = shell.replace(THEME_SLOT, render.page_css("light"))
+    shell = render.editor_page("light")  # the page RichView loads
+    check(THEME_SLOT not in shell and shell.count(FIRST_SCRIPT) == 1, "editor_page fills the theme slot")
     shell = shell.replace(FIRST_SCRIPT, INLINE_PROBE + FIRST_SCRIPT)
     page_file = folder / "editor.html"
     page_file.write_text(shell, encoding="utf-8")
@@ -557,7 +556,7 @@ def check_bridge(app: QApplication, view: QWebEngineView, page: Page, bridge: Br
     run_js(app, view, f"""(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('A', {PLAIN})),
         window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('B', {PLAIN})), 0)""")
     state = history_view(latest_state(app, bridge))
-    check(bridge.args("changed", mark) == [[]], "two edits after a load report changed once")
+    check(bridge.args("changed", mark) == [[0]], "two edits after a load report changed once")
     check(state and state["can"] == {"undo": True, "redo": False}, f"an edit can be undone ({state})")
     check(run_js(app, view, "window.mdEditor.command('undo')") is True and get_doc(app, view) == doc,
           "command('undo') restores the loaded document")
@@ -576,7 +575,28 @@ def check_bridge(app: QApplication, view: QWebEngineView, page: Page, bridge: Br
     mark = len(bridge.calls)
     run_js(app, view, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('C', {PLAIN})), 0)")
     pump(app, lambda: bridge.args("changed", mark), 3)
-    check(bridge.args("changed", mark) == [[]], "the first edit after another load reports changed again")
+    check(bridge.args("changed", mark) == [[0]], "the first edit after another load reports changed again")
+
+    # Epochs: changed() names the latest setDocument or markClean, which also re-arms it.
+    mark = len(bridge.calls)
+    check(run_js(app, view, "window.mdEditor.markClean(4)") is None, "markClean returns nothing")
+    run_js(app, view, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('D', {PLAIN})), 0)")
+    run_js(app, view, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('E', {PLAIN})), 0)")
+    pump(app, lambda: bridge.args("changed", mark), 3)
+    pump(app, lambda: False, 0.2)
+    check(bridge.args("changed", mark) == [[4]], "after markClean(4) the next edits report changed(4) once")
+    check(run_js(app, view, "window.mdEditor.command('undo')") is True, "markClean keeps the undo history")
+    mark = len(bridge.calls)
+    run_js(app, view, f"(window.mdEditor.setDocument({json.dumps(doc)}, false, 9), 0)")
+    run_js(app, view, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('F', {PLAIN})), 0)")
+    pump(app, lambda: bridge.args("changed", mark), 3)
+    check(bridge.args("changed", mark) == [[9]], "setDocument(json, keepScroll, 9) makes the next edit changed(9)")
+    mark = len(bridge.calls)
+    set_doc(app, view, doc)
+    run_js(app, view, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('G', {PLAIN})), 0)")
+    pump(app, lambda: bridge.args("changed", mark), 3)
+    check(bridge.args("changed", mark) == [[9]], "setDocument without an epoch keeps the current one")
+    run_js(app, view, "(window.mdEditor.markClean(0), 0)")
 
     # setTheme: swaps the theme stylesheet and the raw HTML frame colors, without a reload.
     set_doc(app, view, doc)
@@ -900,7 +920,7 @@ def check_editing(app: QApplication, view: QWebEngineView, bridge: Bridge) -> No
         check(result == expected and run_js(app, view, caret) == before,
               f"clicking a task checkbox toggles the item and leaves the caret ({result!r})")
     pump(app, lambda: bridge.args("changed", mark), 3)
-    check(bridge.args("changed", mark) == [[]], "toggling a task checkbox reports a change")
+    check(bridge.args("changed", mark) == [[0]], "toggling a task checkbox reports a change")
 
 
 # --- Task 11: tables, paste and protected blocks --------------------------------------------

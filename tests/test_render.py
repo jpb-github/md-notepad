@@ -146,3 +146,13 @@ def test_highlight_code_language_lookup_ignores_case():
 @pytest.mark.parametrize("language", ["", "  ", "nosuchlang", "py thon"])
 def test_highlight_code_unknown_language_is_empty(language):
     assert render.highlight_code("x = 1", language) == ""
+
+
+@pytest.mark.parametrize("theme", render.THEMES)
+def test_editor_page_fills_the_theme_slot(theme):
+    shell = (render.WEB_DIR / "editor.html").read_text(encoding="utf-8")
+    page = render.editor_page(theme)
+    assert render.THEME_SLOT not in page
+    assert f'<style id="theme">{render.page_css(theme)}</style>' in page
+    assert page.replace(render.page_css(theme), render.THEME_SLOT) == shell  # nothing else changes
+    assert (render.WEB_DIR / "editor.js").is_file()

@@ -29,8 +29,11 @@ const COMMANDS = {
   ...TABLE_COMMANDS,
 };
 
-// What has been reported to Python since the last setDocument.
+// What has been reported to Python since the last setDocument or, for changed, markClean.
 const sent = { changed: false, caretBlock: null, selectionState: null, hoverLink: "" };
+// Python numbers every setDocument and markClean; changed(epoch) names the latest one, so
+// Python can tell an edit made after a save's pull from one made before it.
+let epoch = 0;
 let selectionTimer = null;
 
 function linkAt(view, target) {
@@ -152,7 +155,7 @@ const view = new EditorView(document.getElementById("editor"), {
     view.updateState(view.state.apply(tr));
     if (view.state.doc !== before && !sent.changed) {
       sent.changed = true;
-      send("changed");
+      send("changed", epoch);
     }
     report(view.state);
   },
@@ -160,8 +163,9 @@ const view = new EditorView(document.getElementById("editor"), {
 
 // New EditorState: empty undo history, caret at the start. With keepScroll the page
 // keeps its scroll offset (external reload), otherwise it scrolls to the top.
-function setDocument(json, keepScroll = false) {
+function setDocument(json, keepScroll = false, docEpoch = epoch) {
   const state = createState(json);
+  epoch = docEpoch;
   const scroller = document.scrollingElement;
   const top = scroller.scrollTop;
   view.updateState(state);
@@ -187,6 +191,11 @@ window.mdEditor = {
   view,
   setDocument,
   getDocument: () => withoutCellExtras(view.state.doc.toJSON()),
+  // Python has the current document (a pull): the next edit reports changed(cleanEpoch).
+  markClean(cleanEpoch = epoch) {
+    epoch = cleanEpoch;
+    sent.changed = false;
+  },
   // The selectionState payload for the current selection, at once (context menu).
   selectionState: () => selectionState(view.state),
   // Runs a toolbar or menu command; false when it does not apply here (or is unknown).

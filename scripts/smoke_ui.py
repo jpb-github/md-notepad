@@ -4,19 +4,25 @@ Run: .venv\\Scripts\\python scripts\\smoke_ui.py  ->  prints SMOKE OK or the fai
 Lives outside tests/ because tests/ must never import Qt.
 """
 
+import json
 import os
+import re
 import shutil
+import signal
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
+os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")  # shown web views: no GPU log noise
 TMP = Path(tempfile.mkdtemp(prefix="mdviewer-smoke-"))
 os.environ["APPDATA"] = str(TMP / "appdata")  # never touch the real settings.json
 # The offscreen platform ships an empty font database; point it at the Windows fonts
 # so the Preferences font list (fixed-pitch filter) has something to filter.
 os.environ.setdefault("QT_QPA_FONTDIR", os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts"))
 
+from PySide6.QtCore import QEventLoop  # noqa: E402
 from PySide6.QtGui import QCloseEvent, QTextCursor  # noqa: E402
 from PySide6.QtWidgets import QMessageBox, QPlainTextEdit  # noqa: E402
 
@@ -34,6 +40,42 @@ FAKE = {"answer": S.Cancel, "open_path": "", "save_path": ""}
 def check(condition, label: str) -> None:
     if not condition:
         FAILURES.append(label)
+
+
+def pump(predicate, timeout_s: float) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while not predicate() and time.monotonic() < deadline:
+        qt_app.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 50)
+    return bool(predicate())
+
+
+def page_js(view, script: str):
+    """Evaluates `script` in the page's main world; JSON-serializable result (undefined -> None)."""
+    box: list = []
+    view.page().runJavaScript(f"JSON.stringify(({script}) ?? null)", 0, box.append)
+    pump(lambda: box, 3)
+    return json.loads(box[0]) if box and box[0] else None  # "" when JavaScript is off
+
+
+def pull(view, timeout_s: float = 10) -> list:
+    """request_document's callback arguments, after waiting for the first one."""
+    got: list = []
+    view.request_document(got.append)
+    pump(lambda: got, timeout_s)
+    return got
+
+
+def record(view) -> list:
+    """Every RichView signal as [name, *args], in arrival order."""
+    seen: list = []
+    for name in ("ready", "changed", "selectionState", "requestLinkDialog", "requestImageDialog", "openLink",
+                 "hoverLink", "editProtected", "caretBlock", "load_failed", "crashed"):
+        getattr(view, name).connect(lambda *args, name=name: seen.append([name, *args]))
+    return seen
+
+
+def names(seen: list) -> list[str]:
+    return [entry[0] for entry in seen]
 
 
 def fake_ask(box):
@@ -887,6 +929,216 @@ sizes = PREFS_DIALOGS[-1].size_box
 check((sizes.minimum(), sizes.maximum()) == (settings.FONT_SIZE_MIN, settings.FONT_SIZE_MAX), "size spin box uses the settings limits")
 choose_theme("system")
 check(window._theme_choice == "system", "theme choice still works after font changes")
+
+# --- WYSIWYG Task 12: RichView and Bridge ---------------------------------------
+from PySide6.QtCore import QPoint, Qt, QUrl  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings  # noqa: E402
+
+from mdviewer import richview  # noqa: E402
+from mdviewer.core import docmodel, frontmatter, render  # noqa: E402
+
+# The Bridge has exactly one slot per call bridge.js makes, and nothing else of its own.
+bridge_js = (Path(__file__).resolve().parent.parent / "web-src" / "src" / "bridge.js").read_text(encoding="utf-8")
+CALLS = json.loads(re.search(r"^export const CALLS = (\[.*?^\]);$", bridge_js, flags=re.S | re.M).group(1))
+meta = richview.Bridge.staticMetaObject
+own = [meta.method(i) for i in range(meta.methodOffset(), meta.methodCount())]
+check([bytes(m.name()).decode() for m in own] == CALLS, "Bridge declares one slot per bridge.js call, in order")
+check(all(m.methodType() == m.MethodType.Slot for m in own), "Bridge declares only slots (no signals for the page)")
+check(meta.propertyCount() == meta.propertyOffset(), "Bridge declares no properties")
+
+# Load: ready() arrives, the page sits in a temp folder with its runtime files and theme CSS.
+rich = richview.RichView("light")
+seen = record(rich)
+rich.resize(800, 600)
+rich.show()  # hidden pages throttle timers: selectionState would arrive late (plan Task 9)
+check(rich.settings().testAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled), "JavaScript is enabled in the editor")
+check(rich.contextMenuPolicy() == Qt.ContextMenuPolicy.NoContextMenu, "no Chromium context menu (Reload, View Source)")
+before_ready = docmodel.from_markdown("# Early\n")
+rich.set_document(before_ready)
+early = []
+rich.request_document(early.append)
+check(pump(lambda: rich.is_ready, richview.READY_TIMEOUT_MS / 1000), "RichView becomes ready within 5 s")
+check(names(seen)[:1] == ["ready"], f"ready is the first signal ({names(seen)})")
+check(pump(lambda: early, 5) and early == [before_ready], "calls made before ready() run after it, in order")
+folder = rich.page_file.parent
+check(sorted(p.name for p in folder.iterdir()) == sorted(["editor.html", *richview.RUNTIME_FILES]),
+      "temp folder holds the page and its runtime files")
+check(rich.page_file.read_text(encoding="utf-8") == render.editor_page("light"), "page file is editor_page(theme)")
+check(rich.url() == QUrl.fromLocalFile(str(rich.page_file)), "the view shows the page file")
+
+# Round trip: what set_document puts in comes back from request_document.
+WYSIWYG_MD = (
+    "---\ntitle: x\n---\n\n# Café 😀\n\nText with **bold**, *em*, `code`, ~~gone~~ and\u00a0NBSP.\n\n"
+    "- [x] done\n- [ ] todo\n\n1. one\n2. two\n\n> quote\n\n```python\nprint('hi')\n```\n\n"
+    "| a | b |\n| :-- | --: |\n| 1 | 2 |\n\n![pic](pic.png) [bad](javascript:alert(1)) [web](https://example.com)\n\n"
+    "<div>raw <script>parent.scriptRan = true</script><img src=\"nope.png\" onerror=\"parent.handlerRan = true\"></div>\n\n"
+    "Note[^1].\n\n[^1]: The note.\n"
+)
+front, body = frontmatter.split(WYSIWYG_MD)
+doc = docmodel.from_markdown(body, front, TMP)
+rich.set_document(doc)
+check(pull(rich) == [doc], "request_document returns the document set_document loaded")
+pump(lambda: False, 0.5)  # frames load; a script would have run by now
+check(page_js(rich, "window.scriptRan === undefined && window.handlerRan === undefined") is True,
+      "raw HTML <script> and event handlers never run")
+hrefs = page_js(rich, "[...document.querySelectorAll('#editor a[href]')].map((a) => a.getAttribute('href'))")
+check(hrefs == ["https://example.com"], f"javascript: link stripped, web link kept ({hrefs})")
+check("changed" not in names(seen), "loading documents does not report a change")
+
+# Bridge slots re-emit as RichView signals with their arguments.
+seen.clear()
+bridge = rich._bridge
+bridge.selectionState({"marks": ["strong"], "block": {"type": "paragraph"}, "can": {"undo": True}})
+bridge.requestLinkDialog("text", "https://x.test")
+bridge.requestImageDialog()
+bridge.openLink("https://x.test")
+bridge.hoverLink("")
+bridge.editProtected(3)
+bridge.caretBlock(2)
+check(seen == [
+    ["selectionState", {"marks": ["strong"], "block": {"type": "paragraph"}, "can": {"undo": True}}],
+    ["requestLinkDialog", "text", "https://x.test"], ["requestImageDialog"], ["openLink", "https://x.test"],
+    ["hoverLink", ""], ["editProtected", 3], ["caretBlock", 2],
+], f"Bridge slots re-emit as RichView signals ({seen})")
+
+# Commands and focus go through the channel both ways: one changed() per load, state follows.
+seen.clear()
+rich.set_document(docmodel.from_markdown("plain words\n\nsecond\n"))
+pump(lambda: "caretBlock" in names(seen), 3)
+rich.focus_block(1)
+check(pump(lambda: ["caretBlock", 1] in seen, 3), "focus_block moves the caret (caretBlock 1)")
+seen.clear()
+rich.focus_block(0)
+pump(lambda: ["caretBlock", 0] in seen, 3)
+rich.activateWindow()  # the main window is shown too; keys go to the active window
+QTest.keyClick(rich.focusProxy(), Qt.Key.Key_End, Qt.KeyboardModifier.ShiftModifier)
+check(pump(lambda: page_js(rich, "window.mdEditor.view.state.selection.empty") is False, 3), "Shift+End selects the line")
+rich.command("toggleMark", "strong")
+rich.command("toggleMark", "em")
+check(pump(lambda: names(seen).count("changed") == 1 and any(
+    e[0] == "selectionState" and e[1]["marks"] == ["strong", "em"] for e in seen), 3),
+    f"command edits report changed once and the new marks ({seen[-3:]})")
+check(pull(rich)[0]["content"][0]["content"][0]["marks"] == [{"type": "strong"}, {"type": "em"}],
+      "commands change the pulled document")
+
+# changed(epoch): a change from before the latest load or pull is not a new edit.
+seen.clear()
+rich.set_document(docmodel.from_markdown("fresh\n"))
+check(not rich.modified, "set_document leaves the view unmodified")
+bridge.changed(rich._epoch - 1)  # in flight from the document this load replaced
+pump(lambda: False, 0.3)
+check("changed" not in names(seen) and not rich.modified, "a changed() from the replaced document is dropped")
+rich.command("insertRule")
+rich.command("insertRule")
+check(pump(lambda: "changed" in names(seen), 3) and rich.modified, "an edit after set_document reports changed")
+pump(lambda: False, 0.3)
+check(names(seen).count("changed") == 1, "and only once per load")
+bridge.changed(rich._epoch)  # a repeated message for the same load
+check(names(seen).count("changed") == 1, "a repeated changed() is emitted once")
+# A pull marks the page clean and re-arms changed: the next edit is reported again.
+check(pull(rich)[0] is not None and not rich.modified, "a pull leaves the view unmodified")
+bridge.changed(rich._epoch - 1)  # an edit the pull already read
+pump(lambda: False, 0.3)
+check(names(seen).count("changed") == 1, "a changed() from before the pull is dropped")
+rich.command("insertRule")
+check(pump(lambda: names(seen).count("changed") == 2, 3) and rich.modified, "the first edit after a pull reports changed")
+check(page_js(rich, "window.mdEditor.command('undo')") is True, "a pull keeps the undo history")
+
+# Theme and zoom: no reload, document and history kept.
+loads: list = []
+rich.loadStarted.connect(lambda: loads.append(1))
+rich.set_document(docmodel.from_markdown("theme\n"))
+rich.setZoomFactor(1.5)
+rich.set_theme("dark")
+pump(lambda: False, 0.3)
+background = page_js(rich, "getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()")
+check(background == render.PAGE_BACKGROUND["dark"], f"set_theme swaps the theme CSS ({background})")
+check(rich.page().backgroundColor().name() == render.PAGE_BACKGROUND["dark"], "set_theme sets the page background")
+check(loads == [] and rich.zoomFactor() == 1.5, "theme change and set_document keep the page and the zoom")
+check(pull(rich)[0] == docmodel.from_markdown("theme\n"), "theme change keeps the document")
+rich.setZoomFactor(1.0)  # the click below uses page coordinates
+
+# Navigation guard: only the page itself; links leave through openLink (Ctrl+click).
+LINK = QWebEnginePage.NavigationType.NavigationTypeLinkClicked
+TYPED = QWebEnginePage.NavigationType.NavigationTypeTyped
+OTHER = QWebEnginePage.NavigationType.NavigationTypeOther
+own_url = QUrl.fromLocalFile(str(rich.page_file))
+anchor = QUrl(own_url)
+anchor.setFragment("fn-1")
+guard = rich.page().acceptNavigationRequest
+check(guard(own_url, TYPED, True) and guard(anchor, LINK, True), "own page and in-page anchors are allowed")
+check(not guard(QUrl("https://example.com"), LINK, True), "a clicked web link does not navigate the page")
+check(not guard(QUrl.fromLocalFile(str(TMP / "dropped.md")), TYPED, True), "a dropped file does not replace the page")
+check(guard(QUrl("about:srcdoc"), OTHER, False) and not guard(QUrl("https://example.com"), LINK, False),
+      "raw HTML frames load their srcdoc and nothing else")
+seen.clear()
+rich.set_document(docmodel.from_markdown("[web](https://example.com/page)\n"))
+pump(lambda: False, 0.3)
+point = page_js(rich, "(() => { const b = document.querySelector('#editor a').getBoundingClientRect();"
+                      " return [Math.round(b.left + b.width / 2), Math.round(b.top + b.height / 2)]; })()")
+QTest.mouseClick(rich.focusProxy(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, QPoint(*point))
+check(pump(lambda: ["openLink", "https://example.com/page"] in seen, 3), "Ctrl+click on a link emits openLink(href)")
+pump(lambda: False, 0.3)
+check(rich.url() == own_url, "Ctrl+click does not navigate the page")
+
+# Pull timeout: a busy page answers None once; the late answer is ignored.
+rich.command("insertRule")
+pump(lambda: rich.modified, 3)
+saved_timeout = richview.PULL_TIMEOUT_MS
+richview.PULL_TIMEOUT_MS = 300
+rich.page().runJavaScript("(() => { const t = Date.now(); while (Date.now() - t < 1200); })()", 0)
+started = time.monotonic()
+busy = pull(rich, 3)
+waited = time.monotonic() - started
+check(busy == [None] and waited < 1.1, f"a pull with no answer in time gives None ({busy}, {waited:.2f} s)")
+check(rich.modified, "a failed pull leaves the view modified")
+pump(lambda: False, 1.5)
+check(busy == [None], "the late answer does not call back again")
+richview.PULL_TIMEOUT_MS = saved_timeout
+check(pull(rich)[0]["content"][0] == docmodel.from_markdown("[web](https://example.com/page)\n")["content"][0],
+      "pulls work again afterwards")
+
+# Renderer crash: crashed(), the pending pull gets None, restart() brings a working page back.
+rich.command("insertRule")  # this document's change is reported before the crash
+check(pump(lambda: "changed" in names(seen), 3), "an edit reports changed")
+seen.clear()
+rich.page().runJavaScript("(() => { const t = Date.now(); while (Date.now() - t < 3000); })()", 0)
+crash_pull: list = []
+rich.request_document(crash_pull.append)
+os.kill(rich.page().renderProcessPid(), signal.SIGTERM)
+check(pump(lambda: "crashed" in names(seen), 5), "a killed renderer emits crashed")
+check(crash_pull == [None] and not rich.is_ready, "the pull in flight gets None and the view is not ready")
+rich.restart()
+check(pump(lambda: rich.is_ready, 5), "restart() loads a fresh page")
+rich.command("insertRule")
+check(pump(lambda: "changed" in names(seen), 3), "the first edit on the restarted page reports changed")
+again = docmodel.from_markdown("# Back\n")
+rich.set_document(again)
+check(pull(rich) == [again], "set_document and request_document work after a restart")
+check(page_js(rich, "getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()")
+      == render.PAGE_BACKGROUND["dark"], "the restarted page keeps the current theme")
+rich.close()
+
+# Load failures: missing page files, or no ready() in time -> load_failed; then calls are no-ops.
+saved_web, saved_ready = render.WEB_DIR, richview.READY_TIMEOUT_MS
+render.WEB_DIR = TMP / "no-web"
+missing = richview.RichView()
+missing_seen = record(missing)
+check(pump(lambda: "load_failed" in names(missing_seen), 1) and missing.failed, "missing page files -> load_failed")
+render.WEB_DIR = saved_web
+richview.READY_TIMEOUT_MS = 50  # the real page needs ~0.5 s: its ready() comes too late
+late = richview.RichView()
+late_seen = record(late)
+check(pump(lambda: "load_failed" in names(late_seen), 3), "no ready() in time -> load_failed")
+pump(lambda: False, 1.5)  # the page's own ready() arrives meanwhile
+check(names(late_seen) == ["load_failed"] and not late.is_ready, f"a late ready() is ignored ({names(late_seen)})")
+nothing: list = []
+late.request_document(nothing.append)
+late.set_document(docmodel.from_markdown("x\n"))
+late.command("toggleMark", "strong")
+check(nothing == [None], "after load_failed, request_document answers None at once")
+richview.READY_TIMEOUT_MS = saved_ready
 
 # --- Later tasks insert their checks directly above this line. ---
 

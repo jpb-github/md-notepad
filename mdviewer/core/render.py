@@ -160,3 +160,13 @@ def build_page(text: str, theme: str, base_dir: Path | None = None) -> tuple[str
         f"<style>{page_css(theme)}</style></head>"
         f'<body><article class="markdown-body">{body}</article></body></html>\n'
     ), ok
+
+
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+THEME_SLOT = "/*@THEME_CSS@*/"
+
+
+def editor_page(theme: str) -> str:
+    """The Rendered editor's page: web/editor.html with page_css(theme) in its theme slot."""
+    shell = (WEB_DIR / "editor.html").read_text(encoding="utf-8")
+    return shell.replace(THEME_SLOT, page_css(theme), 1)
