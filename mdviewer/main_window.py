@@ -765,6 +765,10 @@ class MainWindow(QMainWindow):
         """Show the hovered link's URL; leaving clears it only while it is still shown."""
         bar = self.statusBar()
         if href:
+            shown = bar.currentMessage()
+            if shown and shown != self._hovered:  # a warning is showing: the hover waits for the next link
+                self._hovered = ""
+                return
             self._hovered = href
             bar.showMessage(href)
             return
