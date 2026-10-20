@@ -9327,7 +9327,7 @@ Task 9 code. Results:
     - Task 11 appends its table and paste checks after `check_editing`,
       reusing these helpers.
 
-- [ ] **Step 1: Write the failing page checks**
+- [x] **Step 1: Write the failing page checks**
 
 All edits are in `scripts/check_web.py`.
 
@@ -9653,7 +9653,7 @@ d. In `main()`, directly after `    check_bridge(app, view, page, bridge)` add
     check_editing(app, view, bridge)
 ```
 
-- [ ] **Step 2: Run the page check to verify it fails**
+- [x] **Step 2: Run the page check to verify it fails**
 
 Run: `.venv/Scripts/python scripts/check_web.py`
 Expected: exit code 1 with 80 failure labels. The first is
@@ -9661,7 +9661,7 @@ Expected: exit code 1 with 80 failure labels. The first is
 and every command and key case fails, because the Task 9 bundle knows only
 `undo` and `redo`. The Task 8 and Task 9 labels must not appear.
 
-- [ ] **Step 3: Write the commands**
+- [x] **Step 3: Write the commands**
 
 Create `web-src/src/commands.js`:
 
@@ -9973,7 +9973,7 @@ function canInsertImage(state) {
 }
 ```
 
-- [ ] **Step 4: Write the keymaps, input rules and checkbox handling**
+- [x] **Step 4: Write the keymaps, input rules and checkbox handling**
 
 Create `web-src/src/input.js`:
 
@@ -10151,7 +10151,7 @@ export function inputPlugins() {
 }
 ```
 
-- [ ] **Step 5: Wire them into the editor**
+- [x] **Step 5: Wire them into the editor**
 
 In `web-src/src/editor.js`, replace
 
@@ -10229,7 +10229,7 @@ with
 | `web-src/src/input.js` | new | keymaps, input rules, list/code keys, task checkbox, gap and drop cursor | 10 |
 ```
 
-- [ ] **Step 6: Rebuild the bundle**
+- [x] **Step 6: Rebuild the bundle**
 
 Run: `.venv/Scripts/python scripts/build_web.py`
 Expected: exit code 0. esbuild reports `editor.js` at about 255 KB and
@@ -10238,7 +10238,7 @@ Expected: exit code 0. esbuild reports `editor.js` at about 255 KB and
 `prosemirror-commands`, `-dropcursor`, `-gapcursor`, `-inputrules` and
 `-schema-list`.
 
-- [ ] **Step 7: Run the page check to verify it passes**
+- [x] **Step 7: Run the page check to verify it passes**
 
 Run: `.venv/Scripts/python scripts/check_web.py`
 Expected: `WEB OK`, exit code 0 (plus the 6 expected GLES lines on stderr).
@@ -10249,7 +10249,7 @@ check that `view.focusProxy()` has the focus. Do **not** loosen the
 expected Markdown of a case to make it pass. Each one was checked against
 the spec rule it names.
 
-- [ ] **Step 8: Run the full verification**
+- [x] **Step 8: Run the full verification**
 
 Run:
 
@@ -10264,7 +10264,7 @@ sha256sum mdviewer/web/* > /tmp/web1.txt && .venv/Scripts/python scripts/build_w
 Expected: all tests pass (725 at the time of writing); `SMOKE OK`; `WEB OK`;
 the `rg` line prints nothing; `REPRODUCIBLE`.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add web-src/src/commands.js web-src/src/input.js web-src/src/editor.js web-src/src/schema.js web-src/src/editor.css mdviewer/web scripts/check_web.py docs/superpowers/plans/2026-10-20-wysiwyg-editing.md
