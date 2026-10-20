@@ -3,8 +3,8 @@
 The inverse of core/docmodel.py: from_markdown(to_markdown(doc)) gives the same
 document back, up to the normalizations of spec 6.5. Output uses "\\n" only and
 ends with exactly one "\\n" ("" for an empty body); MainWindow applies the file's
-newline style on save. LINE_ATTR and code_block.highlight are display-only and
-ignored here.
+newline style on save. LINE_ATTR, code_block.highlight and image.display_src are
+display-only and ignored here.
 """
 
 import re
@@ -42,6 +42,20 @@ _EMAIL_AUTOLINK = re.compile(
     r"(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*"
 )
 
+_LISTS = frozenset({"bullet_list", "ordered_list"})
+# A list directly after a list of the same kind uses the second marker, or the two would merge.
+_BULLETS = ("-", "*")
+_ORDERED_DELIMITERS = (".", ")")
+# Blocks that end on their own line: anything may follow on the next line.
+_CLOSED_BLOCKS = frozenset({"heading", "code_block", "horizontal_rule"})
+# Blocks whose last line could take the next line in as a lazy paragraph continuation.
+_OPEN_BLOCKS = frozenset({"paragraph", "blockquote", "bullet_list", "ordered_list"})
+# Item markers with no text after them can add up to a thematic break: "- - -", "* * *".
+_THEMATIC_BREAK = re.compile(r"(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}")
+_ALIGN_ROW = {None: "---", "left": ":---", "center": ":---:", "right": "---:"}
+# A "|" after an even number of backslashes (none included) splits a table cell.
+_UNESCAPED_PIPE = re.compile(r"(?<!\\)((?:\\\\)*)\|")
+
 
 # --- public API -----------------------------------------------------------------
 
@@ -49,8 +63,11 @@ _EMAIL_AUTOLINK = re.compile(
 def to_markdown(doc: dict) -> str:
     """Normalized Markdown for the document body; "" when the body has no content.
 
-    The front_matter node is not part of the body: see front_matter() and to_text()."""
-    body = _blocks([node for node in doc.get("content", []) if node["type"] != "front_matter"])
+    The front_matter node is not part of the body: see front_matter() and to_text().
+    Footnote definitions are written last, in document order."""
+    content = [node for node in doc.get("content", []) if node["type"] != "front_matter"]
+    notes = [node for node in content if node["type"] == "footnote_def"]
+    body = _blocks([node for node in content if node["type"] != "footnote_def"] + notes)
     return body + "\n" if body else ""
 
 
@@ -77,7 +94,78 @@ def to_text(doc: dict) -> str:
 
 def _blocks(nodes: list[dict]) -> str:
     """Blocks separated by one blank line; blocks that serialize to "" are left out."""
-    return "\n\n".join(text for text in (_block(node) for node in nodes) if text)
+    return _join(_parts(nodes), tight=False)
+
+
+def _parts(nodes: list[dict]) -> list[tuple[dict, str]]:
+    """(node, Markdown) for each block that serializes to something.
+
+    A list right after a list of the same kind switches markers, or the two would merge."""
+    parts: list[tuple[dict, str]] = []
+    alternate = False
+    for node in nodes:
+        if node["type"] in _LISTS:
+            previous = parts[-1][0] if parts else None
+            alternate = previous is not None and previous["type"] == node["type"] and not alternate
+            text = _list(node, alternate)
+        else:
+            text = _block(node)
+        if text:
+            parts.append((node, text))
+    return parts
+
+
+def _join(parts: list[tuple[dict, str]], tight: bool) -> str:
+    """The blocks one blank line apart, or one line apart in a tight list item (see _joins)."""
+    out: list[str] = []
+    for index, (node, text) in enumerate(parts):
+        if index:
+            out.append("\n" if tight else "\n\n")
+            if tight and text == "---":  # right under a line of text, "---" would underline it
+                text = "___"
+        out.append(text)
+    return "".join(out)
+
+
+def _tight_item(parts: list[tuple[dict, str]]) -> bool:
+    """The item's blocks can be written line by line and mistune reads them back as tight.
+
+    mistune reads an item with two paragraphs as loose, wherever they are."""
+    if sum(node["type"] == "paragraph" for node, _ in parts) > 1:
+        return False
+    return all(_joins(parts[index - 1][0], node, text) for index, (node, text) in enumerate(parts) if index)
+
+
+def _reads_loose(items: list[list[tuple[dict, str]]]) -> bool:
+    """mistune reads the list back as loose when its items and blocks are a blank line apart.
+
+    It sees a blank line between items, and one between an item's blocks unless the
+    blank line follows a nested list (which takes it in without becoming loose)."""
+    if len(items) > 1:
+        return True
+    return any(
+        sum(node["type"] == "paragraph" for node, _ in parts) > 1
+        or any(parts[index - 1][0]["type"] not in _LISTS for index in range(1, len(parts)))
+        for parts in items
+    )
+
+
+def _joins(previous: dict, node: dict, text: str) -> bool:
+    """True when `node`, written as `text`, may start on the line right after `previous`."""
+    if previous["type"] in _CLOSED_BLOCKS:
+        return True
+    if previous["type"] not in _OPEN_BLOCKS:  # tables and HTML blocks run on to a blank line
+        return False
+    if previous["type"] == "blockquote":
+        # mistune keeps a heading or HTML block in the quote, merges two quotes, and moves a
+        # list that follows a quote in front of it once a later block interrupts the list.
+        return node["type"] in ("code_block", "horizontal_rule")
+    # The next line must interrupt a paragraph, or it would continue the previous block.
+    if node["type"] in ("heading", "code_block", "blockquote", "horizontal_rule"):
+        return True
+    if node["type"] == "bullet_list" or (node["type"] == "ordered_list" and node["attrs"]["start"] == 1):
+        return " " in text.split("\n", 1)[0]  # an empty first item cannot interrupt ("-" underlines)
+    return False
 
 
 def _block(node: dict) -> str:
@@ -108,21 +196,109 @@ def _horizontal_rule(node: dict) -> str:
     return "---"
 
 
+def _list(node: dict, alternate: bool = False) -> str:
+    """Items with `-` or `1.`, `2.`, ... from `start`; one line apart when tight, a blank line when loose.
+
+    The list is written tight or loose as mistune will read it back: a tight list is
+    written loose when some item cannot be tight (_tight_item), and a loose list is
+    written tight when mistune would not see its blank lines (_reads_loose)."""
+    items = [_item_parts(item) for item in node["content"]]
+    tight = all(_tight_item(parts) for parts in items) and (node["attrs"]["tight"] or not _reads_loose(items))
+    lines = []
+    for index, parts in enumerate(items):
+        if node["type"] == "ordered_list":
+            marker = f"{node['attrs']['start'] + index}{_ORDERED_DELIMITERS[alternate]}"
+        else:
+            marker = _BULLETS[alternate]
+        lines.append(_list_item(_join(parts, tight), marker))
+    return ("\n" if tight else "\n\n").join(lines)
+
+
+# A task box with no text reads back as an empty first paragraph (docmodel: "- [ ]" + a block).
+_BOX_LINE = {"type": "paragraph"}
+
+
+def _item_parts(node: dict) -> list[tuple[dict, str]]:
+    """The item's blocks; a task item's box opens its first paragraph, or stands on its own line."""
+    parts = _parts(node.get("content", []))
+    checked = node["attrs"]["checked"]
+    if checked is None:
+        return parts
+    box = "[x]" if checked else "[ ]"
+    if parts and parts[0][0]["type"] == "paragraph":
+        return [(parts[0][0], f"{box} {parts[0][1]}"), *parts[1:]]
+    return [(_BOX_LINE, box), *parts]
+
+
+def _list_item(inner: str, marker: str) -> str:
+    """The marker, then the item's Markdown indented to its content column."""
+    if not inner:
+        return marker
+    lines = inner.split("\n")
+    if lines[0] == "---":  # "- ---" would be one thematic break, not an item holding a rule
+        lines[0] = "___"
+    indent = " " * (len(marker) + 1)
+    if _THEMATIC_BREAK.fullmatch(f"{marker} {lines[0]}"):  # "- - -": nested items with no text
+        return "\n".join([marker] + [indent + line if line else "" for line in lines])
+    return "\n".join([f"{marker} {lines[0]}"] + [indent + line if line else "" for line in lines[1:]])
+
+
+def _code_block(node: dict) -> str:
+    """A fence longer than any run of its character in the code; only the language's first word."""
+    code = "".join(child["text"] for child in node.get("content", []))
+    words = node["attrs"]["language"].split()
+    language = _escape_backslashes(words[0]) if words else ""  # the info string takes backslash escapes
+    char = "~" if "`" in language else "`"  # a backtick fence's info string cannot hold a backtick
+    longest = max((len(run) for run in re.findall(re.escape(char) + "+", code)), default=0)
+    fence = char * max(3, longest + 1)
+    return f"{fence}{language}\n{code}\n{fence}" if code else f"{fence}{language}\n{fence}"
+
+
+def _table(node: dict) -> str:
+    """A pipe table: the first row is the header, its cells' align attrs give the delimiter row.
+
+    Short rows are padded with empty cells: mistune reads a table whose rows differ in width
+    as a paragraph."""
+    rows = [[_cell(cell) for cell in row.get("content", [])] for row in node["content"]]
+    width = max(len(row) for row in rows)
+    aligns = [cell["attrs"]["align"] for cell in node["content"][0].get("content", [])]
+    aligns += [None] * (width - len(aligns))
+    lines = [rows[0], [_ALIGN_ROW[align] for align in aligns], *rows[1:]]
+    return "\n".join("| " + " | ".join(cells + [""] * (width - len(cells))) + " |" for cells in lines)
+
+
+def _cell(node: dict) -> str:
+    """One line of inline Markdown with every unescaped "|" escaped, code spans included.
+
+    docmodel turns "\\|" inside a code span in a cell back into "|" (GFM)."""
+    return _UNESCAPED_PIPE.sub(r"\1\\|", _inline(node.get("content", []), cell=True))
+
+
+def _source(node: dict) -> str:
+    return node["attrs"]["source"]
+
+
 # Node type -> serializer returning the block's lines without a trailing newline ("" = nothing).
 _BLOCKS = {
     "paragraph": _paragraph,
     "heading": _heading,
     "blockquote": _blockquote,
     "horizontal_rule": _horizontal_rule,
+    "bullet_list": _list,
+    "ordered_list": _list,
+    "code_block": _code_block,
+    "table": _table,
+    "html_block": _source,
+    "footnote_def": _source,
 }
 
 
 # --- inline: normalization ------------------------------------------------------
 
 
-def _inline(nodes: list[dict], heading: bool = False) -> str:
-    """Markdown for the inline content of a paragraph or heading."""
-    return _escape_pieces(_pieces(_normalize(nodes, heading)), heading)
+def _inline(nodes: list[dict], heading: bool = False, cell: bool = False) -> str:
+    """Markdown for the inline content of a paragraph, heading or table cell."""
+    return _escape_pieces(_pieces(_normalize(nodes, one_line=heading or cell), cell), heading, cell)
 
 
 def _marks(node: dict) -> list[dict]:
@@ -140,19 +316,22 @@ def _text_node(text: str, marks: list[dict]) -> dict:
     return node
 
 
-def _normalize(nodes: list[dict], heading: bool) -> list[dict]:
+def _normalize(nodes: list[dict], one_line: bool) -> list[dict]:
     """The inline nodes as Markdown can express them.
 
-    Newlines in text and hard breaks in headings become spaces; spaces and tabs at
-    line edges are dropped (Markdown strips them); trailing hard breaks are dropped
-    (a block cannot end with one); whitespace moves out of strong/em/strike runs
-    (their delimiters must touch non-whitespace); equal-marked text is merged."""
+    Newlines in text become spaces, and in headings and table cells (`one_line`) so do
+    hard breaks and newlines in inline HTML; spaces and tabs at line edges are dropped
+    (Markdown strips them); trailing hard breaks are dropped (a block cannot end with
+    one); whitespace moves out of strong/em/strike runs (their delimiters must touch
+    non-whitespace); equal-marked text is merged."""
     flat: list[dict] = []
     for node in nodes:
         if node["type"] == "text":
             flat.append(_text_node(node["text"].replace("\n", " "), _marks(node)))
-        elif node["type"] == "hard_break" and heading:
+        elif node["type"] == "hard_break" and one_line:
             flat.append(_text_node(" ", _marks(node)))
+        elif node["type"] == "html_inline" and one_line:
+            flat.append({**node, "attrs": {"source": node["attrs"]["source"].replace("\n", " ")}})
         else:
             flat.append(node)
     lines: list[list[dict]] = [[]]
@@ -233,11 +412,12 @@ def _merge(nodes: list[dict]) -> list[dict]:
 
 # --- inline: marks and pieces ---------------------------------------------------
 # Inline content becomes a list of pieces: (document text, inside-link flag) or
-# (markup, None) for delimiters, code spans, link syntax and hard breaks. Text is
-# escaped afterwards, when the output characters around each text piece are known.
+# (markup, None) for delimiters, code spans, link syntax, hard breaks, images,
+# footnote references and inline HTML. Text is escaped afterwards, when the output
+# characters around each text piece are known.
 
 
-def _pieces(nodes: list[dict]) -> list[tuple[str, bool | None]]:
+def _pieces(nodes: list[dict], cell: bool = False) -> list[tuple[str, bool | None]]:
     pieces: list[tuple[str, bool | None]] = []
     stack: list[dict] = []  # open marks, outermost first
     for i, node in enumerate(nodes):
@@ -249,7 +429,7 @@ def _pieces(nodes: list[dict]) -> list[tuple[str, bool | None]]:
         for mark in reversed(stack[keep:]):
             pieces.append((_close(mark), None))
         del stack[keep:]
-        if autolink := _autolink(nodes, i):
+        if autolink := _autolink(nodes, i, cell):
             pieces.append((autolink, None))
             continue
         # Link, then strike; then longer strong/em runs outside shorter ones, strong first on ties.
@@ -284,13 +464,26 @@ def _extent(nodes: list[dict], index: int, mark: dict) -> int:
 
 
 def _content(node: dict, in_link: bool) -> tuple[str, bool | None]:
-    if node["type"] == "text":
+    kind = node["type"]
+    if kind == "text":
         if _has_mark(node, "code"):
             return _code_span(node["text"]), None
         return node["text"], in_link
-    if node["type"] == "hard_break":
+    if kind == "hard_break":
         return "\\\n", None
-    raise ValueError(f"cannot serialize a {node['type']!r} node")
+    if kind == "image":
+        return _image(node["attrs"]), None
+    if kind == "footnote_ref":
+        return f"[^{node['attrs']['label']}]", None
+    if kind == "html_inline":
+        return node["attrs"]["source"], None
+    raise ValueError(f"cannot serialize a {kind!r} node")
+
+
+def _image(attrs: dict) -> str:
+    """![alt](src "title"); the alt text is escaped like link text."""
+    alt = _escape(attrs["alt"].replace("\n", " "), "[", "]", True, False, False, False)
+    return f"![{alt}](" + _link_target(attrs["src"], attrs["title"]) + ")"
 
 
 def _close(mark: dict) -> str:
@@ -299,13 +492,14 @@ def _close(mark: dict) -> str:
     return _DELIMITERS[mark["type"]]
 
 
-def _autolink(nodes: list[dict], index: int) -> str | None:
+def _autolink(nodes: list[dict], index: int, cell: bool = False) -> str | None:
     """The node written as an autolink (spec 6.5), or None for a [text](href) link.
 
     Only an untitled link that is the node's only mark and covers just this node
     qualifies. An http(s) URL whose text is its href stays bare when nothing that
     follows could be read as part of the URL; otherwise it becomes <href>. A mailto:
-    link whose text is the address becomes <address>."""
+    link whose text is the address becomes <address>. In a table cell a URL holding
+    "|" is written [text](href), where "\\|" can escape the pipe."""
     node = nodes[index]
     link = _link(node)
     if node["type"] != "text" or _marks(node) != [link] or link["attrs"]["title"] is not None:
@@ -313,6 +507,8 @@ def _autolink(nodes: list[dict], index: int) -> str | None:
     if _extent(nodes, index, link) != 1 or (index > 0 and link in _marks(nodes[index - 1])):
         return None
     text, href = node["text"], link["attrs"]["href"]
+    if cell and "|" in text + href:
+        return None
     if text == href and _BARE_URL.fullmatch(text) and _bare_url_ends(nodes, index) and not set("&\\") & set(text):
         return text
     if text == href and _URI_AUTOLINK.fullmatch(href):
@@ -380,7 +576,7 @@ def _parens_balanced(value: str) -> bool:
 # --- inline: escaping -----------------------------------------------------------
 
 
-def _escape_pieces(pieces: list[tuple[str, bool | None]], heading: bool) -> str:
+def _escape_pieces(pieces: list[tuple[str, bool | None]], heading: bool, cell: bool = False) -> str:
     out: list[str] = []
     for i, (value, in_link) in enumerate(pieces):
         if in_link is None:
@@ -390,12 +586,22 @@ def _escape_pieces(pieces: list[tuple[str, bool | None]], heading: bool) -> str:
         after = pieces[i + 1][0][:1] if i + 1 < len(pieces) else ""
         line_start = before in ("", "\n")
         line_end = i + 1 == len(pieces) or pieces[i + 1][0] == "\\\n"
-        out.append(_escape(value, before, after, in_link, line_start, line_end, heading))
+        text = _escape(value, before, after, in_link, line_start, line_end, heading, cell)
+        if i == 1 and before == "]" and text[:1] == ":" and not (heading or cell):
+            text = "\\" + text  # "[^1]: x" at a paragraph start would define footnote 1
+        out.append(text)
     return "".join(out)
 
 
 def _escape(
-    text: str, before: str, after: str, in_link: bool, line_start: bool, line_end: bool, heading: bool
+    text: str,
+    before: str,
+    after: str,
+    in_link: bool,
+    line_start: bool,
+    line_end: bool,
+    heading: bool,
+    cell: bool = False,
 ) -> str:
     """Backslash-escape what Markdown would read as syntax in `text`, and nothing else.
 
@@ -404,13 +610,20 @@ def _escape(
     escaped: set[int] = set()
     # mistune links bare http(s) URLs anywhere; inside link text one swallows the markup up to "]".
     escaped |= {match.end() for match in _BARE_URL_SCHEME.finditer(text)}
-    if line_start and not heading:
+    if line_start and not (heading or cell):
         escaped |= _line_start_escapes(text, line_end)
     if heading and after == "" and (match := _HEADING_CLOSE.search(text)):
         escaped.add(match.start(1))
+    # Whitespace that mistune would drop is written as a character reference: after a hard
+    # break, and at the edges of a table cell (which mistune strips like str.strip).
+    references: set[int] = set()
+    if text and text[0].isspace() and (before == "\n" or (cell and line_start)):
+        references.add(0)
+    if text and text[-1].isspace() and cell and line_end:
+        references.add(len(text) - 1)
     for i, ch in enumerate(text):
-        prev = text[i - 1] if i > 0 else before
-        nxt = text[i + 1] if i + 1 < len(text) else after
+        prev = ";" if i - 1 in references else text[i - 1] if i > 0 else before
+        nxt = "&" if i + 1 in references else text[i + 1] if i + 1 < len(text) else after
         if (
             ch in "*`["
             or (ch == "]" and in_link)
@@ -422,10 +635,13 @@ def _escape(
             or (ch == "&" and _ENTITY.match(text, i))
         ):
             escaped.add(i)
-    out = ["\\" + ch if i in escaped else ch for i, ch in enumerate(text)]
-    if before == "\n" and text[0].isspace():  # mistune drops any whitespace after a hard break
-        out[0] = "&nbsp;" if text[0] == "\xa0" else f"&#{ord(text[0])};"
-    return "".join(out)
+    return "".join(
+        _char_reference(ch) if i in references else "\\" + ch if i in escaped else ch for i, ch in enumerate(text)
+    )
+
+
+def _char_reference(ch: str) -> str:
+    return "&nbsp;" if ch == "\xa0" else f"&#{ord(ch)};"
 
 
 def _line_start_escapes(text: str, line_end: bool) -> set[int]:
