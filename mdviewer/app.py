@@ -1,11 +1,19 @@
 """Application bootstrap: QApplication, settings load/save, window lifecycle."""
 
 import sys
+from pathlib import Path
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from mdviewer.core import settings
 from mdviewer.main_window import APP_NAME, MainWindow
+
+
+def icon_path() -> Path:
+    """assets/mdviewer.ico: bundled next to the code in a PyInstaller build, else in the repo."""
+    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+    return root / "assets" / "mdviewer.ico"
 
 
 def build(argv: list[str]) -> tuple[QApplication, MainWindow]:
@@ -13,6 +21,7 @@ def build(argv: list[str]) -> tuple[QApplication, MainWindow]:
     app = QApplication.instance() or QApplication([sys.argv[0], *argv])
     app.setStyle("windowsvista")
     app.setApplicationName(APP_NAME)
+    app.setWindowIcon(QIcon(str(icon_path())))  # title bar, dialogs; the exe icon alone is not used by Qt
     return app, MainWindow(settings.load())
 
 

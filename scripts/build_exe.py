@@ -7,6 +7,7 @@ Default output:     dist\\MDViewer\\MDViewer.exe (one folder: fast launch, input
 
 import argparse
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -41,6 +42,9 @@ def main() -> int:
         "--collect-submodules", "pygments",
         "--console" if args.console else "--windowed",
     ]
+    if ICON.is_file():
+        # Runtime window icon (mdviewer.app.icon_path); --icon below only brands the exe file.
+        cmd += ["--add-data", f"{ICON}{os.pathsep}assets"]
     if args.icon.is_file():
         cmd += ["--icon", str(args.icon.resolve())]
     else:
