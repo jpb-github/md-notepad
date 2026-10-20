@@ -6828,7 +6828,7 @@ esbuild 0.28.2), on top of the Task 1 and Task 2 code from this plan. Results:
       `check_editor(app, view, folder)`
     - Tasks 9-11 append their checks to `check_editor`.
 
-- [ ] **Step 1: Write the failing schema-sync tests**
+- [x] **Step 1: Write the failing schema-sync tests**
 
 In `tests/test_docschema.py`, replace the first line
 
@@ -6906,13 +6906,13 @@ def test_code_block_languages_match_the_source_editor():
 
 (`completion.py` is Qt-free, so `tests/` stays Qt-free.)
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_docschema.py tests/test_web_assets.py -v`
 Expected: the 4 new tests FAIL with `FileNotFoundError` (`web-src/src/schema.js`,
 `web-src/src/nodeviews.js`); the 65 existing tests pass.
 
-- [ ] **Step 3: Write the failing page checks**
+- [x] **Step 3: Write the failing page checks**
 
 In `scripts/check_web.py`, replace
 
@@ -7270,7 +7270,7 @@ add
     check_editor(app, view, folder)
 ```
 
-- [ ] **Step 4: Run the page check to verify it fails**
+- [x] **Step 4: Run the page check to verify it fails**
 
 Run: `.venv/Scripts/python scripts/check_web.py`
 Expected: exit code 1 with
@@ -7282,7 +7282,7 @@ WEB CHECK FAILED:
 
 (the committed bundle is still Task 1's), plus the console dump.
 
-- [ ] **Step 5: Write the schema**
+- [x] **Step 5: Write the schema**
 
 Create `web-src/src/schema.js`:
 
@@ -7603,12 +7603,12 @@ export const schema = new Schema({
 });
 ```
 
-- [ ] **Step 6: Run the schema-sync tests**
+- [x] **Step 6: Run the schema-sync tests**
 
 Run: `.venv/Scripts/python -m pytest tests/test_docschema.py -v`
 Expected: 59 passed.
 
-- [ ] **Step 7: Write the node views and display plugins**
+- [x] **Step 7: Write the node views and display plugins**
 
 Create `web-src/src/nodeviews.js`:
 
@@ -7924,7 +7924,7 @@ export function displayPlugins(callbacks) {
 }
 ```
 
-- [ ] **Step 8: Write the editor stylesheet**
+- [x] **Step 8: Write the editor stylesheet**
 
 Create `web-src/src/editor.css` (esbuild merges it with ProseMirror's CSS
 into `mdviewer/web/editor.css`; the page CSP allows it as a `'self'`
@@ -7971,7 +7971,7 @@ pre.md-protected { white-space: pre-wrap; }
 code.md-chip { background: transparent; }
 ```
 
-- [ ] **Step 9: Replace the editor entry point**
+- [x] **Step 9: Replace the editor entry point**
 
 Replace the whole of `web-src/src/editor.js` with:
 
@@ -8028,7 +8028,7 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
 });
 ```
 
-- [ ] **Step 10: Rebuild the bundle**
+- [x] **Step 10: Rebuild the bundle**
 
 Run: `.venv/Scripts/python scripts/build_web.py`
 Expected: exit code 0; esbuild reports `editor.js` at about 210 KB and
@@ -8037,12 +8037,12 @@ Expected: exit code 0; esbuild reports `editor.js` at about 210 KB and
 `prosemirror-tables`, `prosemirror-transform`, `prosemirror-view`,
 `w3c-keyname`; `tableNodes` pulls in the keymap packages).
 
-- [ ] **Step 11: Run the tests to verify they pass**
+- [x] **Step 11: Run the tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_docschema.py tests/test_web_assets.py -v`
 Expected: 69 passed (59 + 10).
 
-- [ ] **Step 12: Run the page check to verify it passes**
+- [x] **Step 12: Run the page check to verify it passes**
 
 Run: `.venv/Scripts/python scripts/check_web.py`
 Expected: `WEB OK`, exit code 0.
@@ -8051,7 +8051,7 @@ If only the frame-size check fails on another Qt version, print `size` and
 the frame's `contentDocument.readyState` before changing the timing. Do
 **not** weaken the sandbox: `allow-scripts` must never be added.
 
-- [ ] **Step 13: Record the raw-HTML frame decision in the spec**
+- [x] **Step 13: Record the raw-HTML frame decision in the spec**
 
 In `docs/superpowers/specs/2026-10-20-wysiwyg-editing-design.md`, section 5,
 replace
@@ -8075,7 +8075,7 @@ with
    `html_inline` is shown as an escaped source chip, never rendered.
 ```
 
-- [ ] **Step 14: Run the full verification**
+- [x] **Step 14: Run the full verification**
 
 Run:
 
@@ -8090,7 +8090,7 @@ sha256sum mdviewer/web/* > /tmp/web1.txt && .venv/Scripts/python scripts/build_w
 Expected: all tests pass; `SMOKE OK` (nothing in `mdviewer/` loads the web
 editor yet); `WEB OK`; the `rg` line prints nothing; `REPRODUCIBLE`.
 
-- [ ] **Step 15: Commit**
+- [x] **Step 15: Commit**
 
 ```bash
 git add web-src/src/schema.js web-src/src/nodeviews.js web-src/src/editor.css web-src/src/editor.js mdviewer/web tests/test_docschema.py tests/test_web_assets.py scripts/check_web.py docs/superpowers/specs/2026-10-20-wysiwyg-editing-design.md
