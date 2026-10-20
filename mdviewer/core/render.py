@@ -6,15 +6,15 @@ HTML is reused for both themes.
 """
 
 import html
-import os
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
 
 import mistune
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
+
+from mdviewer.core import urls
 
 THEMES = ("light", "dark", "gray")
 PLUGINS = ["table", "strikethrough", "footnotes", "task_lists", "url"]
@@ -120,20 +120,7 @@ class _Renderer(mistune.HTMLRenderer):
 
     def _resolve(self, url: str) -> str:
         """Turn a document-relative URL into an absolute file: URI."""
-        if self._base_dir is None or not url or url.startswith(("#", "/", "\\")):
-            return url
-        parts = urlsplit(url)
-        if len(parts.scheme) == 1:  # C:/pics/a.png - a Windows drive path
-            return Path(unquote(url)).as_uri()
-        if parts.scheme or parts.netloc:  # http:, mailto:, file:, ...
-            return url
-        target = Path(os.path.normpath(Path(self._base_dir).absolute() / unquote(parts.path)))
-        uri = target.as_uri()
-        if parts.query:
-            uri += "?" + parts.query
-        if parts.fragment:
-            uri += "#" + parts.fragment
-        return uri
+        return urls.resolve(url, self._base_dir)
 
 
 def page_css(theme: str) -> str:
