@@ -5,7 +5,7 @@
 > **Status: high-level outline.** Phases and tasks are fixed; each task's
 > bite-sized steps (tests, code, commands) are written out on request, task
 > by task, below its heading. Do not execute a task whose steps are not yet
-> detailed. Detailed so far: Tasks 1-14.
+> detailed. Detailed so far: Tasks 1-17.
 
 **Goal:** Make the rendered view an editable WYSIWYG Markdown editor with a
 format toolbar, keeping the plain-text editor as Source mode.
@@ -49,25 +49,25 @@ mistune 3 (AST renderer), Pygments, pytest; ProseMirror packages + esbuild
 |---|---|---|---|
 | `web-src/package.json`, `package-lock.json`, `build.mjs` | new | pinned ProseMirror deps, esbuild config | 1 |
 | `scripts/build_web.py` | new | `npm ci` + esbuild, copies Qt's `qwebchannel.js` next to the bundle | 1 |
-| `scripts/check_web.py` | new | offscreen load of the shell: `ready()`, CSP blocks inline scripts, prints `WEB OK` | 1, extended in 8-11 if useful |
+| `scripts/check_web.py` | new | offscreen load of the shell: `ready()`, CSP blocks inline scripts, prints `WEB OK` | 1, extended in 8-11 and 17 |
 | `tests/test_web_assets.py` | new | Qt-free static checks: CSP string, no inline scripts, outputs present | 1 |
 | `mdviewer/web/editor.html` | new | page shell: CSP, `editor.css` link, theme slot `/*@THEME_CSS@*/`, `qwebchannel.js` + `editor.js` `<script src>` | 1 |
-| `mdviewer/web/editor.js`, `editor.css`, `qwebchannel.js`, `THIRD_PARTY.txt` | new | committed bundle, ProseMirror CSS, unmodified Qt client, license notices | 1, rebuilt in 8-12 |
+| `mdviewer/web/editor.js`, `editor.css`, `qwebchannel.js`, `THIRD_PARTY.txt` | new | committed bundle, ProseMirror CSS, unmodified Qt client, license notices | 1, rebuilt in 8-12 and 17 |
 | `mdviewer/core/docschema.py` | new | node/mark names and attrs, `validate(doc)` | 2 |
 | `mdviewer/core/frontmatter.py` | new | `split(text)` / `join(front, body)` | 3 |
-| `mdviewer/core/urls.py` | new | URL resolution + scheme stripping (extracted from `render.py`) | 4 |
+| `mdviewer/core/urls.py` | new | URL resolution + scheme stripping (extracted from `render.py`); image dialog src, heading anchors | 4, 16 |
 | `mdviewer/core/docmodel.py` | new | Markdown -> document JSON | 4, 5 |
 | `mdviewer/core/render.py` | changed | adds `highlight_code(code, lang)`, `editor_page(theme)`; uses `core/urls.py` | 4, 5, 12 |
 | `mdviewer/core/serialize.py` | new | document JSON -> normalized Markdown | 6, 7 |
 | `web-src/src/schema.js` | new | ProseMirror schema mirroring `docschema` | 8 |
 | `web-src/src/nodeviews.js` | new | code block, image, raw HTML frame, double-click on protected nodes | 8 |
-| `web-src/src/editor.css` | new | editor styles: lists, code overlay, protected blocks, chips | 8 |
+| `web-src/src/editor.css` | new | editor styles: lists, code overlay (hidden while finding), protected blocks, chips | 8, 17 |
 | `web-src/src/bridge.js` | new | QWebChannel glue, Python-facing API | 9 |
-| `web-src/src/editor.js` | new | EditorView, document lifecycle, `window.mdEditor`, right-click caret, epochs | 9, 10, 11, 12 |
+| `web-src/src/editor.js` | new | EditorView, document lifecycle, `window.mdEditor`, right-click caret, epochs | 9, 10, 11, 12, 17 |
 | `web-src/src/tables.js` | new | table keys, cell commands, Markdown table shape | 11 |
 | `web-src/src/commands.js` | new | formatting commands (`FORMATTING_COMMANDS`) | 10 |
 | `web-src/src/input.js` | new | keymaps, input rules, list/code keys, task checkbox, gap and drop cursor | 10 |
-| `mdviewer/richview.py` | new | `RichView` (QWebEngineView) + `Bridge` (QObject) | 12 |
+| `mdviewer/richview.py` | new | `RichView` (QWebEngineView) + `Bridge` (QObject) | 12, 16, 17 |
 | `mdviewer/preview.py` | deleted | replaced by `richview.py` | 13 |
 | `mdviewer/main_window.py` | changed | modes, `with_buffer`, async lifecycle, seams, Edit routing | 13-17 |
 | `mdviewer/toolbar.py` | new | `FormatToolbar`, QPainter glyphs, selection sync | 15 |
@@ -99,6 +99,9 @@ def join(front: str | None, body: str) -> str
 # core/urls.py
 def resolve(url: str, base_dir: Path | None) -> str   # moved from render._Renderer._resolve
 def is_safe(url: str) -> bool                          # False for javascript:, vbscript:, non-image data:
+def image_src(path: str, base_dir: Path | None) -> str  # image dialog: relative when possible, else file: URI (Task 16)
+def slug(text: str) -> str                             # GitHub heading anchor
+def anchor_block(headings: list[str | None], fragment: str) -> int | None   # #anchor -> top-level block
 
 # core/render.py (additions)
 def highlight_code(code: str, language: str) -> str    # "" when the language is unknown
@@ -130,6 +133,9 @@ class RichView(QWebEngineView):
     def set_theme(self, theme: str) -> None
     def focus_block(self, index: int) -> None
     def restart(self) -> None  # fresh page with an empty document (after crashed)
+    def heading_texts(self, callback: Callable[[list], None]) -> None  # top-level heading texts, None elsewhere (Task 16)
+    def selection_state(self, callback: Callable[[dict], None]) -> None  # unthrottled selectionState (Task 17)
+    def set_finding(self, on: bool) -> None    # find bar open: code blocks plain, one copy to find (Task 17)
 
 # mdviewer/main_window.py (additions)
 MainWindow.RENDERED = "rendered"; MainWindow.SOURCE = "source"
@@ -140,12 +146,26 @@ def on_save(self, *, then=None) -> bool; def on_save_as(self, *, then=None) -> b
 def _show_mode(self, mode: str, keep_scroll: bool = False) -> bool   # False: Source shown instead
 def run_link_dialog(parent, text: str, url: str) -> tuple[str, str] | str | None   # "remove"
 def run_image_dialog(parent, base_dir: Path | None) -> tuple[str, str] | None
+def open_external(url: QUrl) -> None                         # Ctrl+clicked links (QDesktopServices), Task 16
+MainWindow.toolbar: FormatToolbar; act_toolbar   # View > Toolbar, saved as settings "show_toolbar"
+MainWindow.act_paste_plain; context_menu: QMenu | None   # Ctrl+Shift+V; the last page context menu (Task 17)
+def _edit(self, name: str) -> None          # an Edit item on the current mode's editor (RENDERED_EDITS / SOURCE_EDITS)
+
+# mdviewer/findbar.py
+class FindBar(QWidget):  # FindBar(editor, view=None, parent=None); under both editors since Task 17
+    web_mode: bool; def set_web_mode(self, on: bool) -> None   # Rendered: find-only in the page
+
+# mdviewer/toolbar.py
+class FormatToolbar(QToolBar):
+    commandRequested = Signal(str, object)     # (command name, args) for RichView.command
+    block_box: QComboBox; buttons: dict[str, QAction]
+    def update_state(self, state: dict) -> None   # a selectionState payload
 ```
 
 ```js
 // JS editor API (window.mdEditor), called from Python via runJavaScript
 setDocument(json, keepScroll, epoch); getDocument() -> json; markClean(epoch);
-command(name, args); setTheme(css); focusBlock(index); selectionState()
+command(name, args); setTheme(css); focusBlock(index); selectionState(); setFinding(on)
 ```
 
 ---
@@ -14920,24 +14940,2054 @@ git commit -m "feat: continue save prompts after Rendered pulls and handle a sto
 
 ### Task 15: Format toolbar
 
-- **Files:** `mdviewer/toolbar.py`, `mdviewer/main_window.py`, `mdviewer/core/settings.py`, `tests/test_settings.py`, `scripts/smoke_ui.py`.
-- **Produces:** `FormatToolbar(QToolBar)` with QPainter glyph icons, block combo, buttons and tooltips per spec section 3; `update_state(dict)` from `selectionState`; visible only in Rendered; View > Toolbar persisted as `show_toolbar` (default `True`).
-- **Test:** pytest for `show_toolbar` cleaning; smoke: toolbar hidden in Source, checked state follows a bold selection, each button issues the expected `command`.
-- **Commit:** `feat: add the Rendered-mode format toolbar`
+**Status: steps detailed.** The design below was prototyped and run before
+being written into this plan (2026-10-20, PySide6 6.12.0 offscreen), on top
+of Task 14 as committed (`ab8901d`), then reverted. Results:
+- The full suite passes (732 tests: Task 14's 730 plus the two new settings
+  tests), `SMOKE OK` in three runs in a row, `WEB OK`, and the Qt-import
+  `rg` prints nothing. The bundle does not change.
+- The smoke takes ~24 s.
+- Eleven deliberate breaks each make the smoke fail:
+  - the toolbar shown in Source mode
+  - `selectionState` not connected to the toolbar
+  - a clicked button keeping its own check (no reset to the page's report)
+  - a picked combo item kept (no reset)
+  - the combo reacting to `currentIndexChanged` instead of `activated`
+  - buttons never disabled
+  - the combo never disabled
+  - glyphs not redrawn on a palette change
+  - the toolbar's toggle action left in the main window's context menu
+  - `show_toolbar` missing from `settings_snapshot()`
+  - the saved `show_toolbar` ignored by the constructor
+
+**Findings that shape this task:**
+
+- **The page already owns every shortcut in spec section 3** (Task 10's
+  keymap in `web-src/src/input.js`). `QTest.keyClick` of Ctrl+B on the
+  page's focus proxy applies bold with the toolbar hidden. A `QAction`
+  shortcut on a toolbar button would stop firing while the toolbar is
+  hidden, so the buttons carry no shortcuts; the tooltips name them.
+- **`QAction.trigger()` does nothing on a disabled action.** Smoke checks
+  against the real page first wait (`pump`) until the page's
+  `selectionState` has enabled the control.
+- **Qt changes a control before the handler runs.** A checkable action
+  flips its own check on click, and `QComboBox` moves to the picked item
+  before `activated`. When the page does not apply the command, nothing
+  new is reported: the page sends `selectionState` only when it differs
+  from the last one. Each handler therefore re-applies the last report
+  before emitting. Until the page answers, the controls show the last
+  known state.
+- **Emitting `activated` by hand does not move the combo**, so a check built
+  that way cannot see a missing reset. The smoke's `pick_block(number)`
+  helper does both steps, like a real pick.
+- **`QComboBox.currentIndexChanged` also fires on
+  `update_state`'s own `setCurrentIndex`.** Connected to it, every
+  caret move would send `setBlock` and rewrite the document. Only
+  `activated` is used.
+- **The toolbar's palette follows `QApplication.setPalette` only once the
+  event loop runs.** The glyphs are redrawn from `changeEvent`
+  (`QEvent.PaletteChange`), so the smoke pumps before reading them.
+- **`QMainWindow`'s right-click menu lists each toolbar's
+  `toggleViewAction()`.** That would hide the toolbar without View >
+  Toolbar knowing. With the action hidden, `createPopupMenu()` returns a
+  menu that `isEmpty()`, and Qt shows nothing.
+- **`selectionState.block` is `None`** when the selection is not inside a
+  textblock (a selected rule or protected block). The combo then shows no
+  item (index -1). Heading levels compare equal to Python ints.
+- **Offscreen, `QApplication.focusWidget()` stays `None`**, so the smoke
+  cannot check that a click hands the focus back to the page. This goes to
+  the manual checklist (Task 19).
+- **The settings smoke builds `restored` from a full settings dict** and
+  compares `settings_snapshot()` and `settings.load()` with it. The dict
+  gains `"show_toolbar": False`, which also checks that a saved hidden
+  toolbar is restored.
+
+**Design decisions:**
+
+- **`FormatToolbar` knows nothing about `RichView`.** It emits
+  `commandRequested(name, args)`. `MainWindow._run_format_command` calls
+  `rich.command(name, args)`, then `rich.setFocus()`.
+  `rich.selectionState` connects straight to `toolbar.update_state`.
+- **Each control maps to one page command.** The command's name is also
+  its key in `selectionState.can`, which decides whether the control is
+  enabled. A missing key means disabled, and so does an empty state
+  (before the page's first report).
+- **Checkable controls:** Bold, Italic, Strikethrough, Inline code and
+  Link. Each is checked while its mark is in `selectionState.marks`. The
+  list and quote buttons are not checkable: `selectionState` carries no
+  list or quote state, and the spec asks only for marks and the block
+  type.
+- **The `{}` button** runs `insertCodeBlock` with no language. The
+  language is then picked in the block's corner selector (Task 8). The
+  combo's "Code block" item runs `setBlock {type: code_block}`, which
+  converts the current block instead.
+- **Link and Image** run `linkDialog` and `imageDialog`. The page answers
+  with `requestLinkDialog` / `requestImageDialog`, which nothing handles
+  until Task 16.
+- **The toolbar is fixed:** not movable, not floatable. Its icons are 16 px.
+  The combo has `TabFocus`, so clicking it leaves the focus in the page.
+- **Visibility** is set in `_update_chrome`: shown when
+  `mode == RENDERED and _show_toolbar`. Every path that changes mode
+  already ends there, including `load_failed`.
+- **`show_toolbar` in settings:** stored only when it is a `bool`, else
+  `True`. `MainWindow` reads `data.get("show_toolbar", True) is not False`,
+  because the smoke builds windows from partial dicts.
+- **View > Toolbar** (`&Toolbar`, checkable) goes after the mode pair's
+  separator, before Word Wrap. No other View item uses the T mnemonic.
+
+**Files:**
+- Create: `mdviewer/toolbar.py`
+- Modify: `mdviewer/main_window.py`
+- Modify: `mdviewer/core/settings.py`
+- Modify: `tests/test_settings.py`
+- Modify: `scripts/smoke_ui.py` (settings `data` dict, new Task 15 section)
+
+**Interfaces:**
+- Consumes:
+  - Task 10/11 command names and args (`web-src/src/commands.js`
+    `FORMATTING_COMMANDS`): `toggleMark` ("strong" | "em" | "strike" |
+    "code"), `linkDialog`, `toggleList` ("bullet" | "ordered" | "task"),
+    `toggleQuote`, `insertCodeBlock`, `insertTable` ({rows, cols}),
+    `imageDialog`, `insertRule`, `clearFormatting`, `setBlock`
+    ({type: "paragraph"} | {type: "heading", level} | {type:
+    "code_block"}).
+  - Task 9 `selectionState` payload: `{"marks": [mark names], "block":
+    {"type", "level"?} | None, "can": {command name: bool}}`, sent
+    throttled, and again after every `setDocument`.
+  - Task 12 `RichView.selectionState` (Signal(dict)), `RichView.command`.
+  - Task 13/14 `MainWindow._update_chrome`, `settings_snapshot`,
+    `menu_view`, `act_rendered`, `act_source`. Smoke helpers: `pump`,
+    `page_js`, `check`, `choose_theme`, the Task 14 windows `fw` (its page
+    failed; Source mode) and `window`.
+- Produces (later tasks rely on these exact names):
+  - `mdviewer/toolbar.py`: `BLOCKS`, `BUTTONS`, `MARKS`,
+    `tooltip(text, shortcut) -> str`,
+    `glyph_icon(key: str, palette: QPalette) -> QIcon`.
+  - `FormatToolbar(QToolBar)`: signal `commandRequested(str, object)`;
+    attributes `block_box: QComboBox` and `buttons: dict[str, QAction]`
+    (keyed by `BUTTONS` keys, in toolbar order); method
+    `update_state(state: dict) -> None`.
+  - `MainWindow.toolbar`, `MainWindow.act_toolbar`,
+    `MainWindow._run_format_command(name: str, args) -> None`.
+  - `settings_snapshot()["show_toolbar"]: bool`; the settings key
+    `show_toolbar` (default `True`).
+  - `scripts/smoke_ui.py`: `tb` (the window's toolbar), `pick_block(number)`.
+
+- [ ] **Step 1: Write the failing settings tests**
+
+In `tests/test_settings.py`:
+- add `"show_toolbar": True,` as the last entry of the dict in
+  `test_default_settings`;
+- add `"show_toolbar": False,` as the last entry of `data` in
+  `test_save_and_load_roundtrip`;
+- add these two tests before `def _font(tmp_path, raw):`:
+
+```python
+def test_load_show_toolbar_false(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text('{"show_toolbar": false}', encoding="utf-8")
+    assert settings.load(path)["show_toolbar"] is False
+
+
+def test_load_show_toolbar_must_be_a_bool(tmp_path):
+    for raw in ('"no"', "0", "1", "null", "[]"):
+        path = tmp_path / "settings.json"
+        path.write_text('{"show_toolbar": %s}' % raw, encoding="utf-8")
+        assert settings.load(path)["show_toolbar"] is True
+```
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `.venv/Scripts/python -m pytest tests/test_settings.py -v`
+Expected: `test_default_settings`, `test_save_and_load_roundtrip`,
+`test_load_show_toolbar_false` and `test_load_show_toolbar_must_be_a_bool`
+FAIL (no `show_toolbar` key); the rest pass.
+
+- [ ] **Step 3: Add `show_toolbar` to `mdviewer/core/settings.py`**
+
+`default_settings()` gains `"show_toolbar": True` as its last key. `_clean`
+copies `data["show_toolbar"]` only when it is a `bool`
+(`isinstance(..., bool)`), leaving the default otherwise.
+
+- [ ] **Step 4: Run them to verify they pass**
+
+Run: `.venv/Scripts/python -m pytest tests/test_settings.py -v`
+Expected: all pass (30 tests).
+
+- [ ] **Step 5: Write the failing smoke checks**
+
+In `scripts/smoke_ui.py`, settings section: add `"show_toolbar": False,`
+as the last entry of `data` (the dict that builds `restored`).
+
+Then insert directly above
+`# --- Later tasks insert their checks directly above this line. ---`:
+
+```python
+# --- WYSIWYG Task 15: format toolbar ----------------------------------------------
+from PySide6.QtWidgets import QToolBar  # noqa: E402
+
+tb = window.toolbar
+FAKE["answer"] = S.Discard
+window.on_new()
+check(isinstance(tb, QToolBar) and tb.isVisible(), "the format toolbar shows in Rendered mode")
+check(window.toolBarArea(tb) == Qt.ToolBarArea.TopToolBarArea and not tb.isMovable() and not tb.isFloatable(),
+      "one fixed toolbar row under the menu bar")
+layout = ["combo" if tb.widgetForAction(a) is tb.block_box else "|" if a.isSeparator() else a.text() for a in tb.actions()]
+check(layout == ["combo", "|", "Bold", "Italic", "Strikethrough", "Inline code", "Link", "|",
+                 "Bulleted list", "Numbered list", "Task list", "|",
+                 "Quote", "Code block", "Table", "Image", "Horizontal rule", "|", "Clear formatting"],
+      f"the toolbar layout is the spec's ({layout})")
+check([a.toolTip() for a in tb.buttons.values()] == [
+    "Bold (Ctrl+B)", "Italic (Ctrl+I)", "Strikethrough (Ctrl+Shift+X)", "Inline code (Ctrl+`)", "Link (Ctrl+K)",
+    "Bulleted list (Ctrl+Shift+8)", "Numbered list (Ctrl+Shift+7)", "Task list (Ctrl+Shift+9)",
+    "Quote (Ctrl+Shift+.)", "Code block", "Table", "Image", "Horizontal rule", "Clear formatting (Ctrl+Space)",
+], "button tooltips name their shortcuts")
+check(all(a.shortcut().isEmpty() for a in tb.buttons.values()), "the shortcuts stay with the page's keymap")
+box = tb.block_box
+
+
+def pick_block(number: int) -> None:
+    """What a user's pick in the block combo does: the combo moves, then activated(number)."""
+    box.setCurrentIndex(number)
+    box.activated.emit(number)
+
+
+check([box.itemText(i) for i in range(box.count())] == ["Normal", *(f"Heading {n}" for n in range(1, 7)), "Code block"],
+      "the block combo offers Normal, Heading 1-6 and Code block")
+check([box.itemData(i, Qt.ItemDataRole.ToolTipRole) for i in range(box.count())]
+      == ["Normal (Ctrl+Alt+0)", *(f"Heading {n} (Ctrl+Alt+{n})" for n in range(1, 7)), "Code block"],
+      "block combo tooltips name their shortcuts")
+check(all(not a.icon().isNull() for a in tb.buttons.values()), "every button has a glyph icon")
+check([a.isCheckable() for a in tb.buttons.values()] == [True] * 5 + [False] * 9, "mark and link buttons are checkable")
+popup = window.createPopupMenu()
+check(popup is None or popup.isEmpty(), "no context menu hides the toolbar behind View > Toolbar's back")
+
+# View > Toolbar, Source mode and the saved choice
+window.act_source.trigger()
+check(window.mode == "source" and not tb.isVisible(), "the toolbar hides in Source mode")
+window.act_rendered.trigger()
+check(tb.isVisible(), "and comes back in Rendered mode")
+check(window.act_toolbar in window.menu_view.actions() and window.act_toolbar.isChecked(), "View > Toolbar is on by default")
+window.act_toolbar.trigger()
+check(not tb.isVisible() and window.settings_snapshot()["show_toolbar"] is False, "View > Toolbar hides it; the choice is saved")
+window.act_source.trigger()
+window.act_rendered.trigger()
+check(not tb.isVisible(), "a hidden toolbar stays hidden across mode switches")
+window.act_toolbar.trigger()
+check(tb.isVisible() and window.settings_snapshot()["show_toolbar"] is True, "View > Toolbar shows it again")
+check(not fw.toolbar.isVisibleTo(fw) and fw.mode == "source", "a page that failed leaves the toolbar hidden")
+check(not restored.act_toolbar.isChecked() and not restored.toolbar.isVisibleTo(restored),
+      "a saved hidden toolbar starts hidden")
+
+# every control sends its command; nothing runs while the page reports nothing
+SENT: list = []
+window.rich.command = lambda name, args=None: SENT.append((name, args))
+tb.update_state({})
+check(not box.isEnabled() and not any(a.isEnabled() for a in tb.buttons.values()), "with no selection state every control is disabled")
+tb.buttons["bold"].trigger()
+check(SENT == [], "a disabled button sends nothing")
+CAN_ALL = {name: True for name in ("toggleMark", "linkDialog", "toggleList", "toggleQuote", "insertCodeBlock",
+                                   "insertTable", "imageDialog", "insertRule", "clearFormatting", "setBlock")}
+tb.update_state({"marks": [], "block": {"type": "paragraph"}, "can": CAN_ALL})
+for act in tb.buttons.values():
+    act.trigger()
+check(not any(a.isChecked() for a in tb.buttons.values()), "a click alone checks nothing: the page's report does")
+for number in range(box.count()):
+    pick_block(number)
+del window.rich.command
+check(SENT == [
+    ("toggleMark", "strong"), ("toggleMark", "em"), ("toggleMark", "strike"), ("toggleMark", "code"), ("linkDialog", None),
+    ("toggleList", "bullet"), ("toggleList", "ordered"), ("toggleList", "task"),
+    ("toggleQuote", None), ("insertCodeBlock", None), ("insertTable", {"rows": 3, "cols": 3}), ("imageDialog", None),
+    ("insertRule", None), ("clearFormatting", None),
+    ("setBlock", {"type": "paragraph"}), *(("setBlock", {"type": "heading", "level": n}) for n in range(1, 7)),
+    ("setBlock", {"type": "code_block"}),
+], f"each control sends its command ({SENT})")
+check(box.currentText() == "Normal", "picking a block type leaves the combo to the page's report")
+
+# the real page: commands apply, the controls follow the selection, Save writes them
+tool_md = TMP / "toolbar.md"
+tool_md.write_bytes(b"alpha\n\nbeta\n\n---\n")
+window.open_file(tool_md)
+check(pump(lambda: box.isEnabled() and tb.buttons["bold"].isEnabled() and box.currentText() == "Normal", 3),
+      "the page's selection state enables the toolbar")
+window.rich.focus_block(0)
+pick_block(2)
+check(pump(lambda: box.currentText() == "Heading 2", 3), "Heading 2 from the combo; the combo follows")
+window.rich.focus_block(1)
+page_js(window.rich, "(() => { const v = window.mdEditor.view; const s = v.state.selection;"
+                     " v.dispatch(v.state.tr.setSelection(s.constructor.create(v.state.doc, s.from, s.from + 4))); return 0; })()")
+check(pump(lambda: box.currentText() == "Normal" and not tb.buttons["bold"].isChecked(), 3), "a plain selection")
+tb.buttons["bold"].trigger()
+check(pump(lambda: tb.buttons["bold"].isChecked(), 3), "Bold applies and is checked")
+tb.buttons["bullets"].trigger()
+check(pump(lambda: window.dirty, 3), "the toolbar edit marks the document dirty")
+window.rich.focus_block(2)
+check(pump(lambda: box.currentIndex() == -1 and box.currentText() == "", 3), "a selected rule shows no block type")
+window.rich.focus_block(1)
+check(pump(lambda: tb.buttons["table"].isEnabled(), 3), "Table applies in a list")
+tb.buttons["table"].trigger()
+pump(lambda: False, 0.2)
+window.on_save()
+check(pump(lambda: not window.dirty, 5), "Save after toolbar edits")
+saved_tool = tool_md.read_bytes().decode("utf-8")
+check(saved_tool == "## alpha\n\n- **beta**\n\n|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |\n\n---\n",
+      f"the saved file has the toolbar's heading, bold, list and table ({saved_tool!r})")
+tb.buttons["code_block"].trigger()
+check(pump(lambda: box.currentText() == "Code block", 3), "{} inserts a code block; the combo shows it")
+check(not tb.buttons["bold"].isEnabled() and not tb.buttons["link"].isEnabled() and box.isEnabled(),
+      "marks and Link are disabled in a code block")
+
+# the shortcuts work with the toolbar hidden (the page's keymap)
+window.act_toolbar.trigger()
+window.rich.focus_block(0)
+pump(lambda: False, 0.2)
+QTest.keyClick(window.rich.focusProxy(), Qt.Key.Key_B, Qt.KeyboardModifier.ControlModifier)
+check(pump(lambda: "strong" in (page_js(window.rich, "window.mdEditor.selectionState().marks") or []), 3),
+      "Ctrl+B works with the toolbar hidden")
+window.act_toolbar.trigger()
+
+
+# glyphs follow the theme's text color
+def glyph_lightness(act) -> int:
+    image = act.icon().pixmap(16, 16).toImage()
+    pixels = [image.pixelColor(x, y) for x in range(16) for y in range(16)]
+    return max(pixels, key=lambda c: c.alpha()).lightness()
+
+
+check(glyph_lightness(tb.buttons["bold"]) < 100, "light theme: dark glyphs")
+choose_theme("dark")
+check(pump(lambda: glyph_lightness(tb.buttons["bold"]) > 150, 2), "dark theme: light glyphs")
+choose_theme("system")
+check(pump(lambda: glyph_lightness(tb.buttons["bold"]) < 100, 2), "back to light glyphs")
+FAKE["answer"] = S.Discard
+window.on_new()
+
+```
+
+(`Qt`, `QTest`, `choose_theme`, `restored` and `fw` are defined by earlier
+sections.)
+
+- [ ] **Step 6: Run the smoke to verify it fails**
+
+Run: `.venv/Scripts/python scripts/smoke_ui.py`
+Expected: the run dies with `AttributeError: 'MainWindow' object has no
+attribute 'toolbar'` at `tb = window.toolbar`.
+
+- [ ] **Step 7: Create `mdviewer/toolbar.py`**
+
+Module docstring: the format toolbar of the Rendered editor (spec section
+3). Its buttons run page commands through `commandRequested`. The page's
+`selectionState` drives their checked and enabled state. The shortcuts
+belong to the page's keymap (`web-src/src/input.js`): the actions carry
+none, and the tooltips name them.
+
+Constants (exact; the order is the toolbar order, and `None` is a separator):
+
+```python
+ICON_SIZE = 16
+_ICON_SCALES = (1, 1.5, 2, 3)  # pixmaps for 100% to 300% display scaling
+# Block combo: (text, setBlock args, shortcut); the page reports the block in the same shape.
+BLOCKS = (
+    ("Normal", {"type": "paragraph"}, "Ctrl+Alt+0"),
+    *((f"Heading {level}", {"type": "heading", "level": level}, f"Ctrl+Alt+{level}") for level in range(1, 7)),
+    ("Code block", {"type": "code_block"}, None),
+)
+# Buttons in toolbar order, None between groups: (key, text, shortcut, command, args).
+# The command's name is also its key in selectionState.can.
+BUTTONS = (
+    ("bold", "Bold", "Ctrl+B", "toggleMark", "strong"),
+    ("italic", "Italic", "Ctrl+I", "toggleMark", "em"),
+    ("strike", "Strikethrough", "Ctrl+Shift+X", "toggleMark", "strike"),
+    ("code", "Inline code", "Ctrl+`", "toggleMark", "code"),
+    ("link", "Link", "Ctrl+K", "linkDialog", None),
+    None,
+    ("bullets", "Bulleted list", "Ctrl+Shift+8", "toggleList", "bullet"),
+    ("numbers", "Numbered list", "Ctrl+Shift+7", "toggleList", "ordered"),
+    ("tasks", "Task list", "Ctrl+Shift+9", "toggleList", "task"),
+    None,
+    ("quote", "Quote", "Ctrl+Shift+.", "toggleQuote", None),
+    ("code_block", "Code block", None, "insertCodeBlock", None),
+    ("table", "Table", None, "insertTable", {"rows": 3, "cols": 3}),
+    ("image", "Image", None, "imageDialog", None),
+    ("rule", "Horizontal rule", None, "insertRule", None),
+    None,
+    ("clear", "Clear formatting", "Ctrl+Space", "clearFormatting", None),
+)
+# Buttons checked while their mark is active at the selection.
+MARKS = {"bold": "strong", "italic": "em", "strike": "strike", "code": "code", "link": "link"}
+```
+
+Functions:
+- `tooltip(text: str, shortcut: str | None) -> str`: `"Bold (Ctrl+B)"`, or
+  just the text when there is no shortcut.
+- `glyph_icon(key: str, palette: QPalette) -> QIcon`: for each of
+  `QIcon.Mode.Normal` (color: `palette.color(Active, ButtonText)`) and
+  `QIcon.Mode.Disabled` (color: `(Disabled, ButtonText)`), and each scale
+  in `_ICON_SCALES`, it adds a transparent `ICON_SIZE * scale` pixmap.
+  The pixmap is painted antialiased, with the painter scaled so the glyph
+  is drawn on a 16x16 grid. Strokes use a 1.4 px round-cap pen in that
+  color.
+
+Glyphs (flat, no icon files; letters use `QFont` pixel sizes on the 16
+grid):
+
+| Key | Glyph |
+|---|---|
+| `bold` | "B", bold, ~14 px |
+| `italic` | "I", italic serif (Georgia) |
+| `strike` | "S" with a horizontal line through its middle |
+| `code` | two chevrons `<` `>` |
+| `link` | two overlapping rounded rectangles turned -45 degrees (chain) |
+| `bullets` | three filled dots, each followed by a line |
+| `numbers` | small "1", "2", "3", each followed by a line |
+| `tasks` | three small squares, each followed by a line |
+| `quote` | a vertical bar at the left, three lines |
+| `code_block` | "{}", bold |
+| `table` | a 3x3 grid in a frame |
+| `image` | a frame holding a mountain line and a filled sun |
+| `rule` | one thick horizontal line |
+| `clear` | "T" with a small x at its lower right |
+
+`class FormatToolbar(QToolBar)`:
+- `commandRequested = Signal(str, object)`.
+- `__init__(self, parent=None)`:
+  - title `"Format"`, object name `"format_toolbar"`;
+  - not movable, not floatable, icon size `ICON_SIZE`;
+  - `self.toggleViewAction().setVisible(False)`: View > Toolbar is the
+    one switch;
+  - `self.block_box`: a `QComboBox` with tooltip `"Block type"` and
+    `TabFocus`. Its items are `BLOCKS`: the text, the args as item data,
+    and `tooltip(text, shortcut)` as `ToolTipRole`. `activated` is
+    connected (never `currentIndexChanged`). The combo is added first,
+    then a separator;
+  - `self.buttons`: one `QAction` per `BUTTONS` entry, a separator for
+    each `None`. Each action has the entry's text and
+    `tooltip(text, shortcut)`, and no shortcut. It is checkable when its
+    key is in `MARKS`;
+  - then the icons are drawn, and `update_state({})` runs (everything
+    disabled).
+- `update_state(self, state: dict) -> None`:
+  - keeps `state` as the last report (`{}` when it is not a dict);
+  - enables each action when `can[command name]` is true, and the combo
+    when `can["setBlock"]` is;
+  - checks each checkable action when its `MARKS` value is in `marks`;
+  - sets the combo to the `BLOCKS` item whose args match `block`, or to
+    -1 when none does. A match means the same `type`, plus the same
+    `level` for headings.
+- Button and combo handlers: first `update_state(last report)`, which
+  undoes the check or item Qt changed on the click; then emit
+  `commandRequested(command, args)`. The combo emits `("setBlock",
+  itemData(number))`.
+- `changeEvent(event)`: on `QEvent.Type.PaletteChange`, redraw every
+  button icon with `glyph_icon(key, self.palette())`; then call
+  `super().changeEvent(event)`.
+
+- [ ] **Step 8: Wire the toolbar into `mdviewer/main_window.py`**
+
+Import: after `from mdviewer.richview import RichView`, add
+`from mdviewer.toolbar import FormatToolbar`.
+
+`__init__`, after the `self._editor_font = ...` line, add:
+
+```python
+        self._show_toolbar = data.get("show_toolbar", True) is not False
+```
+
+`__init__`, after `self.setCentralWidget(self.stack)` (before the status-bar
+labels), add:
+
+```python
+
+        self.toolbar = FormatToolbar(self)
+        self.addToolBar(self.toolbar)
+        self.toolbar.commandRequested.connect(self._run_format_command)
+        self.rich.selectionState.connect(self.toolbar.update_state)
+```
+
+`_build_menus`, View menu: replace
+
+```python
+        m.addSeparator()
+        self.act_wrap = self._action(m, "&Word Wrap", checkable=True)
+```
+
+with
+
+```python
+        m.addSeparator()
+        self.act_toolbar = self._action(m, "&Toolbar", checkable=True)
+        self.act_toolbar.setChecked(self._show_toolbar)
+        self.act_toolbar.toggled.connect(self._toggle_toolbar)
+        self.act_wrap = self._action(m, "&Word Wrap", checkable=True)
+```
+
+View section, before `def _zoom_in`, add:
+
+```python
+    def _toggle_toolbar(self, checked: bool) -> None:
+        self._show_toolbar = checked
+        self._update_chrome()
+
+    def _run_format_command(self, name: str, args) -> None:
+        """A toolbar button or the block combo: run it in the page, which keeps the focus."""
+        self.rich.command(name, args)
+        self.rich.setFocus()
+```
+
+`_update_chrome`, after the `_rendered_only_actions` loop, add:
+
+```python
+        self.toolbar.setVisible(not source and self._show_toolbar)
+```
+
+`settings_snapshot`: add `"show_toolbar": self._show_toolbar,` after the
+`"editor_font"` entry.
+
+- [ ] **Step 9: Run the smoke to verify it passes**
+
+Run: `.venv/Scripts/python scripts/smoke_ui.py`
+Expected: `SMOKE OK`.
+
+- [ ] **Step 10: Run the full verification**
+
+Run:
+
+```bash
+.venv/Scripts/python -m pytest -v
+.venv/Scripts/python scripts/smoke_ui.py
+.venv/Scripts/python scripts/check_web.py
+rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests
+```
+
+Expected: all tests pass (732 at the time of writing); `SMOKE OK`;
+`WEB OK`; the `rg` line prints nothing.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add mdviewer/toolbar.py mdviewer/main_window.py mdviewer/core/settings.py tests/test_settings.py scripts/smoke_ui.py
+git commit -m "feat: add the Rendered-mode format toolbar"
+```
+
+**Review Focus:**
+
+- **A click the page does not act on must not leave a false state.** This
+  happens when the page is restarting, crashed, or the command does not
+  apply. Bold must not stay checked, and the combo must not keep showing
+  the picked type. Pinned by `a click alone checks nothing` and `picking a
+  block type leaves the combo to the page's report`.
+- **Moving the caret must never edit the document.** Only `activated`
+  sends `setBlock`; `update_state` moves the combo silently. Pinned by
+  `each control sends its command`: with `currentIndexChanged` connected,
+  it records extra `setBlock` calls.
+- **The shortcuts in the tooltips work whether the toolbar is shown or
+  not**, because they belong to the page. Pinned by `Ctrl+B works with the
+  toolbar hidden` and `the shortcuts stay with the page's keymap`.
+- **The toolbar is hidden whenever Rendered is not shown:** Source mode, a
+  file over 5 MB, a page that failed to start, or Switch to Source after a
+  hang. Pinned by `the toolbar hides in Source mode` and `a page that
+  failed leaves the toolbar hidden`. No other path can show it:
+  `_update_chrome` is the only place that sets its visibility.
+- **Glyphs stay legible in dark and gray themes.** Pinned by the
+  `glyph_lightness` checks (dark). Gray uses the same light text color.
+- **Accepted behaviors:**
+  - Between a document load and the page's first report (~50 ms), the
+    controls show the previous document's state. A click then acts on the
+    new document.
+  - List and quote buttons are never checked (`selectionState` has no list
+    or quote state).
+  - Link and Image buttons do nothing visible until Task 16 answers the
+    page's dialog requests.
+- **Handed on:**
+  - **Task 16:** answer `requestLinkDialog` / `requestImageDialog`; the
+    toolbar buttons already send `linkDialog` / `imageDialog`.
+  - **Task 17:** the toolbar's commands give the page focus back; the Edit
+    menu routing must not take Ctrl+B and friends as QAction shortcuts
+    (they are the page's).
+  - **Task 19:** add to the README manual checklist:
+    - View > Toolbar off, restart the app: the toolbar stays hidden;
+    - after picking from the block combo or clicking a button, typing goes
+      on in the page (the focus came back);
+    - the glyphs are sharp at 150% display scaling and legible in Light,
+      Dark and Gray;
+    - hovering each button shows its tooltip with the shortcut.
 
 ### Task 16: Link and image dialogs, link navigation, protected blocks
 
-- **Files:** `mdviewer/dialogs.py`, `mdviewer/main_window.py`, `scripts/smoke_ui.py`.
-- **Covers:** `LinkDialog`, `ImageDialog` (relative path when possible, absolute for Untitled), seams `run_link_dialog` / `run_image_dialog`, `FAKE` entries for them; `openLink` -> scheme check -> `open_external` (re-added: it left with `preview.py` in Task 13) or in-page anchor; `hoverLink` -> status bar; `editProtected` -> Source mode at that block.
-- **Test:** smoke: faked dialogs insert a link and an image and the saved Markdown matches; `javascript:` openLink ignored; double-click path switches to Source with caret on the block's line.
-- **Commit:** `feat: add link and image dialogs and link navigation in Rendered mode`
+**Status: steps detailed.** The design below was prototyped and run before
+being written into this plan (2026-10-20, PySide6 6.12.0 offscreen), on top
+of Task 15 as committed (`21b9ba6`), then reverted. Results:
+- The full suite passes (763 tests: Task 15's 732 plus 31 new `test_urls.py`
+  cases), `SMOKE OK` in three runs in a row, `WEB OK`, and the Qt-import
+  `rg` prints nothing. The bundle does not change.
+- The smoke takes ~29 s (~24 s before).
+- Fifteen deliberate breaks each make the smoke fail:
+  - a second page request while a dialog is open opens a second dialog (no `_in_dialog` guard)
+  - no `_doc_number` check after the dialog
+  - a request that arrives in Source mode still opens a dialog
+  - `openLink` without the `is_safe` check
+  - relative links opened in Untitled (no `isRelative` check)
+  - `#anchor` links ignored
+  - `hoverLink("")` clearing any status message
+  - the hovered URL kept after switching to Source
+  - `editProtected` ignoring its index
+  - `display_src` not resolved (the image does not load)
+  - the image dialog keeping the absolute path (no `image_src`)
+  - the link dialog's OK enabled for a `javascript:` URL
+  - Remove link answering `None`
+  - Remove link offered for a new link
+  - `removeLink` never sent
+
+**Findings that shape this task:**
+
+- **Headings carry no `id` in the page**, and v1's preview had none either
+  (its only in-page anchors were footnotes). A Ctrl+clicked `#anchor`
+  therefore finds its heading by GitHub's slug rule. Python reads the
+  top-level heading texts with one read-only `runJavaScript`
+  (`mdEditor.view.state.doc`), so the bundle does not change. The slug and
+  the match are pure functions in `core/urls.py`.
+- **A modal `exec()` inside the `Bridge` slot works.** The real link dialog,
+  opened from the page's `requestLinkDialog` and closed by a timer, applies
+  its answer. The dialog therefore runs directly from the signal; nothing
+  is deferred.
+- **The dialog's nested event loop can deliver more page calls.** If Ctrl+K
+  is pressed twice quickly, a second queued request can arrive while the
+  first dialog is open, and without a guard it would open a nested second
+  dialog. The smoke simulates this by emitting a request from inside the
+  faked dialog. A flag drops requests while a dialog is open.
+- **The document can change under an open dialog.** A crash with Retry, or
+  any load, replaces it (`_doc_number` moves). The answer then belongs to
+  a selection that is gone, so it is dropped.
+- **QTest cannot double-click in the page.** QTest moves its timestamp past
+  the double-click interval after every release, so two `mouseClick`s are
+  two single clicks. `mouseDClick` reaches the page as one `mousedown`. The
+  smoke dispatches a DOM `dblclick` on the raw HTML block's shield, which
+  runs the page's real handler and bridge call.
+- **A missing image file renders `.md-image-broken`, with no `<img>`.** The
+  smoke writes a real 4x4 PNG and waits for `naturalWidth == 4`, which
+  proves that `display_src` was resolved.
+- **`QApplication.activeModalWidget()` works offscreen.** The smoke drives
+  the real seams with `press_when_open(button_of)`, which polls for the
+  dialog and clicks one of its buttons.
+- **A pull marks the page clean.** Checks that read the page's document
+  while it is dirty use `page_doc()` (`mdEditor.view.state.doc.toJSON()`),
+  never `pull()`.
+- **`set_mode(SOURCE)` returns early in Source mode**, so a late
+  `editProtected` needs no mode check of its own. With unpulled edits,
+  `set_mode` pulls first (`with_buffer`). `_line_of_block` then reads the
+  pulled text, so the caret lands on the block's line in the new text.
+- **Footnote definitions are the last top-level blocks** in both
+  `docmodel` and the serializer. Block indexes therefore survive a pull,
+  and `editProtected`'s index names the same block in the pulled text.
+
+**Design decisions:**
+
+- **Seams** (`mdviewer/main_window.py`, next to `run_preferences`):
+  `run_link_dialog`, `run_image_dialog`, and `open_external` (not modal,
+  but the smoke must never open a browser). The Browse... file dialog
+  inside the image dialog is the seam `dialogs.pick_image_path`.
+  `dialogs.py` must not import `main_window` (circular).
+- **Link dialog:** title `Insert Link`, or `Edit Link` when it gets a URL.
+  - Rows `&Text:` and `&URL:`; the URL field has the focus, its text
+    selected.
+  - OK is enabled when the trimmed URL is non-empty and `urls.is_safe`.
+  - `&Remove link` (ActionRole) only when editing. It ends the dialog with
+    `LinkDialog.REMOVE` (2).
+  - `values()` returns `(text, url.strip())`; the text as typed. An empty
+    text keeps the link's current text (Task 10's `setLink`).
+- **Image dialog:** title `Insert Image`.
+  - Rows `&Path or URL:` (line edit plus `&Browse...`) and `&Alt text:`.
+  - Browse... starts in the document's folder (`""` for Untitled) with
+    filter `Images (*.png *.jpg *.jpeg *.gif *.svg *.webp *.bmp);;All files (*)`.
+    It writes the picked path with native separators.
+  - `values()` returns `(urls.image_src(path, base_dir), alt)`. OK is
+    enabled when that src is non-empty and `urls.is_safe`.
+- **`urls.image_src(path, base_dir)`** applies these rules in order:
+  1. Strip spaces, then one pair of surrounding double quotes (Explorer's
+     "Copy as path").
+  2. Anything with a scheme of 2+ letters (`https:`, `file:`, `data:`), or
+     starting with `#`, stays as is.
+  3. A relative path stays as typed, with `\` turned into `/`.
+  4. An absolute path (`PureWindowsPath.is_absolute()`: drive or UNC)
+     becomes `os.path.relpath(path, base_dir)` with `/` separators, and
+     `%` -> `%25`, `#` -> `%23` (`resolve` unquotes them). This holds when
+     `base_dir` is set and the path is on the same drive; `relpath` raises
+     `ValueError` across drives.
+  5. Otherwise (Untitled, or another drive) it becomes
+     `Path(path).as_uri()`.
+
+  Spaces stay readable: the serializer writes `<pics/a b.png>`.
+- **Answering the page:**
+  - `setLink {"text", "href"}`, `removeLink`, or nothing on Cancel.
+  - `insertImage {"src", "display_src": urls.resolve(src, base_dir), "alt"}`
+    (the same resolution `docmodel` uses).
+  - `rich.setFocus()` after every dialog.
+- **`openLink(href)`:**
+  - `#fragment`: `rich.heading_texts(callback)`, then
+    `urls.anchor_block(texts, fragment)`, then `rich.focus_block(index)`.
+    Only top-level headings count (`focus_block`'s granularity).
+  - Otherwise: ignored unless `urls.is_safe(href)`. `QUrl(urls.resolve(href,
+    base_dir))` goes to `open_external`, unless it is still relative
+    (Untitled: no folder to resolve against).
+  - Nothing happens, and nothing is shown, for an ignored link or an
+    unknown anchor.
+- **`hoverLink(href)`:**
+  - A non-empty href is shown with `statusBar().showMessage(href)` (no
+    timeout).
+  - `""` clears the bar only while it still shows that href, so a warning
+    shown meanwhile stays.
+  - The status bar shows the raw href, what Ctrl+click will act on.
+  - `_show_mode(SOURCE)` clears it: a hidden page sends no `mouseleave`.
+- **`editProtected(index)`:** `_caret_block = index`, then
+  `set_mode(SOURCE)`. Task 13's Rendered -> Source path then puts the caret
+  on that block's first line.
+- **`MainWindow._base_dir()`** (`loaded_path.parent` or `None`) replaces
+  the inline expression in `_parse`, and serves the new paths.
+
+**Files:**
+- Modify: `mdviewer/core/urls.py`
+- Modify: `tests/test_urls.py`
+- Create: `mdviewer/dialogs.py`
+- Modify: `mdviewer/richview.py`
+- Modify: `mdviewer/main_window.py`
+- Modify: `scripts/smoke_ui.py` (new Task 16 section)
+
+**Interfaces:**
+- Consumes:
+  - Task 10 commands (`web-src/src/commands.js`): `setLink` ({href, text?,
+    title?}; an empty or unchanged text keeps the selection's text),
+    `removeLink`, `insertImage` ({src, display_src?, alt?, title?}). The
+    page sends `requestLinkDialog(text, href)` / `requestImageDialog()`
+    from `linkDialog` / `imageDialog`.
+  - Task 9 page calls: `openLink(href)` (Ctrl+click, raw `href`),
+    `hoverLink(href)` (`""` on leave and after `setDocument`),
+    `editProtected(index)` (enclosing top-level block). Task 12 re-emits
+    them as `RichView` signals of the same names.
+  - Task 12 `RichView._call`, `focus_block`, `command`; Task 13/14
+    `MainWindow.set_mode`, `_show_mode`, `_doc_number`, `_caret_block`,
+    `_parse`. Task 4 `urls.resolve`, `urls.is_safe`.
+  - Task 15 `MainWindow.toolbar` (Link and Image send `linkDialog` /
+    `imageDialog`). Smoke: `tb`, `page_js`, `pump`, `check`, `FAKE`,
+    `record`, `QTest`, `Qt`, `QPoint`, `QUrl`, `S`.
+- Produces (later tasks rely on these exact names):
+  - `mdviewer/core/urls.py`: `image_src(path: str, base_dir: Path | None)
+    -> str`, `slug(text: str) -> str`, `anchor_block(headings: list[str |
+    None], fragment: str) -> int | None`.
+  - `mdviewer/dialogs.py`: `IMAGE_FILTER`, `pick_image_path(parent, start:
+    str) -> str`, `LinkDialog(text, url, parent=None)` (`REMOVE`,
+    `text_edit`, `url_edit`, `ok_button`, `remove_button` (None for a new
+    link), `values()`), `ImageDialog(base_dir, parent=None)` (`base_dir`,
+    `path_edit`, `browse_button`, `alt_edit`, `ok_button`, `values()`).
+  - `mdviewer/main_window.py`: `run_link_dialog`, `run_image_dialog`,
+    `open_external(url: QUrl) -> None`; `MainWindow._base_dir()`,
+    `_on_link_request`, `_on_image_request`, `_run_dialog`, `_open_link`,
+    `_go_to_anchor`, `_show_hovered_link`, `_edit_protected`.
+  - `RichView.heading_texts(callback: Callable[[list], None]) -> None`.
+  - `scripts/smoke_ui.py`: `DIALOGS`, `OPENED`, `fake_dialog(*call)`,
+    `FAKE["link"]`, `FAKE["image"]`, `FAKE["image_path"]`,
+    `FAKE["during_dialog"]`, `press_when_open(button_of)`, `page_doc()`.
+
+- [ ] **Step 1: Write the failing `urls` tests**
+
+In `tests/test_urls.py`, change the import to
+`from mdviewer.core.urls import anchor_block, image_src, is_safe, resolve, slug`
+and append:
+
+```python
+# --- image_src ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("typed", ["https://e.com/a.png", "file:///C:/x.png", "data:image/png;base64,AA",
+                                   "img/a.png", "../a.png", "a b.png"])
+def test_image_src_keeps_urls_and_relative_paths(typed, tmp_path):
+    assert image_src(typed, tmp_path) == typed
+
+
+def test_image_src_relative_path_uses_slashes(tmp_path):
+    assert image_src(r"img\a.png", tmp_path) == "img/a.png"
+
+
+def test_image_src_strips_spaces_and_explorer_quotes(tmp_path):
+    assert image_src(f'  "{tmp_path / "a.png"}"  ', tmp_path) == "a.png"
+
+
+def test_image_src_absolute_path_in_the_folder_becomes_relative(tmp_path):
+    assert image_src(str(tmp_path / "pics" / "a.png"), tmp_path) == "pics/a.png"
+    assert image_src((tmp_path / "pics" / "a.png").as_posix(), tmp_path) == "pics/a.png"
+
+
+def test_image_src_absolute_path_elsewhere_on_the_drive_goes_up(tmp_path):
+    assert image_src(str(tmp_path.parent / "a.png"), tmp_path) == "../a.png"
+
+
+def test_image_src_other_drive_is_a_file_uri(tmp_path):
+    other = r"Q:\pics\a b.png" if not str(tmp_path).upper().startswith("Q:") else r"R:\pics\a b.png"
+    assert image_src(other, tmp_path) == Path(other).as_uri()
+
+
+def test_image_src_untitled_is_a_file_uri():
+    assert image_src(r"C:\pics\a b.png", None) == "file:///C:/pics/a%20b.png"
+
+
+@pytest.mark.parametrize("name", ["a b.png", "100%.png", "a#1.png", "café (1).png", "%20.png"])
+def test_image_src_resolves_back_to_the_file(name, tmp_path):
+    target = tmp_path / "pics" / name
+    assert resolve(image_src(str(target), tmp_path), tmp_path) == target.as_uri()
+
+
+# --- slug and anchor_block ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Intro", "intro"), ("Section Two", "section-two"), ("What's new?", "whats-new"),
+    ("C++ & C#", "c--c"), ("snake_case and-dash", "snake_case-and-dash"), ("Café 2", "café-2"),
+    ("  padded  ", "padded"), ("", ""),
+])
+def test_slug(text, expected):
+    assert slug(text) == expected
+
+
+def test_anchor_block_finds_the_heading():
+    assert anchor_block([None, "Intro", None, "Section Two"], "section-two") == 3
+
+
+def test_anchor_block_counts_repeated_headings():
+    headings = ["Notes", None, "Notes", "Notes"]
+    assert [anchor_block(headings, f) for f in ("notes", "notes-1", "notes-2")] == [0, 2, 3]
+
+
+def test_anchor_block_ignores_case_and_decodes_escapes():
+    assert anchor_block(["Café Menu"], "Caf%C3%A9-Menu") == 0
+
+
+@pytest.mark.parametrize("fragment", ["missing", "", "intro-1"])
+def test_anchor_block_without_a_match(fragment):
+    assert anchor_block([None, "Intro"], fragment) is None
+```
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `.venv/Scripts/python -m pytest tests/test_urls.py -v`
+Expected: collection fails with `ImportError: cannot import name
+'anchor_block'`.
+
+- [ ] **Step 3: Implement `image_src`, `slug` and `anchor_block` in `mdviewer/core/urls.py`**
+
+- `image_src(path: str, base_dir: Path | None) -> str` follows the five
+  rules in the design decisions above. Imports: `re`,
+  `PureWindowsPath`.
+- `slug(text: str) -> str` lower-cases the stripped text, drops every
+  character matching `[^\w\- ]` (a module constant `_NOT_IN_SLUG`), and
+  turns each space into `-` (`"C++ & C#"` -> `"c--c"`).
+- `anchor_block(headings, fragment)` compares
+  `unquote(fragment).lower()` with each heading's anchor. The anchor is
+  the heading's `slug`, plus `-1`, `-2`, ... for the second, third, ... use
+  of the same slug, counted over the headings in order. It returns the
+  first matching index, or `None`; `None` entries are skipped.
+
+- [ ] **Step 4: Run them to verify they pass**
+
+Run: `.venv/Scripts/python -m pytest tests/test_urls.py -v`
+Expected: all pass (66 tests).
+
+- [ ] **Step 5: Write the failing smoke checks**
+
+Insert directly above
+`# --- Later tasks insert their checks directly above this line. ---`:
+
+```python
+# --- WYSIWYG Task 16: link and image dialogs, link navigation, protected blocks -----
+from PySide6.QtCore import QTimer  # noqa: E402
+from PySide6.QtGui import QImage  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialogButtonBox  # noqa: E402
+
+from mdviewer import dialogs  # noqa: E402
+
+DIALOGS: list = []
+OPENED: list = []
+real_run_link_dialog = main_window.run_link_dialog
+real_run_image_dialog = main_window.run_image_dialog
+
+
+def fake_dialog(*call):
+    """Stand-in for a page-requested dialog: records the call, runs FAKE["during_dialog"]
+    "while it is open", then answers FAKE[kind]."""
+    DIALOGS.append(call)
+    hook = FAKE.pop("during_dialog", None)
+    if hook:
+        hook()
+    return FAKE[call[0]]
+
+
+main_window.run_link_dialog = lambda parent, text, url: fake_dialog("link", text, url)
+main_window.run_image_dialog = lambda parent, base_dir: fake_dialog("image", base_dir)
+main_window.open_external = OPENED.append
+dialogs.pick_image_path = lambda parent, start: (DIALOGS.append(("browse", start)), FAKE["image_path"])[-1]
+FAKE.update(link=None, image=None, image_path="")
+
+# the dialogs themselves
+link_box = dialogs.LinkDialog("word", "")
+check(link_box.windowTitle() == "Insert Link" and link_box.remove_button is None and link_box.text_edit.text() == "word",
+      "a new link: Insert Link with the selected text, no Remove link")
+check(not link_box.ok_button.isEnabled(), "OK waits for a URL")
+link_box.url_edit.setText("java\tscript:alert(1)")
+check(not link_box.ok_button.isEnabled(), "a javascript: URL cannot be accepted")
+link_box.url_edit.setText("  https://example.com/  ")
+check(link_box.ok_button.isEnabled() and link_box.values() == ("word", "https://example.com/"), "OK gives (text, trimmed URL)")
+edit_box = dialogs.LinkDialog("old", "https://o.test/")
+check(edit_box.windowTitle() == "Edit Link" and edit_box.remove_button.text() == "&Remove link"
+      and edit_box.ok_button.isEnabled(), "editing a link offers Remove link")
+image_box = dialogs.ImageDialog(TMP)
+check(image_box.windowTitle() == "Insert Image" and not image_box.ok_button.isEnabled(), "OK waits for a path")
+picked = TMP / "pics" / "a b.png"
+FAKE["image_path"] = picked.as_posix()
+image_box.browse_button.click()
+check(DIALOGS[-1] == ("browse", str(TMP)) and image_box.path_edit.text() == str(picked),
+      "Browse... starts in the document's folder and fills the path")
+image_box.alt_edit.setText("Alt")
+check(image_box.ok_button.isEnabled() and image_box.values() == ("pics/a b.png", "Alt"),
+      "a picked file is stored relative to the document's folder")
+untitled_box = dialogs.ImageDialog(None)
+untitled_box.path_edit.setText(str(picked))
+check(untitled_box.values()[0] == picked.as_uri(), "Untitled: the image is an absolute file: URI")
+image_box.path_edit.setText("javascript:alert(1)")
+check(not image_box.ok_button.isEnabled(), "a javascript: image cannot be accepted")
+
+
+# the real seams map the buttons to their answers (a timer presses them)
+def press_when_open(button_of, tries: int = 100) -> None:
+    """Clicks button_of(dialog) once a modal dialog is open (polled every 20 ms, up to 2 s)."""
+    dialog = QApplication.activeModalWidget()
+    if dialog is not None:
+        button_of(dialog).click()
+    elif tries:
+        QTimer.singleShot(20, lambda: press_when_open(button_of, tries - 1))
+
+
+def page_doc() -> str:
+    """The page's document as JSON text, read without a pull (a pull marks the page clean)."""
+    return json.dumps(page_js(window.rich, "window.mdEditor.view.state.doc.toJSON()"))
+
+
+CANCEL = QDialogButtonBox.StandardButton.Cancel
+press_when_open(lambda d: d.remove_button)
+check(real_run_link_dialog(window, "old", "https://o.test/") == "remove", "Remove link answers 'remove'")
+press_when_open(lambda d: d.ok_button)
+check(real_run_link_dialog(window, "old", "https://o.test/") == ("old", "https://o.test/"), "OK answers (text, url)")
+press_when_open(lambda d: d.findChild(QDialogButtonBox).button(CANCEL))
+check(real_run_link_dialog(window, "", "") is None, "Cancel answers None")
+press_when_open(lambda d: (d.path_edit.setText("https://e.test/a.png"), d.ok_button)[1])
+check(real_run_image_dialog(window, TMP) == ("https://e.test/a.png", ""), "the image dialog answers (src, alt)")
+
+# Link and Image through the page: the saved Markdown
+picked.parent.mkdir()
+QImage(4, 4, QImage.Format.Format_ARGB32).save(str(picked))
+links_md = TMP / "links.md"
+links_md.write_bytes(b"word here\n\n# Intro\n\nend\n")
+window.open_file(links_md)
+check(pump(lambda: tb.buttons["link"].isEnabled(), 3), "the page enables Link")
+SELECT_JS = ("(() => {{ const v = window.mdEditor.view; const s = v.state.selection;"
+             " v.dispatch(v.state.tr.setSelection(s.constructor.create(v.state.doc, s.from + {}, s.from + {}))); return 0; }})()")
+window.rich.focus_block(0)
+page_js(window.rich, SELECT_JS.format(0, 4))
+FAKE["link"] = ("word", "https://example.com/")
+tb.buttons["link"].trigger()
+check(pump(lambda: window.dirty, 3) and DIALOGS[-1] == ("link", "word", ""), "Link opens the dialog with the selected text")
+window.rich.focus_block(2)
+pump(lambda: window._caret_block == 2, 3)
+FAKE["image"] = ("pics/a b.png", "Alt")
+check(pump(lambda: tb.buttons["image"].isEnabled(), 3), "the page enables Image")
+tb.buttons["image"].trigger()
+check(pump(lambda: DIALOGS[-1] == ("image", TMP), 3), "Image opens the dialog with the document's folder")
+check(pump(lambda: page_js(window.rich, "document.querySelector('#editor .md-image img')?.naturalWidth") == 4, 3),
+      "the inserted image displays: display_src is its resolved file: URI")
+window.on_save()
+check(pump(lambda: not window.dirty, 5), "Save after the dialogs")
+saved_links = links_md.read_bytes().decode("utf-8")
+check(saved_links == "[word](https://example.com/) here\n\n# Intro\n\n![Alt](<pics/a b.png>)end\n",
+      f"the saved file has the dialogs' link and image ({saved_links!r})")
+window.rich.focus_block(0)
+page_js(window.rich, SELECT_JS.format(1, 1))
+FAKE["link"] = "remove"
+tb.buttons["link"].trigger()
+check(pump(lambda: window.dirty, 3) and DIALOGS[-1] == ("link", "word", "https://example.com/"),
+      "on a link, the dialog gets its text and URL")
+FAKE["link"] = None
+count = len(DIALOGS)
+FAKE["during_dialog"] = lambda: window.rich.requestLinkDialog.emit("again", "")
+tb.buttons["link"].trigger()
+check(pump(lambda: len(DIALOGS) > count, 3) and len(DIALOGS) == count + 1, "a request made while a dialog is open is dropped")
+window.on_save()
+check(pump(lambda: not window.dirty, 5) and links_md.read_bytes().startswith(b"word here\n"),
+      "Remove link; Cancel changes nothing")
+FAKE["link"] = ("zzz", "https://z.test/")
+FAKE["during_dialog"] = lambda: window.open_file(links_md)
+tb.buttons["link"].trigger()
+pump(lambda: False, 0.5)
+check(not window.dirty and "z.test" not in page_doc(), "an answer for a document replaced meanwhile is dropped")
+FAKE["link"] = None
+
+# the real dialog, run from inside the page's bridge call
+main_window.run_link_dialog = real_run_link_dialog
+check(pump(lambda: tb.buttons["link"].isEnabled(), 3), "Link is enabled again")
+window.rich.focus_block(0)
+page_js(window.rich, SELECT_JS.format(0, 4))
+press_when_open(lambda d: (d.url_edit.setText("https://real.test/"), d.ok_button)[1])
+tb.buttons["link"].trigger()
+check(pump(lambda: "https://real.test/" in page_doc(), 3), "a real dialog opened from the page's request applies its answer")
+main_window.run_link_dialog = lambda parent, text, url: fake_dialog("link", text, url)
+
+# Ctrl+click: external links, relative files, #anchors; unsafe ones are ignored
+OPENED.clear()
+for href in ("https://example.com/a", "javascript:alert(1)", " java\tscript:x", "other.md#part", "mailto:me@example.com"):
+    window.rich.openLink.emit(href)
+check(OPENED == [QUrl("https://example.com/a"), QUrl((TMP / "other.md").as_uri() + "#part"), QUrl("mailto:me@example.com")],
+      f"safe links open outside the app, relative ones next to the file ({OPENED})")
+anchors_md = TMP / "anchors.md"
+anchors_md.write_bytes(b"[go](#section-two) [nowhere](#missing)\n\n# Intro\n\ntext\n\n## Section Two\n\nend\n")
+window.open_file(anchors_md)
+pump(lambda: window._caret_block == 0 and window.rich.is_ready, 3)
+OPENED.clear()
+point = page_js(window.rich, "(() => { const b = document.querySelector('#editor a').getBoundingClientRect();"
+                             " return [Math.round(b.left + b.width / 2), Math.round(b.top + b.height / 2)]; })()")
+QTest.mouseClick(window.rich.focusProxy(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, QPoint(*point))
+check(pump(lambda: window._caret_block == 3, 3) and OPENED == [], "Ctrl+click on #section-two moves to that heading")
+window.rich.openLink.emit("#missing")
+pump(lambda: False, 0.3)
+check(window._caret_block == 3 and OPENED == [], "an anchor with no heading does nothing")
+window.on_new()
+window.rich.openLink.emit("other.md")
+window.rich.openLink.emit("https://example.com/b")
+check(OPENED == [QUrl("https://example.com/b")], "Untitled: a relative link has nowhere to open")
+
+# hovering a link shows its URL; leaving clears only that message
+bar = window.statusBar()
+window.rich.hoverLink.emit("https://example.com/h")
+check(bar.currentMessage() == "https://example.com/h", "a hovered link shows its URL in the status bar")
+window.rich.hoverLink.emit("")
+check(bar.currentMessage() == "", "leaving the link clears it")
+window.rich.hoverLink.emit("https://example.com/h")
+bar.showMessage("a warning", 10000)
+window.rich.hoverLink.emit("")
+check(bar.currentMessage() == "a warning", "leaving a link keeps a warning shown meanwhile")
+window.rich.hoverLink.emit("https://example.com/h")
+window.act_source.trigger()
+check(window.mode == "source" and bar.currentMessage() == "", "Source mode drops the hovered URL")
+count = len(DIALOGS)
+window.rich.requestLinkDialog.emit("late", "")
+window.rich.requestImageDialog.emit()
+check(len(DIALOGS) == count, "a dialog request that arrives in Source mode is dropped")
+window.act_rendered.trigger()
+
+# double-click on a protected block: Source mode, caret on its first line
+protected_md = TMP / "protected.md"
+protected_md.write_bytes(b"intro\n\n<div>\nraw\n</div>\n\nafter\n")
+window.open_file(protected_md)
+pump(lambda: window.rich.is_ready and page_js(window.rich, "document.querySelector('#editor .md-shield') !== null"), 3)
+page_js(window.rich, "(() => { const v = window.mdEditor.view; v.dispatch(v.state.tr.insertText('X', v.state.doc.content.size - 1)); return 0; })()")
+check(pump(lambda: window.dirty, 3), "an edit after the raw HTML block")
+# QTest cannot double-click in the page (see Task 16): dispatch the DOM event the page handles.
+page_js(window.rich, "document.querySelector('#editor .md-shield')"
+                     ".dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }))")
+check(pump(lambda: window.mode == "source", 3) and window.act_source.isChecked(), "double-clicking raw HTML switches to Source")
+check(window.editor.textCursor().blockNumber() + 1 == 3, f"the caret is on the block's first line ({window.editor.textCursor().blockNumber() + 1})")
+check(window.dirty and window.buffer == "intro\n\n<div>\nraw\n</div>\n\nafterX\n", f"the edit came along ({window.buffer!r})")
+FAKE["answer"] = S.Discard
+window.on_new()
+```
+
+(`tb`, `page_js`, `pump`, `S`, `QTest`, `Qt`, `QPoint` and `QUrl` are
+defined by earlier sections.)
+
+- [ ] **Step 6: Run the smoke to verify it fails**
+
+Run: `.venv/Scripts/python scripts/smoke_ui.py`
+Expected: the run dies with `ModuleNotFoundError: No module named
+'mdviewer.dialogs'` at `from mdviewer import dialogs`.
+
+- [ ] **Step 7: Create `mdviewer/dialogs.py`**
+
+Module docstring: the link and image dialogs of the Rendered editor (spec
+section 3). `main_window`'s seams `run_link_dialog` / `run_image_dialog`
+show them; the Browse... file dialog goes through `pick_image_path`, which
+the smoke fakes.
+
+- `IMAGE_FILTER` and `pick_image_path(parent, start: str) -> str`:
+  `QFileDialog.getOpenFileName(parent, "Choose Image", start,
+  IMAGE_FILTER)`, returning the path (`""` when cancelled).
+- `class LinkDialog(QDialog)` and `class ImageDialog(QDialog)` as in the
+  design decisions. Each is a `QFormLayout` with a `QDialogButtonBox`
+  (Ok | Cancel) as its last row. `accepted` / `rejected` go to `accept` /
+  `reject`; `ok_button` is the box's Ok button. The OK state is updated on
+  the URL / path field's `textChanged`, and once in `__init__`. Minimum
+  width 420 px, so a URL is readable.
+
+- [ ] **Step 8: Add `heading_texts` to `mdviewer/richview.py`**
+
+After `_PULL_JS`, add:
+
+```python
+# Each top-level block's heading text, null for other blocks (in-page #anchor links).
+_HEADINGS_JS = (
+    "(() => { const out = []; window.mdEditor.view.state.doc.forEach("
+    "(node) => out.push(node.type.name === 'heading' ? node.textContent : null)); return JSON.stringify(out); })()"
+)
+```
+
+At the end of `RichView`, add `heading_texts(self, callback)`. It runs
+`_HEADINGS_JS` through `self._call`, and calls `callback(json.loads(value))`
+only when `value` is a `str`. Docstring: never called when the page fails,
+crashes or restarts first.
+
+- [ ] **Step 9: Wire everything into `mdviewer/main_window.py`**
+
+Imports:
+- `QUrl` from `PySide6.QtCore`;
+- `QDesktopServices` from `PySide6.QtGui` (the import list becomes a
+  parenthesized one, one name per line);
+- `urls` added to the `mdviewer.core` import;
+- `from mdviewer.dialogs import ImageDialog, LinkDialog` before
+  `from mdviewer.editor import MarkdownEditor`.
+
+Seams, before `def read_system_theme`:
+
+```python
+def run_link_dialog(parent, text: str, url: str) -> tuple[str, str] | str | None:
+    """Run the modal link dialog: (text, url) for OK, "remove" for Remove link, None for Cancel."""
+    dialog = LinkDialog(text, url, parent)
+    result = dialog.exec()
+    if result == LinkDialog.REMOVE:
+        return "remove"
+    return dialog.values() if result == QDialog.DialogCode.Accepted else None
+
+
+def run_image_dialog(parent, base_dir: Path | None) -> tuple[str, str] | None:
+    """Run the modal image dialog: (src, alt) for OK, None for Cancel."""
+    dialog = ImageDialog(base_dir, parent)
+    return dialog.values() if dialog.exec() == QDialog.DialogCode.Accepted else None
+
+
+def open_external(url: QUrl) -> None:
+    """Hand a Ctrl+clicked link to Windows (browser, mail client, default app)."""
+    QDesktopServices.openUrl(url)
+```
+
+`__init__`:
+- After the `self._doc_number = 0 ...` line, add `self._in_dialog = False`
+  (a link or image dialog is open; the page's further requests are
+  dropped) and `self._hovered = ""` (the link URL shown in the status bar).
+- After `self.rich.ready.connect(self._watch_rich_drops)`, connect
+  `requestLinkDialog` -> `_on_link_request`, `requestImageDialog` ->
+  `_on_image_request`, `openLink` -> `_open_link`, `hoverLink` ->
+  `_show_hovered_link`, `editProtected` -> `_edit_protected`.
+
+`_show_mode`: in the `if mode == self.SOURCE and self.mode ==
+self.RENDERED:` branch, after `self._sync_editor()`, add
+`self._show_hovered_link("")  # the page sends no mouseleave once hidden`.
+
+`_parse` passes `self._base_dir()`. Add `_base_dir()` after it.
+
+New section `# --- Links, images and protected blocks (Rendered mode) ---`
+before `def _zoom_in`. Every handler follows the design decisions.
+`_run_dialog` is the one with an exact shape:
+
+```python
+    def _run_dialog(self, run: Callable[[], object]):
+        """run() a page-requested dialog; None when another is open, or when the document was
+        replaced or left meanwhile (the answer belongs to the old selection)."""
+        if self._in_dialog or self.mode != self.RENDERED:
+            return None
+        number = self._doc_number
+        self._in_dialog = True
+        try:
+            result = run()
+        finally:
+            self._in_dialog = False
+        self.rich.setFocus()
+        if number != self._doc_number or self.mode != self.RENDERED:
+            return None
+        return result
+```
+
+`_on_link_request(text, href)` and `_on_image_request()` call
+`_run_dialog(lambda: run_link_dialog(self, text, href))` /
+`_run_dialog(lambda: run_image_dialog(self, base_dir))`. They look the seam
+up at call time, which lets the smoke swap it. `_go_to_anchor(headings,
+fragment)` focuses the block only while `mode == RENDERED`.
+
+- [ ] **Step 10: Run the smoke to verify it passes**
+
+Run: `.venv/Scripts/python scripts/smoke_ui.py`
+Expected: `SMOKE OK`.
+
+- [ ] **Step 11: Run the full verification**
+
+Run:
+
+```bash
+.venv/Scripts/python -m pytest -v
+.venv/Scripts/python scripts/smoke_ui.py
+.venv/Scripts/python scripts/check_web.py
+rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests
+```
+
+Expected: all tests pass (763 at the time of writing); `SMOKE OK`;
+`WEB OK`; the `rg` line prints nothing.
+
+- [ ] **Step 12: Commit**
+
+```bash
+git add mdviewer/core/urls.py tests/test_urls.py mdviewer/dialogs.py mdviewer/richview.py mdviewer/main_window.py scripts/smoke_ui.py
+git commit -m "feat: add link and image dialogs and link navigation in Rendered mode"
+```
+
+**Review Focus:**
+
+- **Windows paths in the image dialog.** Explorer's "Copy as path" quotes,
+  backslashes, spaces, `#` or `%` in a file name, another drive, and an
+  Untitled document must each give a src that saves as valid Markdown and
+  displays the file. Pinned by the `image_src` tests (including
+  `test_image_src_resolves_back_to_the_file`) and by the smoke's `a picked
+  file is stored relative to the document's folder` and `the inserted
+  image displays`.
+- **A dialog answer must land on the selection it was asked for.** A
+  second request while a dialog is open, or a document replaced meanwhile
+  (reload, crash with Retry), drops it. Pinned by `a request made while a
+  dialog is open is dropped` and `an answer for a document replaced
+  meanwhile is dropped`.
+- **Ctrl+click never opens an unsafe or unresolvable target.** This covers
+  `javascript:` in any case, with whitespace or control characters inside,
+  and relative links in Untitled. Pinned by `safe links open outside the
+  app` and `Untitled: a relative link has nowhere to open`.
+- **`#anchor` links written for GitHub find their heading.** This covers
+  punctuation, case, percent-escapes and repeated headings. Pinned by the
+  `slug` / `anchor_block` tests and the real Ctrl+click `#section-two`
+  check.
+- **The status bar never loses a warning to a hover, and never keeps a
+  stale URL.** Pinned by `leaving a link keeps a warning shown meanwhile`
+  and `Source mode drops the hovered URL`.
+- **Accepted behaviors:**
+  - Only top-level headings are anchor targets. The caret goes to the
+    heading's start, scrolled into view, but not to the top of the window.
+  - An ignored link or an unknown anchor does nothing, with no message.
+  - Ctrl+click on a local file opens it in its Windows default app,
+    programs included, as v1's preview did for any clicked link. The
+    status bar shows the target on hover, before the click.
+  - A URL without a scheme (`example.com`) is a relative path, as in
+    Markdown. Ctrl+click looks for that file next to the document.
+  - Images on another drive and in Untitled documents are stored as
+    `file:` URIs. A later Save As keeps them, and does not rewrite
+    relative srcs for the new folder.
+  - A protected block nested in a list or quote opens Source on the first
+    line of its top-level block (spec 2: top-level granularity).
+- **Handed on:**
+  - **Task 17:** the Edit menu must not take Ctrl+K as a `QAction`
+    shortcut (the page's keymap sends `linkDialog`).
+  - **Task 19:** add to the README manual checklist:
+    - Ctrl+click a web link (browser), a relative `.md` link (default
+      app) and a `#heading` link (caret moves there); a plain click only
+      places the caret;
+    - hovering a link shows its URL in the status bar, and leaving clears
+      it;
+    - Ctrl+K on a selection, then on an existing link (Remove link); Image
+      with Browse..., relative path saved; typing goes on in the page after
+      each dialog;
+    - double-click a raw HTML block: Source opens with the caret on its
+      first line.
 
 ### Task 17: Edit menu and Find in Rendered mode
 
-- **Files:** `mdviewer/main_window.py`, `mdviewer/richview.py`, `mdviewer/findbar.py`, `scripts/smoke_ui.py`.
-- **Covers:** Undo/Redo/Cut/Copy/Paste/Select All routed to the web view in Rendered mode; Paste as plain text (Ctrl+Shift+V, `PasteAndMatchStyle`); native cell context menu per Task 11's Produces (built in a callback from `mdEditor.selectionState()`, never in a nested event loop; the smoke inspects the built `QMenu` without `exec`); FindBar find-only mode via `QWebEnginePage.findText` (match count, Previous/Next); Ctrl+H switches to Source and opens Replace.
-- **Test:** smoke: action enablement per mode; Find in Rendered reports the match count; Ctrl+H lands in Source with the Replace bar open.
-- **Commit:** `feat: route Edit menu and Find to the Rendered editor`
+**Status: steps detailed.** The design below was prototyped and run before
+being written into this plan (2026-10-20, PySide6 6.12.0 offscreen), on top
+of Task 16 as committed (`05d4cf3`), then reverted. Results:
+- The full suite passes (763 tests, unchanged: this task has no pure
+  logic), `SMOKE OK` in three runs in a row, `WEB OK`, and the Qt-import
+  `rg` prints nothing. The bundle changes (`editor.js`, `editor.css`;
+  `THIRD_PARTY.txt` is unchanged).
+- The smoke takes ~28 s (~26 s before).
+- Sixteen deliberate breaks each make the smoke fail:
+  - Undo/Redo sent as Chromium's `WebAction.Undo` / `Redo`
+  - Select All sent as Chromium's `WebAction.SelectAll`
+  - Paste as Plain Text sent as `WebAction.Paste`
+  - Undo always enabled in Rendered mode
+  - no `set_finding(True)` when the bar opens (count `1 of 5`)
+  - no `findText("")` when the bar closes
+  - Ctrl+F on the open bar searching again
+  - the find bar kept open across a mode switch
+  - Ctrl+H only switching to Source
+  - `NoContextMenu` kept
+  - the menu built from the last throttled `selectionState`
+  - a menu shown after the window left Rendered mode
+  - table items enabled whatever `can` says
+  - `restart()` forgetting the find state
+  - a Qt shortcut on Ctrl+B
+  - the count ignoring the active match
+
+  The prototype also hid the Replace row "in web mode"; no break of it
+  failed (Ctrl+H never opens the bar in Rendered mode), so it was dropped.
+
+**Findings that shape this task:**
+
+- **Chromium's Undo never reaches ProseMirror.** `triggerAction(Undo)` left
+  the document unchanged: the page's history is ProseMirror's. Undo and
+  Redo therefore run the page commands `undo` / `redo` (Task 9's
+  `COMMANDS`).
+- **The page takes its editing keys before any `QAction`.** With every Edit
+  action enabled and the page focused, Ctrl+Z, Ctrl+Y, Ctrl+A, Ctrl+X and
+  Ctrl+V never triggered the action: QtWebEngine accepts the
+  `ShortcutOverride` for its editing keys, and ProseMirror's keymap handles
+  them. Ctrl+Shift+V is not one of them: the `QAction` gets it. No key is
+  handled twice, and enablement only matters for the menus.
+- **Web actions go through the page's clipboard events.** `Paste`,
+  `PasteAndMatchStyle`, `Cut` and `Copy` work, and Task 8's paste rules
+  apply (bold kept, a `javascript:` link becomes text), even while the Qt
+  focus is in the find field.
+- **Chromium's `SelectAll` reaches ProseMirror late.** It selects the DOM
+  (a `TextSelection` 1..n-1), which ProseMirror adopts on the next
+  `selectionchange`; a Paste sent at once replaced the old selection.
+  Select All therefore runs ProseMirror's own `selectAll` (an
+  `AllSelection`, as Ctrl+A does through `baseKeymap`). Even so, a
+  `runJavaScript` command and a `triggerAction` sent in the same turn are
+  not ordered: the smoke waits for the selection (`select_all_in_page`). A
+  person cannot pick two menu items that fast.
+- **`findText` and `findTextFinished`:** both carry a
+  `QWebEngineFindTextResult` (`numberOfMatches()`, `activeMatch()`
+  1-based). The same text again is Next, wrapping; a new text or a new
+  case flag starts a new search; `findText("")` stops, and Chromium then
+  makes the active match the DOM selection, which ProseMirror adopts. Esc
+  therefore leaves the match selected, and nothing is dirty. A new search
+  starts after the selected match, so even after a stop the same text
+  would advance.
+- **Highlighted code blocks were counted twice.** Task 16's highlight
+  overlay (`.md-code-highlight`) is a second rendered copy of the code:
+  `alpha` gave 5 matches for 4. Marking the overlay `inert` also gives 4,
+  but the active match is then painted under the overlay. Hiding the
+  overlays while the bar is open gives 4 visible matches in editable text.
+- **Find-in-page also sees** the code language field's value (`python` is
+  found), raw HTML frames, front matter and footnote blocks.
+- **The throttled `selectionState` lags a right-click.** At Qt's
+  context-menu request, the last report still had the caret outside the
+  table (`addRowAfter` false); a fresh `mdEditor.selectionState()` read
+  says true. The menu is built from the fresh read.
+- **Table `can`s are true in every cell.** prosemirror-tables' dry run
+  reports `deleteRow` and `deleteColumn` as available even in a
+  header-only, two-column table, so a real right-click shows no greyed
+  table item. The smoke pins the enablement rule with a crafted state
+  passed to `_build_context_menu`.
+- **`QMenu.popup()` works offscreen** and needs no nested event loop; the
+  smoke inspects and triggers the shown menu, then closes it.
+- **Clipboard ownership at exit** (Task 11) still applies: the smoke
+  clears the clipboard after its paste checks.
+
+**Design decisions:**
+
+- **Edit routing** (`MainWindow._edit(name)`, keys of two module dicts):
+
+  | Item | Rendered | Source |
+  |---|---|---|
+  | `undo`, `redo` | page command `undo` / `redo` | `editor.undo()` / `redo()` |
+  | `cut`, `copy`, `paste` | `WebAction.Cut` / `Copy` / `Paste` | `editor.cut()` / `copy()` / `paste()` |
+  | `paste_plain` | `WebAction.PasteAndMatchStyle` | `editor.paste()` (plain already) |
+  | `select_all` | page command `selectAll` (new) | `editor.selectAll()` |
+
+  In Rendered mode the page gets the focus back after each item.
+- **Edit menu:** Undo, Redo, | Cut, Copy, Paste, `Paste as P&lain Text`
+  (Ctrl+Shift+V), | Find..., Replace..., Select All. Every item is enabled
+  in both modes, except that in Rendered mode Undo / Redo follow
+  `selectionState.can.undo` / `.redo`, kept in `MainWindow._page_can` and
+  cleared while the page is not ready. Source mode keeps v1: always
+  enabled. No Qt shortcut takes the page's formatting keys (Tasks 15-16).
+- **Find bar:** one `FindBar(editor, view)` under the stack (no longer
+  inside the Source page), so it shows under both editors.
+  - `_show_mode` calls `set_web_mode(mode == RENDERED)`; a change closes
+    the bar without moving the focus. The search text stays in the field.
+  - Web mode is find-only, with no Replace row. Find/Next/Previous call
+    `page.findText(text, flags)` (`FindCaseSensitively`, `FindBackward`).
+    The count label reads `"{active} of {count}"` or `No results` from
+    `findTextFinished`, and stays empty for an empty field.
+  - Opening seeds the field from `view.selectedText()` (single line only).
+    It searches only when the bar was closed or the seeded text changed:
+    Ctrl+F on the open bar keeps the current match, as in Source mode.
+  - Opening calls `rich.set_finding(True)`. Closing (Esc, the close
+    button, a mode switch) calls `findText("")` and `set_finding(False)`.
+    Esc and the close button give the page the focus, with the match
+    selected.
+- **`mdEditor.setFinding(on)`** toggles the class `md-finding` on
+  `document.body` (not on `view.dom`, whose class ProseMirror manages).
+  The overlay rule shows overlays only outside it. `RichView` remembers the
+  state and re-sends it after `restart()`.
+- **Replace (Ctrl+H):** Source mode opens the Replace bar. Rendered mode
+  goes through `with_buffer` to `_enter_source(text, then=open_replace)`:
+  the Rendered edits are pulled first, and `then` survives the re-pull for
+  an edit made after the pull's snapshot.
+- **Context menu:** `RichView` uses `CustomContextMenu`. On
+  `customContextMenuRequested(pos)` (ignored while the page is not ready),
+  `MainWindow` reads `rich.selection_state(...)`. Then, if still in
+  Rendered mode, it builds a `QMenu` and `popup()`s it at the global
+  position taken at the request. The previous menu is `deleteLater()`ed;
+  the shown one is `MainWindow.context_menu`.
+  - Items: the Edit menu's own actions `act_undo`, `act_redo`, |
+    `act_cut`, `act_copy`, `act_paste`, `act_paste_plain`, |
+    `act_select_all`. Their enablement is refreshed from the read state.
+  - In a cell (`can.addRowAfter`), the four `TABLE_MENU` groups follow,
+    each after a separator, with the spec's labels. Each item is enabled
+    from `can[command]` and runs `_run_format_command(command, args)`.
+
+**Files:**
+- Modify: `web-src/src/editor.js`, `web-src/src/editor.css`
+- Modify: `scripts/check_web.py`
+- Regenerate and commit: `mdviewer/web/editor.js`, `mdviewer/web/editor.css`
+- Modify: `mdviewer/richview.py`, `mdviewer/findbar.py`, `mdviewer/main_window.py`
+- Modify: `scripts/smoke_ui.py` (three interim checks, new Task 17 section)
+
+**Interfaces:**
+- Consumes:
+  - Task 9/11 page API: `COMMANDS` (`undo`, `redo` with `can`),
+    `mdEditor.selectionState()` (synchronous `{marks, block, can}`; `can`
+    holds the eight table commands), Task 11's `contextmenu` handler (the
+    caret moves before Qt's request) and `TABLE_COMMANDS`.
+  - Task 12 `RichView._call`, `command`, `restart`, `is_ready` and the
+    `selectionState` signal; Task 13/14 `with_buffer`, `_enter_source`,
+    `_show_mode`, `_update_chrome`; Task 15 `_run_format_command`.
+  - Task 16's `.md-code-highlight` overlay. Smoke: Task 16 `HAS_HL`,
+    `page_doc()`; Task 14 `type_rendered`; Task 12 `selected()` and
+    `richview`; `page_js`, `pump`, `check`, `FAKE`, `S`, `QTest`, `Qt`,
+    `QPoint`, `QApplication`.
+- Produces (Tasks 18-19 rely on these names):
+  - `window.mdEditor.setFinding(on)`; the page command `selectAll`.
+  - `RichView.selection_state(callback: Callable[[dict], None]) -> None`,
+    `RichView.set_finding(on: bool) -> None`.
+  - `FindBar(editor, view=None, parent=None)`, `FindBar.web_mode`,
+    `FindBar.set_web_mode(on: bool) -> None`.
+  - `main_window.RENDERED_EDITS`, `SOURCE_EDITS`, `TABLE_MENU`;
+    `MainWindow.act_paste_plain`, `context_menu`, `_page_can`,
+    `_edit(name)`, `_on_replace()`, `_on_selection_state(state)`,
+    `_update_undo_actions()`, `_on_context_menu(pos)`,
+    `_show_context_menu(state, at)`, `_build_context_menu(state) -> QMenu`,
+    `_enter_source(text, then=None)`.
+  - `scripts/smoke_ui.py`: `page_text()`, `page_key(key, modifiers, text)`,
+    `select_all_in_page()`, `to_clipboard(html, text)`,
+    `right_click(selector)`, `pick(menu, text)`, `EDIT_ITEMS`,
+    `TABLE_TEXTS`.
+
+- [ ] **Step 1: Write the failing smoke checks**
+
+The interim Rendered-mode checks of Tasks 12-13 change. Replace
+
+```python
+check(not window.act_paste.isEnabled(), "Paste disabled in Rendered mode (its keys go to the page)")
+```
+
+with
+
+```python
+check(window.act_cut.isEnabled() and window.act_paste.isEnabled() and window.act_select_all.isEnabled(),
+      "Cut, Paste and Select All enabled in Rendered mode")
+```
+
+replace
+
+```python
+check(not window.act_find.isEnabled() and not window.act_replace.isEnabled(), "Find/Replace disabled in Rendered mode")
+```
+
+with
+
+```python
+check(window.act_find.isEnabled() and window.act_replace.isEnabled(), "Find and Replace enabled in Rendered mode")
+```
+
+and replace
+
+```python
+check(rich.contextMenuPolicy() == Qt.ContextMenuPolicy.NoContextMenu, "no Chromium context menu (Reload, View Source)")
+```
+
+with
+
+```python
+check(rich.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu, "our own context menu replaces Chromium's (Reload, View Source)")
+```
+
+Then insert directly above
+`# --- Later tasks insert their checks directly above this line. ---`:
+
+```python
+# --- WYSIWYG Task 17: Edit menu, context menu and Find in Rendered mode -------------
+from PySide6.QtCore import QMimeData  # noqa: E402
+from PySide6.QtGui import QAction  # noqa: E402
+from PySide6.QtWidgets import QMenu  # noqa: E402
+
+CTRL = Qt.KeyboardModifier.ControlModifier
+SHIFT = Qt.KeyboardModifier.ShiftModifier
+SELECTED_JS = "(() => { const s = window.mdEditor.view.state.selection; return window.mdEditor.view.state.doc.textBetween(s.from, s.to); })()"
+FINDING_JS = "document.body.classList.contains('md-finding')"
+
+
+def page_text() -> str:
+    return page_js(window.rich, "window.mdEditor.view.state.doc.textContent")
+
+
+def page_key(key, modifiers, text: str) -> None:
+    """A key as a real keyboard sends it (Ctrl+Z carries the text "\\x1a"), into the page."""
+    window.rich.setFocus()
+    QTest.sendKeyEvent(QTest.KeyAction.Click, window.rich.focusProxy(), key, text, modifiers)
+
+
+def select_all_in_page() -> None:
+    """Edit > Select All, then wait for it: a web action sent at once may run before it."""
+    window.act_select_all.trigger()
+    check(pump(lambda: page_js(window.rich, "window.mdEditor.view.state.selection.from === 0 && window.mdEditor.view.state"
+                                            ".selection.to === window.mdEditor.view.state.doc.content.size"), 3),
+          "Edit > Select All selects the whole page document")
+
+
+def to_clipboard(html: str, text: str) -> None:
+    """A browser copy: the page reads the HTML only with CF_HTML's fragment markers (Task 11)."""
+    mime = QMimeData()
+    mime.setData("text/html", f"<html><body><!--StartFragment-->{html}<!--EndFragment--></body></html>".encode())
+    mime.setText(text)
+    QApplication.clipboard().setMimeData(mime)
+
+
+# the Edit menu: Paste as Plain Text after Paste; the page's formatting keys stay the page's
+check([a.text() for a in window.menu_edit.actions() if not a.isSeparator()]
+      == ["&Undo", "&Redo", "Cu&t", "&Copy", "&Paste", "Paste as P&lain Text", "&Find...", "&Replace...", "Select &All"],
+      "the Edit menu adds Paste as Plain Text after Paste")
+check(window.act_paste_plain.shortcut().toString() == "Ctrl+Shift+V", "Paste as Plain Text is Ctrl+Shift+V")
+PAGE_KEYS = {"Ctrl+B", "Ctrl+I", "Ctrl+K", "Ctrl+Shift+X", "Ctrl+`", "Ctrl+Space", "Ctrl+Shift+7", "Ctrl+Shift+8",
+             "Ctrl+Shift+9", "Ctrl+Shift+.", *(f"Ctrl+Alt+{n}" for n in range(7))}
+taken = {a.shortcut().toString() for a in window.findChildren(QAction)} & PAGE_KEYS
+check(not taken, f"no menu shortcut takes the page's formatting keys ({taken})")
+
+# Undo and Redo follow the page's history; their keys undo one step, as the menu does
+edit_md = TMP / "edit.md"
+edit_md.write_bytes(b"one\n")
+window.open_file(edit_md)
+check(pump(lambda: "undo" in window._page_can, 3) and not window.act_undo.isEnabled() and not window.act_redo.isEnabled(),
+      "Rendered: Undo and Redo are greyed with nothing to undo")
+window.rich.focus_block(0)
+type_rendered(window, "X")
+pump(lambda: False, 0.6)  # past prosemirror-history's 500 ms grouping: the next edit is its own step
+type_rendered(window, "Y")
+check(pump(lambda: window.act_undo.isEnabled(), 3) and not window.act_redo.isEnabled(), "an edit enables Undo")
+page_key(Qt.Key.Key_Z, CTRL, "\x1a")
+check(pump(lambda: page_text() == "Xone", 3), f"Ctrl+Z undoes one step ({page_text()!r})")
+check(pump(lambda: window.act_redo.isEnabled(), 3), "an undo enables Redo")
+page_key(Qt.Key.Key_Y, CTRL, "\x19")
+check(pump(lambda: page_text() == "XYone", 3), f"Ctrl+Y redoes it ({page_text()!r})")
+window.act_undo.trigger()
+check(pump(lambda: page_text() == "Xone", 3), "Edit > Undo undoes one step")
+window.act_redo.trigger()
+check(pump(lambda: page_text() == "XYone", 3), "Edit > Redo redoes it")
+window.act_undo.trigger()
+window.act_undo.trigger()
+check(pump(lambda: page_text() == "one" and not window.act_undo.isEnabled(), 3), "Undo greys out at the start of the history")
+
+# the clipboard: Paste keeps formatting (schema rules), Paste as Plain Text and Ctrl+Shift+V do not
+to_clipboard('<b>bold</b> <a href="javascript:alert(1)">bad</a>', "bold bad")
+select_all_in_page()
+window.act_paste.trigger()
+check(pump(lambda: page_text() == "bold bad", 3) and '"strong"' in page_doc() and "javascript" not in page_doc(),
+      f"Edit > Paste keeps bold and drops the unsafe link ({page_doc()})")
+select_all_in_page()
+window.act_paste_plain.trigger()
+check(pump(lambda: '"strong"' not in page_doc(), 3) and page_text() == "bold bad", "Paste as Plain Text drops the formatting")
+select_all_in_page()
+window.act_paste.trigger()
+pump(lambda: '"strong"' in page_doc(), 3)
+select_all_in_page()
+page_key(Qt.Key.Key_V, CTRL | SHIFT, "\x16")
+check(pump(lambda: '"strong"' not in page_doc(), 3) and page_text() == "bold bad",
+      f"Ctrl+Shift+V pastes plain text once ({page_text()!r})")
+select_all_in_page()
+window.act_copy.trigger()
+check(pump(lambda: QApplication.clipboard().text() == "bold bad", 3), "Edit > Copy copies the page selection")
+QApplication.clipboard().clear()
+select_all_in_page()
+window.act_cut.trigger()
+check(pump(lambda: page_text() == "" and QApplication.clipboard().text() == "bold bad", 3), "Edit > Cut cuts it")
+window.act_source.trigger()
+check(pump(lambda: window.mode == "source", 5) and window.act_undo.isEnabled() and window.act_redo.isEnabled(),
+      "Source: Undo and Redo stay enabled (v1)")
+window.editor.setPlainText("plain text")
+window.act_select_all.trigger()
+window.act_cut.trigger()
+check(window.buffer == "", "Source: Edit > Cut acts on the text editor")
+window.act_paste_plain.trigger()
+check(window.buffer == "plain text", "Source: Paste as Plain Text pastes the text")
+QApplication.clipboard().clear()  # a clipboard still owning our data crashes Qt at exit (Task 11)
+FAKE["answer"] = S.Discard
+window.on_new()
+
+# Find in Rendered mode: the page's find-in-page, find only
+bar = window.find_bar
+find_md = TMP / "find.md"
+find_md.write_bytes(b"alpha beta Alpha\n\n```python\nalpha = 1\n```\n\nalpha end\n")
+window.open_file(find_md)
+check(pump(lambda: window.rich.is_ready and page_js(window.rich, HAS_HL), 3), "a highlighted code block to search")
+window.act_find.trigger()
+check(bar.isVisible() and bar.web_mode and not bar.replace_row.isVisible(), "Ctrl+F in Rendered mode shows the find row only")
+check(pump(lambda: page_js(window.rich, FINDING_JS), 3), "code blocks show plain text while the bar is open")
+bar.find_edit.setText("alpha")
+check(pump(lambda: bar.count_label.text() == "1 of 4", 3), f"the match count counts the code block once ({bar.count_label.text()})")
+bar.find_next()
+check(pump(lambda: bar.count_label.text() == "2 of 4", 3), "Next moves to the second match")
+window.act_find.trigger()
+pump(lambda: False, 0.3)
+check(bar.count_label.text() == "2 of 4", "Ctrl+F on the open bar keeps the current match")
+bar.find_previous()
+check(pump(lambda: bar.count_label.text() == "1 of 4", 3), "Previous moves back")
+bar.find_previous()
+check(pump(lambda: bar.count_label.text() == "4 of 4", 3), "Previous wraps to the last match")
+bar.case_box.setChecked(True)
+check(pump(lambda: bar.count_label.text().endswith(" of 3"), 3), f"Match case narrows the matches ({bar.count_label.text()})")
+bar.case_box.setChecked(False)
+bar.find_edit.setText("zzz")
+check(pump(lambda: bar.count_label.text() == "No results", 3), "no hits shows No results")
+bar.find_edit.setText("")
+check(bar.count_label.text() == "", "an empty search clears the count")
+bar.find_edit.setText("beta")
+check(pump(lambda: bar.count_label.text() == "1 of 1", 3), "a new search")
+QTest.keyClick(bar.find_edit, Qt.Key.Key_Escape)
+check(not bar.isVisible() and pump(lambda: not page_js(window.rich, FINDING_JS), 3), "Esc closes the bar; the highlights come back")
+check(pump(lambda: page_js(window.rich, SELECTED_JS) == "beta", 3), "the found text stays selected in the editor")
+check(not window.dirty, "finding changes nothing")
+window.act_find.trigger()
+check(bar.find_edit.text() == "beta", "the page selection seeds the find field")
+window.act_source.trigger()
+check(window.mode == "source" and not bar.isVisible() and not bar.web_mode, "a mode switch closes the find bar")
+check(page_js(window.rich, FINDING_JS) is False, "and the page's code highlights come back")
+window.act_find.trigger()
+bar.find_edit.setText("alpha")
+check(bar.count_label.text() == "1 of 4" and selected() == "alpha", "Source mode searches the text editor again")
+QTest.keyClick(bar.find_edit, Qt.Key.Key_Escape)
+window.act_rendered.trigger()
+finder = richview.RichView("light")
+finder.show()
+pump(lambda: finder.is_ready, 5)
+finder.set_finding(True)
+finder.restart()
+check(pump(lambda: finder.is_ready, 5) and page_js(finder, FINDING_JS) is True, "a restarted page keeps the find bar's state")
+finder.close()
+finder.deleteLater()
+
+# Replace from Rendered mode: Source with the Rendered edits, Replace bar open
+window.rich.focus_block(2)
+type_rendered(window, "Z")
+window.act_replace.trigger()
+check(pump(lambda: window.mode == "source", 5) and bar.isVisible() and bar.replace_row.isVisible() and not bar.web_mode,
+      "Ctrl+H in Rendered mode switches to Source and opens Replace")
+check(window.dirty and "Zalpha end" in window.buffer, f"the Rendered edit came along ({window.buffer!r})")
+bar.find_edit.setText("alpha")
+bar.replace_edit.setText("omega")
+check(bar.replace_all() == 4, "Replace works on the switched text")
+bar.close_bar()
+FAKE["answer"] = S.Discard
+window.on_new()
+
+# the cell context menu: a native menu built from the page's state at the right-clicked place
+table_md = TMP / "table.md"
+table_md.write_bytes(b"intro\n\n| a | b |\n| --- | --- |\n")
+window.open_file(table_md)
+pump(lambda: window.rich.is_ready, 3)
+window.rich.focus_block(0)
+
+
+def right_click(selector: str) -> QMenu | None:
+    """A real right-click in the middle of `selector`; the menu it shows, if any."""
+    window.context_menu = None
+    point = page_js(window.rich, f"(() => {{ const b = document.querySelector({json.dumps(selector)}).getBoundingClientRect();"
+                                 " return [Math.round(b.left + b.width / 2), Math.round(b.top + b.height / 2)]; })()")
+    QTest.mouseClick(window.rich.focusProxy(), Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, QPoint(*point))
+    pump(lambda: window.context_menu is not None and window.context_menu.isVisible(), 3)
+    return window.context_menu
+
+
+def pick(menu: QMenu | None, text: str) -> None:
+    """Chooses the item `text` of a shown menu, if it has one, and closes the menu."""
+    for act in menu.actions() if menu else []:
+        if act.text() == text:
+            act.trigger()
+    if menu:
+        menu.close()
+
+
+EDIT_ITEMS = [window.act_undo, window.act_redo, None, window.act_cut, window.act_copy, window.act_paste,
+              window.act_paste_plain, None, window.act_select_all]
+window.rich.selectionState.disconnect(window._on_selection_state)  # only a fresh read sees the moved caret
+menu = right_click("#editor th:last-child")
+window.rich.selectionState.connect(window._on_selection_state)
+check(menu is not None, "a right-click in the page shows the context menu")
+items = [None if a.isSeparator() else a for a in menu.actions()] if menu else []
+check(items[:9] == EDIT_ITEMS, "it starts with the Edit menu's own items")
+TABLE_TEXTS = [None, "Insert row above", "Insert row below", None, "Insert column left", "Insert column right",
+               None, "Delete row", "Delete column", "Delete table",
+               None, "Align column left", "Align column center", "Align column right"]
+table_items = [None if a.isSeparator() else a.text() for a in menu.actions()[9:]] if menu else []
+check(table_items == TABLE_TEXTS and all(a.isEnabled() for a in menu.actions()[9:]),
+      f"right-clicking a cell (the caret was outside the table) adds the table items ({table_items})")
+crafted = window._build_context_menu({"can": {"addRowAfter": True, "deleteRow": False, "setColumnAlign": True}})
+check([None if a.isSeparator() else a.text() for a in crafted.actions()[9:]] == TABLE_TEXTS
+      and [a.text() for a in crafted.actions()[9:] if a.isEnabled() and not a.isSeparator()]
+      == ["Insert row below", "Align column left", "Align column center", "Align column right"],
+      "each table item is enabled from selectionState.can")
+crafted.deleteLater()
+pick(menu, "Align column right")
+pick(right_click("#editor th:last-child"), "Insert row below")
+check(pump(lambda: window.dirty, 3), "a table item edits the document")
+window.on_save()
+check(pump(lambda: not window.dirty, 5) and table_md.read_bytes() == b"intro\n\n| a | b |\n| --- | ---: |\n|  |  |\n",
+      f"the table items reach the saved file ({table_md.read_bytes()!r})")
+menu = right_click("#editor p")
+check(menu is not None and [None if a.isSeparator() else a for a in menu.actions()] == EDIT_ITEMS,
+      "outside a table: the edit items only")
+if menu:
+    menu.close()
+window.context_menu = None
+window.rich.customContextMenuRequested.emit(QPoint(5, 5))
+window.act_source.trigger()
+pump(lambda: False, 0.5)
+check(window.context_menu is None, "no menu once the window has left Rendered mode")
+FAKE["answer"] = S.Discard
+window.on_new()
+```
+
+(`page_js`, `pump`, `check`, `FAKE`, `S`, `QTest`, `Qt`, `QPoint`,
+`QApplication`, `richview`, `selected`, `type_rendered`, `page_doc` and
+`HAS_HL` are defined by earlier sections.)
+
+- [ ] **Step 2: Run the smoke to verify it fails**
+
+Run: `.venv/Scripts/python scripts/smoke_ui.py`
+Expected: the run dies with `AttributeError: 'MainWindow' object has no
+attribute 'act_paste_plain'`.
+
+- [ ] **Step 3: Write the failing page check**
+
+In `scripts/check_web.py`, `check_editor`, directly after
+
+```python
+    check(code_block_state(app, view)["overlay"] == "block", "the highlight comes back when the caret leaves")
+```
+
+add
+
+```python
+    run_js(app, view, "(window.mdEditor.setFinding(true), 0)")
+    check(code_block_state(app, view)["overlay"] == "none", "the find bar shows code blocks as plain text (one copy to find)")
+    run_js(app, view, "(window.mdEditor.setFinding(false), 0)")
+    check(code_block_state(app, view)["overlay"] == "block", "closing the find bar brings the highlight back")
+```
+
+Run: `.venv/Scripts/python scripts/check_web.py`
+Expected: the run dies in `check_editor` at
+`run_js(app, view, "(window.mdEditor.setFinding(true), 0)")` with
+`json.decoder.JSONDecodeError: Expecting value` (`setFinding` is not a
+function yet, so the script answers nothing).
+
+- [ ] **Step 4: Add `setFinding` and `selectAll` to the page, then rebuild the bundle**
+
+In `web-src/src/editor.css`, the code block comment and overlay rule become:
+
+```css
+/* Code blocks: the source <pre> is edited; the highlight <pre> is laid over it while
+   the caret is elsewhere and the find bar is closed (find-in-page would count both
+   copies). Both use the same font, padding and wrapping. */
+```
+
+```css
+body:not(.md-finding) .md-code-block.md-has-highlight:not(.md-code-active) > .md-code-highlight { display: block; }
+```
+
+In `web-src/src/editor.js`:
+- add `import { selectAll } from "prosemirror-commands";` before the
+  `prosemirror-history` import;
+- in `COMMANDS`, after `redo`:
+
+  ```js
+  // Edit > Select All: what Ctrl+A does (baseKeymap). Chromium's own select-all reaches the
+  // editor state only after a selectionchange, too late for a Paste right after it.
+  selectAll: { run: (state, dispatch) => selectAll(state, dispatch) },
+  ```
+
+  (no `can`: it is not reported in `selectionState.can`);
+- in `window.mdEditor`, before `focusBlock`:
+
+  ```js
+  // Find bar open: code blocks show their plain text only, so find-in-page counts and
+  // highlights each match once, in the editable copy (editor.css).
+  setFinding(on) {
+    document.body.classList.toggle("md-finding", on);
+  },
+  ```
+
+Run:
+
+```bash
+.venv/Scripts/python scripts/build_web.py
+.venv/Scripts/python scripts/check_web.py
+git status --short mdviewer/web
+```
+
+Expected: `Built ...mdviewer\web`; `WEB OK`; only `editor.js` and
+`editor.css` changed under `mdviewer/web`.
+
+- [ ] **Step 5: Add `selection_state`, `set_finding` and the custom menu policy to `mdviewer/richview.py`**
+
+- Before `_HEADINGS_JS`:
+
+  ```python
+  # The selection's toolbar and menu state, unthrottled (editor.js selectionState).
+  _SELECTION_JS = "JSON.stringify(window.mdEditor.selectionState())"
+  ```
+
+- In `__init__`, the `NoContextMenu` line and its comment become
+  `CustomContextMenu`, commented: Chromium's menu offers Reload and View
+  Source; `MainWindow` shows its own instead (edit and table items), from
+  `customContextMenuRequested`.
+- Before `self.restart()` in `__init__`: `self._finding = False  # the find
+  bar is open over the page (set_finding)`.
+- In `restart()`, after the queued `markClean`: when `self._finding`, also
+  queue `("window.mdEditor.setFinding(true), 0", None)`.
+- Before `_refresh_highlights`:
+  - `selection_state(self, callback)`: runs `_SELECTION_JS` through
+    `self._call` and calls `callback(json.loads(value))` only when `value`
+    is a `str` (`heading_texts`' pattern). Docstring: read now rather than
+    throttled (context menu); never called when the page fails, crashes or
+    restarts first.
+  - `set_finding(self, on)`: stores `self._finding = on`, then `_call`s
+    `window.mdEditor.setFinding(<json on>), 0`. Docstring: while the find
+    bar is open, code blocks show plain text only, so find-in-page counts
+    each match once; kept across `restart()`.
+
+- [ ] **Step 6: Add the web mode to `mdviewer/findbar.py`**
+
+The module docstring names both modes: Source is the plain-text
+Find/Replace via `QTextDocument.find` (the UTF-16 note stays); Rendered
+(web mode) is find-only in the page via `QWebEnginePage.findText`, whose
+`findTextFinished` reports the match count. Import `QWebEnginePage` from
+`PySide6.QtWebEngineCore`.
+
+- `__init__(self, editor, view=None, parent=None)`: `self.view = view` (the
+  `RichView` searched in web mode), `self.web_mode = False`; when `view` is
+  set, connect `view.page().findTextFinished` to `_on_page_result`.
+- `set_web_mode(on)` (after `open_replace`): nothing when unchanged;
+  otherwise `_hide()` if visible, then store it.
+- `_open(replace)`: remember `was_open` and the field's text first; seed
+  from `view.selectedText()` in web mode (the editor's selection
+  otherwise), single-line only (no `\u2029`, no `\n`). After the existing
+  show/focus/select-all lines: in web mode `view.set_finding(True)` and
+  `_find(backward=False)` only `if not was_open or` the text changed;
+  otherwise `_update_count()` as before.
+- `close_bar()`: `_hide()`, then focus `view` in web mode, `editor`
+  otherwise. `_hide()`: in web mode `view.page().findText("")` (clears the
+  highlights; the active match stays selected) and
+  `view.set_finding(False)`; then `hide()`.
+- `_find(backward)`: with an empty field, web mode also sends
+  `findText("")`. With text, web mode sends `findText(needle, flags)`
+  (`QWebEnginePage.FindFlag`: `FindCaseSensitively` from the checkbox,
+  `FindBackward`) and returns `True`; the count arrives later. Docstring
+  says so.
+- `_search_as_typed`: in web mode just `_find(backward=False)` (a new text
+  or case starts a new search in the page).
+- `_on_text_edited`: recount only when visible and not in web mode.
+- `_on_page_result(result)` (after `_on_text_edited`): ignored unless in web
+  mode, visible, with a non-empty field (`findText("")` answers too);
+  otherwise the label is `f"{result.activeMatch()} of {count}"`, or
+  `"No results"` when `result.numberOfMatches()` is 0.
+
+`replace_row.setVisible(replace)` stays as it is.
+
+- [ ] **Step 7: Route the Edit menu, Find and the context menu in `mdviewer/main_window.py`**
+
+Imports: `QPoint` (`PySide6.QtCore`), `QMenu` (`PySide6.QtWidgets`).
+
+After `_DROP_EVENTS`:
+
+```python
+_WEB = QWebEnginePage.WebAction
+# Edit items in Rendered mode: a page command (ProseMirror's history and selection: Chromium's
+# own Undo never reaches it) or a web action (Chromium's clipboard; the page handles the
+# events). Their keys reach the page first, which handles them itself.
+RENDERED_EDITS = {
+    "undo": "undo", "redo": "redo", "cut": _WEB.Cut, "copy": _WEB.Copy, "paste": _WEB.Paste,
+    "paste_plain": _WEB.PasteAndMatchStyle, "select_all": "selectAll",
+}
+# Edit items in Source mode: MarkdownEditor methods (its paste is plain text already).
+SOURCE_EDITS = {
+    "undo": "undo", "redo": "redo", "cut": "cut", "copy": "copy", "paste": "paste",
+    "paste_plain": "paste", "select_all": "selectAll",
+}
+# The cell context menu's table items (spec section 4), in groups: (text, command, args).
+TABLE_MENU = (
+    (("Insert row above", "addRowBefore", None), ("Insert row below", "addRowAfter", None)),
+    (("Insert column left", "addColumnBefore", None), ("Insert column right", "addColumnAfter", None)),
+    (("Delete row", "deleteRow", None), ("Delete column", "deleteColumn", None), ("Delete table", "deleteTable", None)),
+    (("Align column left", "setColumnAlign", "left"), ("Align column center", "setColumnAlign", "center"),
+     ("Align column right", "setColumnAlign", "right")),
+)
+```
+
+`__init__`:
+- After `self._hovered = ""`: `self._page_can: dict = {}` (selectionState.can
+  from the page: Undo/Redo enablement) and `self.context_menu: QMenu | None
+  = None` (the last context menu shown over the page).
+- After the `editProtected` connection: `rich.selectionState` ->
+  `_on_selection_state`, `rich.customContextMenuRequested` ->
+  `_on_context_menu`.
+- The stack holds `self.rich` (index 0) and `self.editor` (index 1)
+  directly; `editor_page` goes. `self.find_bar = FindBar(self.editor,
+  self.rich)` (under both editors), `set_web_mode(True)`, hidden. The
+  central widget is a `QWidget` whose `QVBoxLayout` (margins 0, spacing 0)
+  holds the stack, then the find bar.
+
+The Edit menu:
+
+```python
+        self.act_undo = self._action(m, "&Undo", "Ctrl+Z", lambda: self._edit("undo"))
+        self.act_redo = self._action(m, "&Redo", "Ctrl+Y", lambda: self._edit("redo"))
+        m.addSeparator()
+        self.act_cut = self._action(m, "Cu&t", "Ctrl+X", lambda: self._edit("cut"))
+        self.act_copy = self._action(m, "&Copy", "Ctrl+C", lambda: self._edit("copy"))
+        self.act_paste = self._action(m, "&Paste", "Ctrl+V", lambda: self._edit("paste"))
+        self.act_paste_plain = self._action(m, "Paste as P&lain Text", "Ctrl+Shift+V", lambda: self._edit("paste_plain"))
+        m.addSeparator()
+        self.act_find = self._action(m, "&Find...", "Ctrl+F", self.find_bar.open_find)
+        self.act_replace = self._action(m, "&Replace...", "Ctrl+H", self._on_replace)
+        self.act_select_all = self._action(m, "Select &All", "Ctrl+A", lambda: self._edit("select_all"))
+```
+
+Delete `_source_only_actions` and its comment (`_rendered_only_actions`
+stays).
+
+`_enter_source` takes `then` through the re-pull:
+
+```python
+    def _enter_source(self, text: str, then: Callable[[], None] | None = None) -> None:
+        """Rendered -> Source with `text`, the Rendered buffer (unchanged text keeps the editor's);
+        then() once Source is shown."""
+        if self.mode == self.RENDERED and self.rich.modified:
+            # typed since the pull's snapshot: pull again
+            self.with_buffer(lambda pulled: self._enter_source(pulled, then))
+            return
+```
+
+(the rest as before, then `if then is not None: then()` at the end).
+
+`_show_mode`: after `self.mode = mode`, add
+`self.find_bar.set_web_mode(mode == self.RENDERED)  # a switch closes the find bar`.
+
+`_update_chrome`: drop the `_source_only_actions` loop; inside
+`if not self.rich.is_ready:` also clear `self._page_can = {}`; then call
+`self._update_undo_actions()`.
+
+Replace `_copy` with a section `# --- Edit menu and context menu ---`:
+- `_edit(name)`: Source: `getattr(self.editor, SOURCE_EDITS[name])()`.
+  Rendered: a `str` in `RENDERED_EDITS` goes to `self.rich.command`, a web
+  action to `self.rich.page().triggerAction`; then `self.rich.setFocus()`.
+- `_on_replace()`: Source: `find_bar.open_replace()`. Rendered:
+  `self.with_buffer(lambda text: self._enter_source(text, self.find_bar.open_replace))`.
+- `_on_selection_state(state)`: `_page_can = state.get("can") or {}`, then
+  `_update_undo_actions()`.
+- `_update_undo_actions()`: Rendered: `act_undo` / `act_redo` enabled from
+  `_page_can["undo"]` / `["redo"]`; Source: both enabled (v1).
+- `_on_context_menu(pos: QPoint)`: return unless `rich.is_ready`; take
+  `at = self.rich.mapToGlobal(pos)` now; `rich.selection_state(lambda
+  state: self._show_context_menu(state, at))`.
+- `_show_context_menu(state, at)`: return unless still Rendered;
+  `_on_selection_state(state)`; `deleteLater()` the previous menu; build,
+  store in `context_menu`, `popup(at)`.
+- `_build_context_menu(state) -> QMenu`: `QMenu(self)` with the edit items
+  of the design decisions, then the `TABLE_MENU` groups when
+  `can.addRowAfter` (each item: `setEnabled(bool(can.get(command)))`,
+  `triggered` -> `_run_format_command(command, args)`, binding both as
+  lambda defaults).
+
+- [ ] **Step 8: Run the smoke to verify it passes**
+
+Run: `.venv/Scripts/python scripts/smoke_ui.py`
+Expected: `SMOKE OK`.
+
+- [ ] **Step 9: Run the full verification**
+
+Run:
+
+```bash
+.venv/Scripts/python -m pytest -v
+.venv/Scripts/python scripts/smoke_ui.py
+.venv/Scripts/python scripts/check_web.py
+rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests
+```
+
+Expected: all tests pass (763 at the time of writing); `SMOKE OK`;
+`WEB OK`; the `rg` line prints nothing.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add web-src/src/editor.js web-src/src/editor.css mdviewer/web/editor.js mdviewer/web/editor.css scripts/check_web.py mdviewer/richview.py mdviewer/findbar.py mdviewer/main_window.py scripts/smoke_ui.py
+git commit -m "feat: route Edit menu and Find to the Rendered editor"
+```
+
+**Review Focus:**
+
+- **Every editing key in Rendered mode acts once, in the page.** Ctrl+Z,
+  Ctrl+Y and Ctrl+Shift+V undo, redo and paste exactly once with the Edit
+  actions enabled, and no Qt shortcut takes the page's formatting keys.
+  Pinned by `Ctrl+Z undoes one step`, `Ctrl+Y redoes it`, `Ctrl+Shift+V
+  pastes plain text once` and `no menu shortcut takes the page's
+  formatting keys`.
+- **Find counts and shows each match once, in editable text.** This covers
+  highlighted code blocks, Next/Previous wrapping, Match case, Esc leaving
+  the match selected, and Ctrl+F on the open bar. Pinned by `the match
+  count counts the code block once`, `Previous wraps to the last match`,
+  `the found text stays selected in the editor` and `Ctrl+F on the open
+  bar keeps the current match` (and `WEB OK`'s overlay checks).
+- **The context menu acts where the user right-clicked.** It is built from
+  the page's state at the click (the caret was outside the table), never
+  from a stale report, and never after leaving Rendered mode. Pinned by
+  `right-clicking a cell (the caret was outside the table) adds the table
+  items`, `the table items reach the saved file` and `no menu once the
+  window has left Rendered mode`.
+- **Ctrl+H never loses Rendered edits.** It pulls them, then opens Replace
+  on the switched text. Pinned by `Ctrl+H in Rendered mode switches to
+  Source and opens Replace` and `the Rendered edit came along`.
+- **Paste keeps only safe formatting; plain paste keeps none.** Select All
+  then Paste replaces the whole document. Pinned by `Edit > Paste keeps
+  bold and drops the unsafe link`, `Paste as Plain Text drops the
+  formatting` and `Edit > Select All selects the whole page document`.
+- **Accepted behaviors:**
+  - Rendered mode greys Undo / Redo with nothing to undo or redo; Source
+    mode keeps v1 (always enabled).
+  - A mode switch closes the find bar; the search text stays in the field.
+  - Code blocks show plain text (no syntax colors) while the find bar is
+    open over the page.
+  - Find also matches the code language field and the text of raw HTML
+    frames, front matter and footnote blocks; Esc on such a match leaves
+    no editable selection there.
+  - The count does not follow edits or a reload while the bar is open; the
+    next Find, Next or Previous recounts.
+  - Ctrl+H while a pull is in flight is dropped, as other actions are
+    (spec 6.4). When a pull times out and the user picks Switch to Source,
+    the Replace bar does not open.
+  - Inside a table every table item is enabled: prosemirror-tables
+    reports `deleteRow` / `deleteColumn` as available in every cell.
+  - Paste as Plain Text in Source mode is a plain Paste.
+  - Edit > Select All is a page command; a web action sent in the same
+    event-loop turn may run before it (only scripts can do that).
+- **Handed on:**
+  - **Task 19:** add to the README manual checklist:
+    - in the page, with a real keyboard: Ctrl+Z, Ctrl+Y, Ctrl+X, Ctrl+C,
+      Ctrl+V, Ctrl+A and Ctrl+Shift+V (from a browser and from Word);
+    - the same items from the Edit menu, then typing goes on in the page;
+    - right-click a table cell: each table item; the Menu key opens the
+      menu at the caret;
+    - Ctrl+F: matches highlighted (also inside a code block), the count
+      updates with Next/Previous, Esc leaves the match selected;
+    - Ctrl+H in Rendered mode with an unsaved edit: Source with the edit,
+      the Replace bar open.
 
 ## Phase 4 - Packaging and documentation
 
