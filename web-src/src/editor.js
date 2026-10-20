@@ -1,8 +1,10 @@
 // Rendered editor bundle: EditorView, document lifecycle and window.mdEditor, the API
 // Python calls through runJavaScript. Calls to Python go through bridge.js; commands.js
-// and input.js hold the formatting commands, shortcuts and input rules.
+// and input.js hold the formatting commands, shortcuts and input rules; tables.js the
+// table editing.
 import "prosemirror-view/style/prosemirror.css";
 import "prosemirror-gapcursor/style/gapcursor.css";
+import "prosemirror-tables/style/tables.css";
 import "./editor.css";
 import { history, redo, redoDepth, undo, undoDepth } from "prosemirror-history";
 import { EditorState, NodeSelection, Plugin, Selection } from "prosemirror-state";
@@ -12,6 +14,7 @@ import { FORMATTING_COMMANDS } from "./commands.js";
 import { inputPlugins } from "./input.js";
 import { createNodeViews, displayPlugins, refreshFrames } from "./nodeviews.js";
 import { schema } from "./schema.js";
+import { TABLE_COMMANDS, tablePlugins } from "./tables.js";
 
 const SELECTION_THROTTLE_MS = 50;
 // prosemirror-tables' cell attrs; docschema does not know them (merged cells are a non-goal).
@@ -23,6 +26,7 @@ const COMMANDS = {
   undo: { run: (state, dispatch) => undo(state, dispatch), can: (state) => undoDepth(state) > 0 },
   redo: { run: (state, dispatch) => redo(state, dispatch), can: (state) => redoDepth(state) > 0 },
   ...FORMATTING_COMMANDS,
+  ...TABLE_COMMANDS,
 };
 
 // What has been reported to Python since the last setDocument.
@@ -65,8 +69,28 @@ const linkPlugin = new Plugin({
   },
 });
 
+// A right-click outside the selection first moves the caret there, so the context menu
+// Python then shows (edit and table items, built from selectionState()) acts on that place.
+const contextMenuPlugin = new Plugin({
+  props: {
+    handleDOMEvents: {
+      contextmenu(view, event) {
+        const hit = view.posAtCoords({ left: event.clientX, top: event.clientY });
+        const { from, to } = view.state.selection;
+        if (hit && (hit.pos < from || hit.pos > to)) {
+          view.dispatch(view.state.tr.setSelection(Selection.near(view.state.doc.resolve(hit.pos))));
+        }
+        return false;
+      },
+    },
+  },
+});
+
 const callbacks = { editProtected: (index) => send("editProtected", index) };
-const plugins = [history(), ...inputPlugins(), linkPlugin, ...displayPlugins(callbacks)];
+// Table keys first: Tab moves between cells before input.js consumes it.
+const plugins = [
+  history(), ...tablePlugins(), ...inputPlugins(), linkPlugin, contextMenuPlugin, ...displayPlugins(callbacks),
+];
 
 function createState(json) {
   if (!json) return EditorState.create({ schema, plugins });
@@ -163,6 +187,8 @@ window.mdEditor = {
   view,
   setDocument,
   getDocument: () => withoutCellExtras(view.state.doc.toJSON()),
+  // The selectionState payload for the current selection, at once (context menu).
+  selectionState: () => selectionState(view.state),
   // Runs a toolbar or menu command; false when it does not apply here (or is unknown).
   command(name, args) {
     const command = Object.hasOwn(COMMANDS, name) ? COMMANDS[name] : null;

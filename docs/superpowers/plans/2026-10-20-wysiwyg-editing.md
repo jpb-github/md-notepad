@@ -63,7 +63,8 @@ mistune 3 (AST renderer), Pygments, pytest; ProseMirror packages + esbuild
 | `web-src/src/nodeviews.js` | new | code block, image, raw HTML frame, double-click on protected nodes | 8 |
 | `web-src/src/editor.css` | new | editor styles: lists, code overlay, protected blocks, chips | 8 |
 | `web-src/src/bridge.js` | new | QWebChannel glue, Python-facing API | 9 |
-| `web-src/src/editor.js` | new | EditorView, document lifecycle, `window.mdEditor`, tables, paste | 9, 10, 11 |
+| `web-src/src/editor.js` | new | EditorView, document lifecycle, `window.mdEditor`, right-click caret | 9, 10, 11 |
+| `web-src/src/tables.js` | new | table keys, cell commands, Markdown table shape | 11 |
 | `web-src/src/commands.js` | new | formatting commands (`FORMATTING_COMMANDS`) | 10 |
 | `web-src/src/input.js` | new | keymaps, input rules, list/code keys, task checkbox, gap and drop cursor | 10 |
 | `mdviewer/richview.py` | new | `RichView` (QWebEngineView) + `Bridge` (QObject) | 12 |
@@ -11162,8 +11163,8 @@ git commit -m "feat: add table editing, safe paste and plain-text paste"
 
 ### Task 17: Edit menu and Find in Rendered mode
 
-- **Files:** `mdviewer/main_window.py`, `mdviewer/findbar.py`, `scripts/smoke_ui.py`.
-- **Covers:** Undo/Redo/Cut/Copy/Paste/Select All routed to the web view in Rendered mode; Paste as plain text (Ctrl+Shift+V); FindBar find-only mode via `QWebEnginePage.findText` (match count, Previous/Next); Ctrl+H switches to Source and opens Replace.
+- **Files:** `mdviewer/main_window.py`, `mdviewer/richview.py`, `mdviewer/findbar.py`, `scripts/smoke_ui.py`.
+- **Covers:** Undo/Redo/Cut/Copy/Paste/Select All routed to the web view in Rendered mode; Paste as plain text (Ctrl+Shift+V, `PasteAndMatchStyle`); native cell context menu per Task 11's Produces (built in a callback from `mdEditor.selectionState()`, never in a nested event loop; the smoke inspects the built `QMenu` without `exec`); FindBar find-only mode via `QWebEnginePage.findText` (match count, Previous/Next); Ctrl+H switches to Source and opens Replace.
 - **Test:** smoke: action enablement per mode; Find in Rendered reports the match count; Ctrl+H lands in Source with the Replace bar open.
 - **Commit:** `feat: route Edit menu and Find to the Rendered editor`
 

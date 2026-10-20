@@ -172,7 +172,15 @@ stay free for future use.
 - Tab / Shift+Tab move between cells; Tab in the last cell appends a row.
 - Cell context menu: Insert row above / below, Insert column left / right,
   Delete row, Delete column, Delete table, Align column left / center / right.
-- No merged cells.
+- No merged cells: pasted merged cells are split, the content staying in the
+  top-left cell.
+- The first row is always the header row and every cell takes its column's
+  header alignment, as in the Markdown that is saved.
+- Tables live at the top level only (Markdown readers such as mistune read a
+  pipe table inside a blockquote or list item as text): an inserted or pasted
+  table goes after the enclosing list or quote.
+- The cell context menu is a native menu: the usual edit items plus the table
+  items above.
 
 ### Images
 

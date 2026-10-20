@@ -105,7 +105,6 @@ function imageFromDOM(dom) {
 }
 
 const tables = tableNodes({
-  tableGroup: "block",
   cellContent: "inline*",
   cellAttributes: {
     align: {
@@ -123,7 +122,8 @@ const tables = tableNodes({
 // toDOM is what ProseMirror renders without a node view and what it puts on the
 // clipboard; parseDOM reads pasted HTML, including our own clipboard output.
 const nodes = {
-  doc: { content: "front_matter? (block | footnote_def)+" },
+  // Tables only here: mistune reads a pipe table inside a blockquote or list item as a paragraph.
+  doc: { content: "front_matter? (block | table | footnote_def)+" },
   paragraph: {
     content: "inline*",
     group: "block",

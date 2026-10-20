@@ -302,6 +302,11 @@ def test_no_marks_inside_code_block():
     assert validate(doc(code)) == ["$.content[0].content[0]: marks are not allowed inside code_block"]
 
 
+ONE_CELL_TABLE = {"type": "table", "content": [
+    {"type": "table_row", "content": [{"type": "table_header", "attrs": {"align": None}}]},
+]}
+
+
 @pytest.mark.parametrize("block, message", [
     (p(p(t("a"))), "$.content[0].content[0]: paragraph is not allowed in paragraph"),
     ({"type": "heading", "attrs": {"level": 2}, "content": [{"type": "horizontal_rule"}]},
@@ -314,6 +319,10 @@ def test_no_marks_inside_code_block():
      "$.content[0].content[0]: footnote_def is not allowed in blockquote"),
     ({"type": "table", "content": [{"type": "table_cell", "attrs": {"align": None}}]},
      "$.content[0].content[0]: table_cell is not allowed in table"),
+    # mistune reads pipe tables at the top level only: a nested one would come back as a paragraph.
+    ({"type": "blockquote", "content": [ONE_CELL_TABLE]}, "$.content[0].content[0]: table is not allowed in blockquote"),
+    ({"type": "bullet_list", "attrs": {"tight": True}, "content": [item(ONE_CELL_TABLE)]},
+     "$.content[0].content[0].content[0]: table is not allowed in list_item"),
 ])
 def test_child_not_allowed_in_parent(block, message):
     assert validate(doc(block)) == [message]

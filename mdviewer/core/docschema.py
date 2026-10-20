@@ -50,10 +50,11 @@ LINE_ATTR = "line"
 # Blocks allowed wherever block content goes: doc, blockquote, list_item.
 BLOCK_CONTENT = frozenset({
     "paragraph", "heading", "blockquote", "bullet_list", "ordered_list",
-    "code_block", "horizontal_rule", "table", "html_block",
+    "code_block", "horizontal_rule", "html_block",
 })
-# Blocks allowed directly in doc; front_matter only as its first child.
-TOP_LEVEL_NODES = BLOCK_CONTENT | {"front_matter", "footnote_def"}
+# Blocks allowed directly in doc; front_matter only as its first child. Tables are
+# top-level only: mistune reads a pipe table inside a blockquote or list item as a paragraph.
+TOP_LEVEL_NODES = BLOCK_CONTENT | {"table", "front_matter", "footnote_def"}
 _INLINE_CONTENT = frozenset(INLINE_NODES)
 
 # Container -> (allowed child types, minimum number of children). Other nodes are leaves.

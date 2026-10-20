@@ -19,7 +19,7 @@ from pathlib import Path
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")  # the view is shown: no GPU log noise
 
-from PySide6.QtCore import QEventLoop, QObject, QPoint, Qt, QUrl, Slot  # noqa: E402
+from PySide6.QtCore import QEventLoop, QMimeData, QObject, QPoint, Qt, QUrl, Slot  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWebChannel import QWebChannel  # noqa: E402
 from PySide6.QtWebEngineCore import QWebEnginePage  # noqa: E402
@@ -232,8 +232,9 @@ def every_node_doc() -> dict:
         {"type": "code_block", "attrs": {"language": "", "highlight": "", "line": 19}},
         {"type": "horizontal_rule", "attrs": {"line": 21}},
         {"type": "table", "attrs": {"line": 23}, "content": [
-            {"type": "table_row", "content": [cell("table_header", "left", text("h")), cell("table_header", None)]},
-            {"type": "table_row", "content": [cell("table_cell", "right", text("c", {"type": "em"})),
+            # Columns aligned like Markdown can write them: each cell like its column's header.
+            {"type": "table_row", "content": [cell("table_header", "left", text("h")), cell("table_header", "center")]},
+            {"type": "table_row", "content": [cell("table_cell", "left", text("c", {"type": "em"})),
                                               cell("table_cell", "center")]},
         ]},
         {"type": "html_block", "attrs": {"source": HTML_SOURCE, "line": 27}},
@@ -798,8 +799,12 @@ def press(app: QApplication, view: QWebEngineView, strokes: list) -> None:
         if isinstance(stroke, str):
             QTest.keyClicks(view.focusProxy(), stroke)
         else:
-            key, modifiers = stroke
-            QTest.keyClick(view.focusProxy(), key, modifiers or Qt.KeyboardModifier.NoModifier)
+            key, modifiers, *text = stroke
+            modifiers = modifiers or Qt.KeyboardModifier.NoModifier
+            if text:  # the text a real keyboard sends, e.g. "\x16" with Ctrl+Shift+V
+                QTest.sendKeyEvent(QTest.KeyAction.Click, view.focusProxy(), key, text[0], modifiers)
+            else:
+                QTest.keyClick(view.focusProxy(), key, modifiers)
     pump(app, lambda: False, 0.2)
 
 
@@ -898,6 +903,173 @@ def check_editing(app: QApplication, view: QWebEngineView, bridge: Bridge) -> No
     check(bridge.args("changed", mark) == [[]], "toggling a task checkbox reports a change")
 
 
+# --- Task 11: tables, paste and protected blocks --------------------------------------------
+
+TABLE_MD = "| h | i |\n| --- | --- |\n| c | d |\n"
+# (markdown, selection, command name, args, Markdown after the command)
+TABLE_CASES = [
+    (TABLE_MD, "place('c')", "addRowBefore", None, "| h | i |\n| --- | --- |\n|  |  |\n| c | d |\n"),
+    (TABLE_MD, "place('c')", "addRowAfter", None, "| h | i |\n| --- | --- |\n| c | d |\n|  |  |\n"),
+    (TABLE_MD, "place('d')", "addColumnBefore", None, "| h |  | i |\n| --- | --- | --- |\n| c |  | d |\n"),
+    (TABLE_MD, "place('d')", "addColumnAfter", None, "| h | i |  |\n| --- | --- | --- |\n| c | d |  |\n"),
+    (TABLE_MD, "place('c')", "deleteRow", None, "| h | i |\n| --- | --- |\n"),
+    (TABLE_MD, "place('c')", "deleteColumn", None, "| i |\n| --- |\n| d |\n"),
+    ("a\n\n" + TABLE_MD, "place('c')", "deleteTable", None, "a\n"),
+    (TABLE_MD, "place('d')", "setColumnAlign", "center", "| h | i |\n| --- | :---: |\n| c | d |\n"),
+    (TABLE_MD, "place('h')", "setColumnAlign", "right", "| h | i |\n| --- | --- |\n| c | d |\n".replace(
+        "| --- | --- |", "| ---: | --- |")),
+    # Markdown's header is the first row: deleting it promotes the next row, a row above it replaces it.
+    (TABLE_MD, "place('h')", "deleteRow", None, "| c | d |\n| --- | --- |\n"),
+    (TABLE_MD, "place('h')", "addRowBefore", None, "|  |  |\n| --- | --- |\n| h | i |\n| c | d |\n"),
+    # Tables are top-level only (mistune reads nested ones as paragraphs): inserted after the list or quote.
+    ("- a\n", "place('a', 1)", "insertTable", {"rows": 2, "cols": 1}, "- a\n\n|  |\n| --- |\n|  |\n"),
+    ("> a\n", "place('a', 1)", "insertTable", {"rows": 2, "cols": 1}, "> a\n\n|  |\n| --- |\n|  |\n"),
+]
+TABLE_REFUSED = [
+    ("| h |\n| --- |\n", "place('h')", "deleteRow", None),
+    ("| h |\n| --- |\n| c |\n", "place('c')", "deleteColumn", None),
+    (TABLE_MD, "place('c')", "setColumnAlign", "justify"),
+    ("a\n", "place('a')", "addRowAfter", None),
+    ("a\n", "place('a')", "deleteTable", None),
+    ("a\n", "place('a')", "setColumnAlign", "left"),
+]
+# (markdown, selection, keys, Markdown after them)
+TABLE_KEYS = [
+    (TABLE_MD, "place('h', 1)", [(K.Key_Tab, None), "x"], "| h | x |\n| --- | --- |\n| c | d |\n"),
+    (TABLE_MD, "place('i', 1)", [(K.Key_Tab, None), "x"], "| h | i |\n| --- | --- |\n| x | d |\n"),
+    (TABLE_MD, "place('d', 1)", [(K.Key_Tab, None), "e"], "| h | i |\n| --- | --- |\n| c | d |\n| e |  |\n"),
+    (TABLE_MD, "place('d')", [(K.Key_Tab, SHIFT), "x"], "| h | i |\n| --- | --- |\n| x | d |\n"),
+    (TABLE_MD, "place('h')", [(K.Key_Tab, SHIFT), "y"], "| yh | i |\n| --- | --- |\n| c | d |\n"),
+]
+# HTML as a browser puts it on the Windows clipboard (CF_HTML keeps the fragment markers).
+PASTE_HTML = (
+    '<html><body><!--StartFragment--><p><b>bold</b> <a href="javascript:alert(1)">bad</a> '
+    '<a href="https://ok.example/">ok</a></p>'
+    '<table><tr><th colspan="2">h</th></tr><tr><td>1</td><td>2</td><td>3</td></tr></table>'
+    '<table><tr><th rowspan="2">a</th><th>b</th></tr><tr><td>c</td></tr></table>'
+    "<!--EndFragment--></body></html>"
+)
+PASTED_MD = (
+    "**bold** bad [ok](https://ok.example/)\n\n"
+    "| h |  |  |\n| --- | --- | --- |\n| 1 | 2 | 3 |\n\n"
+    "| a | b |\n| --- | --- |\n|  | c |\n"
+)
+NESTED_PASTE_HTML = (
+    "<html><body><!--StartFragment--><table><tr><th>h</th></tr><tr><td>c</td></tr></table>"
+    "<!--EndFragment--></body></html>"
+)
+NESTED_PASTE_MD = "- x\n\n| h |\n| --- |\n| c |\n"
+
+
+def to_clipboard(html: str, text: str) -> None:
+    mime = QMimeData()
+    mime.setData("text/html", html.encode("utf-8"))
+    mime.setText(text)
+    QApplication.clipboard().setMimeData(mime)
+
+
+def click(app: QApplication, view: QWebEngineView, selector: str, button=Qt.MouseButton.LeftButton) -> None:
+    """A real mouse click in the middle of the first element matching `selector`."""
+    point = run_js(app, view, f"""(() => {{
+      const box = document.querySelector({json.dumps(selector)}).getBoundingClientRect();
+      return [Math.round(box.left + box.width / 2), Math.round(box.top + box.height / 2)];
+    }})()""")
+    QTest.mouseClick(view.focusProxy(), button, Qt.KeyboardModifier.NoModifier, QPoint(*point))
+    pump(app, lambda: False, 0.3)
+
+
+def check_tables(app: QApplication, view: QWebEngineView, page: Page, bridge: Bridge) -> None:
+    for markdown, selection, name, args, expected in TABLE_CASES:
+        load_md(app, view, markdown)
+        run_js(app, view, f"({selection}, 0)")
+        done = command(app, view, name, args)
+        result = as_markdown(app, view)
+        check(done is True and result == expected,
+              f"table command {name}({args!r}) after {selection}: {result!r} (returned {done!r})")
+    for markdown, selection, name, args in TABLE_REFUSED:
+        load_md(app, view, markdown)
+        run_js(app, view, f"({selection}, 0)")
+        before = get_doc(app, view)
+        check(command(app, view, name, args) is False and get_doc(app, view) == before,
+              f"table command {name}({args!r}) refused on {markdown!r}")
+    for markdown, selection, strokes, expected in TABLE_KEYS:
+        load_md(app, view, markdown)
+        run_js(app, view, f"({selection}, 0)")
+        press(app, view, strokes)
+        result = as_markdown(app, view)
+        check(result == expected, f"table keys {strokes!r} after {selection}: {result!r}")
+
+    # Deleting the header row keeps the caret in the table (the cells change type in place).
+    load_md(app, view, TABLE_MD)
+    run_js(app, view, "(place('h'), 0)")
+    command(app, view, "deleteRow")
+    check((latest_state(app, bridge) or {}).get("block") == {"type": "table_header"},
+          "after deleting the header row the caret is in the new header row")
+
+    # Paste: unsafe links dropped, merged cells split, short rows padded; Ctrl+Shift+V pastes plain text.
+    load_md(app, view, "x\n")
+    run_js(app, view, "(place('x', 0, 1), 0)")
+    to_clipboard(PASTE_HTML, "bold bad ok")
+    press(app, view, [(K.Key_V, CTRL)])
+    result = as_markdown(app, view)
+    check(result == PASTED_MD, f"Ctrl+V pastes formatting, drops unsafe links, splits merged cells ({result!r})")
+    check(docschema.validate(get_doc(app, view)) == [], "the pasted document is valid in Python")
+    load_md(app, view, "- x\n")
+    run_js(app, view, "(place('x', 1), 0)")
+    to_clipboard(NESTED_PASTE_HTML, "h c")
+    press(app, view, [(K.Key_V, CTRL)])
+    result = as_markdown(app, view)
+    check(result == NESTED_PASTE_MD and docschema.validate(get_doc(app, view)) == [],
+          f"a table pasted into a list item lands after the list ({result!r})")
+    load_md(app, view, "x\n")
+    run_js(app, view, "(place('x', 0, 1), 0)")
+    to_clipboard(PASTE_HTML, "bold bad ok")
+    press(app, view, [(K.Key_V, CTRL | SHIFT, "\x16")])
+    result = as_markdown(app, view)
+    check(result == "bold bad ok\n", f"Ctrl+Shift+V pastes plain text ({result!r})")
+    QApplication.clipboard().clear()  # a clipboard still owning our data crashes Qt at exit
+
+    # Right-click: the caret moves to the clicked cell before Qt's context menu request, so
+    # the menu built from selectionState() offers the table items.
+    states: list = []
+
+    def menu_requested(_point) -> None:
+        page.runJavaScript("JSON.stringify(window.mdEditor.selectionState?.() ?? null)", 0, states.append)
+
+    view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    view.customContextMenuRequested.connect(menu_requested)
+    load_md(app, view, "a\n\n" + TABLE_MD)
+    for selection, target, in_table in (("place('a')", "#editor td:last-child", True),
+                                        ("place('d')", "#editor p", False)):
+        run_js(app, view, f"({selection}, 0)")
+        states.clear()
+        click(app, view, target, Qt.MouseButton.RightButton)
+        pump(app, lambda: states, 3)
+        state = (json.loads(states[0]) if states else None) or {}
+        can = state.get("can", {})
+        check(bool(state) and can.get("addRowAfter") is in_table and can.get("deleteTable") is in_table
+              and can.get("setColumnAlign") is in_table,
+              f"right-click on {target} moves the caret there before the menu request ({state})")
+    view.customContextMenuRequested.disconnect(menu_requested)
+    view.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)
+
+    # Protected blocks and chips are selected and deleted as a unit.
+    load_md(app, view, "a\n\n<div>raw</div>\n\nb<kbd>c\n")
+    click(app, view, "#editor .md-html-block")
+    press(app, view, [(K.Key_Backspace, None)])
+    result = as_markdown(app, view)
+    check(result == "a\n\nb<kbd>c\n", f"a clicked raw HTML block is deleted with Backspace ({result!r})")
+    run_js(app, view, "(place('c'), 0)")
+    press(app, view, [(K.Key_Backspace, None)])
+    result = as_markdown(app, view)
+    check(result == "a\n\nbc\n", f"Backspace after an HTML chip deletes the whole chip ({result!r})")
+    load_md(app, view, "a[^1]\n\n[^1]: note\n")
+    click(app, view, "#editor .md-footnote-def")
+    press(app, view, [(K.Key_Delete, None)])
+    result = as_markdown(app, view)
+    check(result == "a[^1]\n", f"a clicked footnote definition is deleted with Delete ({result!r})")
+
+
 def main() -> int:
     app = QApplication([])
     folder = Path(tempfile.mkdtemp(prefix="mdviewer-webcheck-"))
@@ -942,6 +1114,7 @@ def main() -> int:
     check_editor(app, view, folder, bridge)
     check_bridge(app, view, page, bridge)
     check_editing(app, view, bridge)
+    check_tables(app, view, page, bridge)
 
     console = list(page.console)
     del page, view  # the page is the view's child; release both before removing the folder
