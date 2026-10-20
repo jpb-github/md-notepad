@@ -225,6 +225,8 @@ const nodes = {
     inline: true,
     group: "inline",
     selectable: false,
+    // Turning a paragraph into a code block makes its hard breaks newlines, and back.
+    linebreakReplacement: true,
     parseDOM: [{ tag: "br" }],
     toDOM: () => ["br"],
   },

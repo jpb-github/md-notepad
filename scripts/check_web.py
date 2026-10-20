@@ -19,13 +19,14 @@ from pathlib import Path
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")  # the view is shown: no GPU log noise
 
-from PySide6.QtCore import QEventLoop, QObject, QUrl, Slot  # noqa: E402
+from PySide6.QtCore import QEventLoop, QObject, QPoint, Qt, QUrl, Slot  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWebChannel import QWebChannel  # noqa: E402
 from PySide6.QtWebEngineCore import QWebEnginePage  # noqa: E402
 from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from mdviewer.core import docschema, render  # noqa: E402
+from mdviewer.core import docmodel, docschema, render, serialize  # noqa: E402
 from mdviewer.core.completion import FENCE_LANGUAGES  # noqa: E402
 
 WEB = Path(__file__).resolve().parent.parent / "mdviewer" / "web"
@@ -477,6 +478,13 @@ def bridge_doc() -> dict:
     ]}
 
 
+def history_view(state: dict | None) -> dict | None:
+    """`state` with only undo and redo in `can`: the Task 9 checks predate the formatting commands."""
+    if state is None:
+        return None
+    return {**state, "can": {name: state["can"].get(name) for name in ("undo", "redo")}}
+
+
 def latest_state(app: QApplication, bridge: Bridge) -> dict | None:
     """The last selectionState sent, once the throttle has flushed."""
     pump(app, lambda: False, 0.2)
@@ -508,7 +516,8 @@ def check_bridge(app: QApplication, view: QWebEngineView, page: Page, bridge: Br
     mark = len(bridge.calls)
     set_doc(app, view, doc)
     pump(app, lambda: False, 0.2)
-    calls = bridge.calls[mark:]
+    calls = [[name, *(history_view(arg) if name == "selectionState" else arg for arg in args)]
+             for name, *args in bridge.calls[mark:]]
     check(calls == [["caretBlock", 0],
                     ["selectionState", {"marks": [], "block": {"type": "heading", "level": 2}, "can": NO_UNDO}]],
           f"setDocument reports the caret block and the selection state, nothing else ({calls})")
@@ -524,7 +533,7 @@ def check_bridge(app: QApplication, view: QWebEngineView, page: Page, bridge: Br
     mark = len(bridge.calls)
     run_js(app, view, f"(select({PLAIN}), select({CODE}), select(3), select({BOLD}), 0)")
     pump(app, lambda: False, 0.2)
-    states = bridge.args("selectionState", mark)
+    states = [[history_view(state)] for state, in bridge.args("selectionState", mark)]
     check(bridge.args("caretBlock", mark) == [[1], [2], [0], [1]], "caretBlock follows every block change at once")
     check(states == [[{"marks": ["strong", "em"], "block": {"type": "paragraph"}, "can": NO_UNDO}]],
           f"four quick selection changes send one selectionState with the last one ({states})")
@@ -538,7 +547,7 @@ def check_bridge(app: QApplication, view: QWebEngineView, page: Page, bridge: Br
     }
     for script, (marks, block) in expected.items():
         run_js(app, view, f"({script}, 0)")
-        state = latest_state(app, bridge)
+        state = history_view(latest_state(app, bridge))
         check(state == {"marks": marks, "block": block, "can": NO_UNDO}, f"selectionState after {script} ({state})")
     check(bridge.args("changed", mark) == [], "selection changes do not report a change")
 
@@ -546,12 +555,12 @@ def check_bridge(app: QApplication, view: QWebEngineView, page: Page, bridge: Br
     mark = len(bridge.calls)
     run_js(app, view, f"""(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('A', {PLAIN})),
         window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('B', {PLAIN})), 0)""")
-    state = latest_state(app, bridge)
+    state = history_view(latest_state(app, bridge))
     check(bridge.args("changed", mark) == [[]], "two edits after a load report changed once")
     check(state and state["can"] == {"undo": True, "redo": False}, f"an edit can be undone ({state})")
     check(run_js(app, view, "window.mdEditor.command('undo')") is True and get_doc(app, view) == doc,
           "command('undo') restores the loaded document")
-    state = latest_state(app, bridge)
+    state = history_view(latest_state(app, bridge))
     check(state and state["can"] == {"undo": False, "redo": True}, f"an undone edit can be redone ({state})")
     check(run_js(app, view, "window.mdEditor.command('redo')") is True
           and get_doc(app, view)["content"][1]["content"][0]["text"] == "pBAlain ",
@@ -561,7 +570,7 @@ def check_bridge(app: QApplication, view: QWebEngineView, page: Page, bridge: Br
           "an unknown command logs a warning")
     set_doc(app, view, doc)
     check(run_js(app, view, "window.mdEditor.command('undo')") is False, "setDocument starts a new undo history")
-    state = latest_state(app, bridge)
+    state = history_view(latest_state(app, bridge))
     check(state and state["can"] == NO_UNDO, f"after setDocument nothing can be undone ({state})")
     mark = len(bridge.calls)
     run_js(app, view, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('C', {PLAIN})), 0)")
@@ -627,6 +636,259 @@ def check_bridge(app: QApplication, view: QWebEngineView, page: Page, bridge: Br
     check(run_js(app, view, scroll_top) == 0, "setDocument(doc, false) scrolls to the top")
 
 
+# --- Task 10: formatting commands, keymaps and input rules ------------------------------------
+
+CTRL = Qt.KeyboardModifier.ControlModifier
+SHIFT = Qt.KeyboardModifier.ShiftModifier
+ALT = Qt.KeyboardModifier.AltModifier
+K = Qt.Key
+# place(needle, start, end) selects from `start` to `end` characters into the first text that
+# contains `needle`; span(a, b) selects from the start of `a` to the end of `b`. Both focus the
+# editor. They need select() and window.TextSelection (set by check_bridge).
+PLACE_JS = """(window.findText = (needle) => {
+  let found = null;
+  window.mdEditor.view.state.doc.descendants((node, pos) => {
+    if (found === null && node.isText && node.text.includes(needle)) found = pos + node.text.indexOf(needle);
+    return found === null;
+  });
+  if (found === null) throw new Error('text not found: ' + needle);
+  return found;
+}, window.place = (needle, start = 0, end = start) => {
+  select(findText(needle) + start, findText(needle) + end);
+  window.mdEditor.view.focus();
+}, window.span = (first, last) => {
+  select(findText(first), findText(last) + last.length);
+  window.mdEditor.view.focus();
+}, 0)"""
+
+# (markdown, selection, command name, args, Markdown after the command)
+COMMAND_CASES = [
+    ("a word b\n", "place('word', 0, 4)", "toggleMark", "strong", "a **word** b\n"),
+    ("a **word** b\n", "place('word', 0, 4)", "toggleMark", "strong", "a word b\n"),
+    ("a word\n", "place('word', 0, 4)", "toggleMark", "strike", "a ~~word~~\n"),
+    ("Title\n", "place('Title')", "setBlock", {"type": "heading", "level": 2}, "## Title\n"),
+    ("## Title\n", "place('Title')", "setBlock", {"type": "paragraph"}, "Title\n"),
+    ("a\\\nb\n", "place('a')", "setBlock", {"type": "code_block", "language": "py"}, "```py\na\nb\n```\n"),
+    ("```\na\nb\n```\n", "place('a')", "setBlock", {"type": "paragraph"}, "a\\\nb\n"),
+    ("a\n", "place('a')", "toggleList", "bullet", "- a\n"),
+    ("- a\n", "place('a')", "toggleList", "bullet", "a\n"),
+    ("a\n", "place('a')", "toggleList", "ordered", "1. a\n"),
+    ("a\n", "place('a')", "toggleList", "task", "- [ ] a\n"),
+    ("- [x] a\n- [ ] b\n", "place('a')", "toggleList", "bullet", "- a\n- b\n"),
+    ("3. a\n4. b\n", "place('b')", "toggleList", "task", "- [ ] a\n- [ ] b\n"),
+    ("a\n", "place('a')", "toggleQuote", None, "> a\n"),
+    ("> - a\n", "place('a')", "toggleQuote", None, "- a\n"),
+    ("a\n", "place('a', 1)", "insertCodeBlock", {"language": "py thon"}, "a\n\n```py\n```\n"),
+    ("a\n", "place('a', 1)", "insertTable", {"rows": 2, "cols": 2}, "a\n\n|  |  |\n| --- | --- |\n|  |  |\n"),
+    ("a\n", "place('a', 1)", "insertRule", None, "a\n\n---\n"),
+    ("- a\n", "place('a', 1)", "insertRule", None, "- a\n  ___\n"),
+    ("a b\n", "place('a', 1)", "insertImage",
+     {"src": "pics/x.png", "display_src": "file:///C:/pics/x.png", "alt": "X"}, "a![X](pics/x.png) b\n"),
+    ("a word\n", "place('word', 0, 4)", "setLink", {"text": "word", "href": "https://e.com/"},
+     "a [word](https://e.com/)\n"),
+    ("a **wo**rd\n", "span('wo', 'rd')", "setLink", {"text": "word", "href": "https://e.com/"},
+     "a [**wo**rd](https://e.com/)\n"),
+    ("ab\n", "place('ab', 1)", "setLink", {"text": "site", "href": "https://e.com/"}, "a[site](https://e.com/)b\n"),
+    ("ab\n", "place('ab', 1)", "setLink", {"text": "", "href": "https://e.com/"},
+     "a<https://e.com/>b\n"),
+    ("x [old](https://o.com/ \"T\")\n", "place('old', 1)", "setLink", {"text": "new", "href": "https://n.com/"},
+     "x [new](https://n.com/ \"T\")\n"),
+    ("[old](https://o.com/) x\n", "place('old', 1)", "removeLink", None, "old x\n"),
+    ("## **a** *b* [l](https://l.com/)\n", "span('a', 'l')", "clearFormatting", None, "a b [l](https://l.com/)\n"),
+    ("```py\nx\n```\n", "place('x')", "setCodeLanguage", "rust extra", "```rust\nx\n```\n"),
+]
+# (markdown, selection, command name, args): the command refuses and changes nothing.
+REFUSED_CASES = [
+    ("```\nx\n```\n", "place('x', 0, 1)", "toggleMark", "strong"),
+    ("a\n", "place('a', 0, 1)", "toggleMark", "link"),
+    ("a\n", "place('a')", "setBlock", {"type": "heading", "level": 9}),
+    ("a\n", "place('a')", "toggleList", "numbered"),
+    ("a\n", "place('a')", "insertTable", {"rows": 0, "cols": 3}),
+    ("a\n", "place('a')", "insertTable", {"rows": 51, "cols": 3}),
+    ("a\n", "place('a')", "insertImage", {"src": "javascript:alert(1)", "alt": "x"}),
+    ("a\n", "place('a')", "insertImage", {"src": "x.png", "display_src": "data:text/html,x"}),
+    ("```\nx\n```\n", "place('x')", "insertImage", {"src": "x.png"}),
+    ("a\n", "place('a', 0, 1)", "setLink", {"text": "a", "href": "java\tscript:alert(1)"}),
+    ("```\nx\n```\n", "place('x', 0, 1)", "setLink", {"text": "x", "href": "https://e.com/"}),
+    ("a\n", "place('a')", "removeLink", None),
+    ("a\n", "place('a')", "setCodeLanguage", "py"),
+]
+# (markdown, selection, keys, Markdown after them); a str is typed, a tuple is (key, modifiers).
+KEY_CASES = [
+    ("a word\n", "place('word', 0, 4)", [(K.Key_B, CTRL)], "a **word**\n"),
+    ("a word\n", "place('word', 0, 4)", [(K.Key_I, CTRL)], "a *word*\n"),
+    ("a word\n", "place('word', 0, 4)", [(K.Key_X, CTRL | SHIFT)], "a ~~word~~\n"),
+    ("a word\n", "place('word', 0, 4)", [(K.Key_QuoteLeft, CTRL)], "a `word`\n"),
+    ("word\n", "place('word')", [(K.Key_2, CTRL | ALT)], "## word\n"),
+    ("## word\n", "place('word')", [(K.Key_0, CTRL | ALT)], "word\n"),
+    ("word\n", "place('word')", [(K.Key_Asterisk, CTRL | SHIFT)], "- word\n"),
+    ("word\n", "place('word')", [(K.Key_8, CTRL | SHIFT)], "- word\n"),
+    ("word\n", "place('word')", [(K.Key_Ampersand, CTRL | SHIFT)], "1. word\n"),
+    ("word\n", "place('word')", [(K.Key_ParenLeft, CTRL | SHIFT)], "- [ ] word\n"),
+    ("word\n", "place('word')", [(K.Key_Greater, CTRL | SHIFT)], "> word\n"),
+    ("**a** *b*\n", "span('a', 'b')", [(K.Key_Space, CTRL)], "a b\n"),
+    ("a word\n", "place('word', 0, 4)", [(K.Key_B, CTRL), (K.Key_Z, CTRL)], "a word\n"),
+    ("a word\n", "place('word', 0, 4)", [(K.Key_B, CTRL), (K.Key_Z, CTRL), (K.Key_Y, CTRL)], "a **word**\n"),
+    # Input rules, typed over a selected placeholder paragraph.
+    ("x\n", "place('x', 0, 1)", ["# Title"], "# Title\n"),
+    ("x\n", "place('x', 0, 1)", ["###### T"], "###### T\n"),
+    ("x\n", "place('x', 0, 1)", ["- a"], "- a\n"),
+    ("x\n", "place('x', 0, 1)", ["* a"], "- a\n"),
+    ("x\n", "place('x', 0, 1)", ["3. a"], "3. a\n"),
+    ("x\n", "place('x', 0, 1)", ["> a"], "> a\n"),
+    ("x\n", "place('x', 0, 1)", ["- [ ] a"], "- [ ] a\n"),
+    ("x\n", "place('x', 0, 1)", ["- [x] a"], "- [x] a\n"),
+    ("x\n", "place('x', 0, 1)", ["a **b** c"], "a **b** c\n"),
+    ("x\n", "place('x', 0, 1)", ["a *i* c"], "a *i* c\n"),
+    ("x\n", "place('x', 0, 1)", ["a `c` d"], "a `c` d\n"),
+    ("x\n", "place('x', 0, 1)", ["a ~~s~~ d"], "a ~~s~~ d\n"),
+    ("x\n", "place('x', 0, 1)", ["2*3*4"], "2\\*3\\*4\n"),
+    ("x\n", "place('x', 0, 1)", ["```py", (K.Key_Return, None), "x"], "```py\nx\n```\n"),
+    ("x\n", "place('x', 0, 1)", ["---", (K.Key_Return, None), "x"], "---\n\nx\n"),
+    ("x\n", "place('x', 0, 1)", ["# ", (K.Key_Backspace, None)], "\\#\n"),
+    ("```\nx\n```\n", "place('x', 0, 1)", ["**b**"], "```\n**b**\n```\n"),
+    # Lists.
+    ("- a\n", "place('a', 1)", [(K.Key_Return, None), (K.Key_Tab, None), "b"], "- a\n  - b\n"),
+    ("- a\n  - b\n", "place('b', 1)", [(K.Key_Tab, SHIFT)], "- a\n- b\n"),
+    ("- a\n", "place('a', 1)", [(K.Key_Return, None), (K.Key_Return, None), "b"], "- a\n\nb\n"),
+    ("- [x] a\n", "place('a', 1)", [(K.Key_Return, None), "b"], "- [x] a\n- [ ] b\n"),
+    # Code blocks.
+    ("```\nx\n```\n", "place('x')", [(K.Key_Tab, None)], "```\n    x\n```\n"),
+    ("```\nx\n```\n", "place('x')", [(K.Key_Tab, SHIFT), "y"], "```\nyx\n```\n"),
+    ("```\nx\n```\n", "place('x', 1)", [(K.Key_Return, None), "y"], "```\nx\ny\n```\n"),
+    ("```\nx\n```\n", "place('x', 1)", [(K.Key_Return, CTRL), "y"], "```\nx\n```\n\ny\n"),
+    ("```\nx\n```\n", "place('x', 1)", [(K.Key_Down, None), "y"], "```\nx\n```\n\ny\n"),
+    ("```\nx\n```\n", "place('x')", [(K.Key_Up, None), "y"], "y\n\n```\nx\n```\n"),
+    # With a block after it, ArrowDown just moves there (to the end of "b": the code's padding).
+    ("a\n\n```\nx\n```\n\nb\n", "place('x')", [(K.Key_Down, None), "y"], "a\n\n```\nx\n```\n\nby\n"),
+    # Tab outside lists and code keeps the focus in the editor; the gap cursor passes a final rule.
+    ("a\n", "place('a', 1)", [(K.Key_Tab, None), "b"], "ab\n"),
+    ("a\n", "place('a', 1)", [(K.Key_Tab, SHIFT), "b"], "ab\n"),
+    ("a\n\n---\n", "place('a', 1)", [(K.Key_Right, None), (K.Key_Right, None), "z"], "a\n\n---\n\nz\n"),
+]
+
+
+def load_md(app: QApplication, view: QWebEngineView, markdown: str) -> None:
+    set_doc(app, view, docmodel.from_markdown(markdown))
+
+
+def as_markdown(app: QApplication, view: QWebEngineView) -> str:
+    return serialize.to_markdown(get_doc(app, view))
+
+
+def command(app: QApplication, view: QWebEngineView, name: str, args=None):
+    """mdEditor.command's result, or the text of the exception it threw."""
+    return run_js(app, view, f"""(() => {{
+      try {{ return window.mdEditor.command({json.dumps(name)}, {json.dumps(args)}); }}
+      catch (error) {{ return String(error); }}
+    }})()""")
+
+
+def press(app: QApplication, view: QWebEngineView, strokes: list) -> None:
+    for stroke in strokes:
+        if isinstance(stroke, str):
+            QTest.keyClicks(view.focusProxy(), stroke)
+        else:
+            key, modifiers = stroke
+            QTest.keyClick(view.focusProxy(), key, modifiers or Qt.KeyboardModifier.NoModifier)
+    pump(app, lambda: False, 0.2)
+
+
+def check_editing(app: QApplication, view: QWebEngineView, bridge: Bridge) -> None:
+    run_js(app, view, PLACE_JS)
+    for markdown, selection, name, args, expected in COMMAND_CASES:
+        load_md(app, view, markdown)
+        run_js(app, view, f"({selection}, 0)")
+        done = command(app, view, name, args)
+        result = as_markdown(app, view)
+        check(done is True and result == expected,
+              f"command {name}({args!r}) on {markdown!r}: {result!r} (returned {done!r})")
+    for markdown, selection, name, args in REFUSED_CASES:
+        load_md(app, view, markdown)
+        run_js(app, view, f"({selection}, 0)")
+        before = get_doc(app, view)
+        done = command(app, view, name, args)
+        check(done is False and get_doc(app, view) == before, f"command {name}({args!r}) refused on {markdown!r}")
+
+    # The caret goes into an inserted code block or table.
+    load_md(app, view, "a\n")
+    run_js(app, view, "(place('a', 1), 0)")
+    command(app, view, "insertTable", {"rows": 3, "cols": 3})
+    check((latest_state(app, bridge) or {}).get("block") == {"type": "table_header"},
+          "insertTable puts the caret in the first header cell")
+    command(app, view, "insertCodeBlock", None)
+    check((latest_state(app, bridge) or {}).get("block") == {"type": "code_block"},
+          "insertCodeBlock puts the caret in the new code block")
+    load_md(app, view, "a\n")
+    run_js(app, view, "(place('a', 1), 0)")
+    command(app, view, "insertRule")
+    pump(app, lambda: False, 0.2)
+    types = [node["type"] for node in get_doc(app, view)["content"]]
+    check(types == ["paragraph", "horizontal_rule", "paragraph"] and bridge.args("caretBlock")[-1] == [2],
+          f"a rule inserted at the end gets a paragraph after it for the caret ({types})")
+
+    # selectionState.can follows the selection.
+    load_md(app, view, "a\n\n```\nx\n```\n\n| h |\n| --- |\n| c |\n")
+    expected_can = {
+        "place('a')": {"toggleMark": True, "setBlock": True, "setLink": True, "insertImage": True,
+                       "setCodeLanguage": False, "removeLink": False, "insertTable": True},
+        "place('x')": {"toggleMark": False, "setBlock": True, "setLink": False, "insertImage": False,
+                       "setCodeLanguage": True, "linkDialog": False, "imageDialog": False},
+        "place('h')": {"toggleMark": True, "setBlock": False, "setLink": True, "insertImage": True,
+                       "setCodeLanguage": False, "toggleList": False, "toggleQuote": False},
+    }
+    for selection, wanted in expected_can.items():
+        run_js(app, view, f"({selection}, 0)")
+        can = (latest_state(app, bridge) or {}).get("can", {})
+        check({name: can.get(name) for name in wanted} == wanted, f"selectionState.can after {selection} ({can})")
+
+    # Link and image dialogs are requested from Python; refused where they do not apply.
+    load_md(app, view, "[old](https://o.com/) a word\n\n```\nx\n```\n")
+    mark = len(bridge.calls)
+    for selection in ("place('old', 1)", "place('word', 0, 4)"):
+        run_js(app, view, f"({selection}, 0)")
+        check(command(app, view, "linkDialog") is True, f"linkDialog applies after {selection}")
+    run_js(app, view, "(place('x'), 0)")
+    check(command(app, view, "linkDialog") is False and command(app, view, "imageDialog") is False,
+          "no link or image dialog inside a code block")
+    run_js(app, view, "(place('a', 0), 0)")
+    check(command(app, view, "imageDialog") is True, "imageDialog applies in a paragraph")
+    run_js(app, view, "(place('old', 1), 0)")
+    press(app, view, [(K.Key_K, CTRL)])
+    pump(app, lambda: len(bridge.args("requestLinkDialog", mark)) >= 3, 3)
+    dialogs = [call for call in bridge.calls[mark:] if call[0] in ("requestLinkDialog", "requestImageDialog")]
+    check(dialogs == [["requestLinkDialog", "old", "https://o.com/"], ["requestLinkDialog", "word", ""],
+                      ["requestImageDialog"], ["requestLinkDialog", "old", "https://o.com/"]],
+          f"dialog requests carry the link text and href ({dialogs})")
+
+    # Keys and input rules, typed for real.
+    for markdown, selection, strokes, expected in KEY_CASES:
+        load_md(app, view, markdown)
+        run_js(app, view, f"({selection}, 0)")
+        press(app, view, strokes)
+        result = as_markdown(app, view)
+        check(result == expected, f"keys {strokes!r} on {markdown!r}: {result!r}")
+
+    # Task checkboxes: a real mouse click toggles the item, leaves the caret, reports a change.
+    load_md(app, view, "- [ ] a\n")
+    run_js(app, view, "(place('a', 1), 0)")
+    mark = len(bridge.calls)
+    box = run_js(app, view, """(() => {
+      const box = document.querySelector('#editor input.task-list-item-checkbox').getBoundingClientRect();
+      return [Math.round(box.left + box.width / 2), Math.round(box.top + box.height / 2)];
+    })()""")
+    caret = "window.mdEditor.view.state.selection.from"
+    before = run_js(app, view, caret)
+    for expected in ("- [x] a\n", "- [ ] a\n"):
+        QTest.mouseClick(view.focusProxy(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(*box))
+        pump(app, lambda: False, 0.3)
+        result = as_markdown(app, view)
+        check(result == expected and run_js(app, view, caret) == before,
+              f"clicking a task checkbox toggles the item and leaves the caret ({result!r})")
+    pump(app, lambda: bridge.args("changed", mark), 3)
+    check(bridge.args("changed", mark) == [[]], "toggling a task checkbox reports a change")
+
+
 def main() -> int:
     app = QApplication([])
     folder = Path(tempfile.mkdtemp(prefix="mdviewer-webcheck-"))
@@ -670,6 +932,7 @@ def main() -> int:
     check(isinstance(doc, dict) and doc.get("type") == "doc", f"mdEditor.getDocument() returns a doc ({doc!r})")
     check_editor(app, view, folder, bridge)
     check_bridge(app, view, page, bridge)
+    check_editing(app, view, bridge)
 
     console = list(page.console)
     del page, view  # the page is the view's child; release both before removing the folder

@@ -5,7 +5,7 @@
 > **Status: high-level outline.** Phases and tasks are fixed; each task's
 > bite-sized steps (tests, code, commands) are written out on request, task
 > by task, below its heading. Do not execute a task whose steps are not yet
-> detailed. Detailed so far: Tasks 1-9.
+> detailed. Detailed so far: Tasks 1-11.
 
 **Goal:** Make the rendered view an editable WYSIWYG Markdown editor with a
 format toolbar, keeping the plain-text editor as Source mode.
@@ -63,7 +63,9 @@ mistune 3 (AST renderer), Pygments, pytest; ProseMirror packages + esbuild
 | `web-src/src/nodeviews.js` | new | code block, image, raw HTML frame, double-click on protected nodes | 8 |
 | `web-src/src/editor.css` | new | editor styles: lists, code overlay, protected blocks, chips | 8 |
 | `web-src/src/bridge.js` | new | QWebChannel glue, Python-facing API | 9 |
-| `web-src/src/editor.js` | new | EditorView, commands, keymaps, input rules, tables, paste | 9, 10, 11 |
+| `web-src/src/editor.js` | new | EditorView, document lifecycle, `window.mdEditor`, tables, paste | 9, 10, 11 |
+| `web-src/src/commands.js` | new | formatting commands (`FORMATTING_COMMANDS`) | 10 |
+| `web-src/src/input.js` | new | keymaps, input rules, list/code keys, task checkbox, gap and drop cursor | 10 |
 | `mdviewer/richview.py` | new | `RichView` (QWebEngineView) + `Bridge` (QObject) | 12 |
 | `mdviewer/preview.py` | deleted | replaced by `richview.py` | 13 |
 | `mdviewer/main_window.py` | changed | modes, `with_buffer`, async lifecycle, seams, Edit routing | 13-17 |
@@ -9104,17 +9106,2022 @@ git commit -m "feat: add QWebChannel bridge and document lifecycle to the editor
 
 ### Task 10: Formatting commands, keymaps and input rules
 
-- **Files:** `web-src/src/editor.js` (or `web-src/src/commands.js` if it exceeds ~300 lines), rebuilt bundle.
-- **Produces:** `command()` names: `toggleMark`, `setBlock`, `toggleList`, `toggleQuote`, `insertCodeBlock`, `insertTable`, `insertImage`, `insertRule`, `setLink`, `removeLink`, `clearFormatting`, `setCodeLanguage`; keymaps from spec section 3; input rules from spec section 4; list sink/lift with Tab/Shift+Tab; Enter on empty item exits; task checkbox click toggles; code block Tab = 4 spaces, Ctrl+Enter exits.
-- **Test:** smoke (Task 12 onwards) drives each command and checks the pulled Markdown.
-- **Commit:** `feat: add formatting commands, keymaps and input rules to the editor`
+**Status: steps detailed.** All code below was run before being written into
+this plan (2026-10-20, PySide6 6.12.0 offscreen, Node 26, the Task 1 pins:
+prosemirror-commands 1.7.2, -inputrules 1.5.1, -schema-list 1.5.1,
+-gapcursor 1.4.1, -dropcursor 1.8.4, -keymap 1.2.3), on top of the committed
+Task 9 code. Results:
+- `scripts/check_web.py` prints `WEB OK`.
+- The full suite passes (725 tests), `SMOKE OK`, and a second
+  `build_web.py` changes no bytes.
+- Run against the Task 9 bundle, the new checks fail with 80 labels (Step 3).
+- Fourteen deliberate breaks each fail a check:
+  - base keymap before ours
+  - stored mark kept after a mark input rule
+  - task item split without `checked: false`
+  - no code-block Tab
+  - no ArrowDown exit from code
+  - no `linebreakReplacement`
+  - link text always replaced
+  - clear formatting removing links
+  - unsafe link accepted
+  - no gap cursor
+  - Tab not consumed
+  - Shift+Tab not consumed
+  - no trailing paragraph after an inserted rule
+  - list conversion passing foreign attrs (it throws)
+
+**Findings that shape this task:**
+
+- **Real keys reach the page.** `QTest.keyClick` / `keyClicks` on
+  `view.focusProxy()` deliver real Chromium key events to the focused editor
+  in the offscreen check. The check therefore types shortcuts and input
+  rules for real instead of calling `handleTextInput`.
+  - Ctrl+Shift+8 arrives as key `*` with keyCode 56 (Qt `Key_Asterisk`, as
+    a US keyboard sends it), or as `8` (`Key_8`). Both match `Mod-Shift-8`
+    through prosemirror-keymap's keyCode fallback, and the check tests both.
+  - Ctrl+Alt+digit arrives as `Ctrl+Alt+1` (key `1`).
+- **Node attrs are checked.** prosemirror-model refuses attrs a node type
+  does not declare. Turning an `ordered_list` into a `bullet_list` with the
+  old attrs threw `RangeError`, so `ownAttrs` keeps only the target type's
+  attrs.
+- **`NodeRange.start` is the start of the selected items, not of the list.**
+  The list's own position is `range.$from.before(range.depth)`. With
+  `range.start - 1`, converting a list from its second item threw
+  `No node at given position`.
+- **`linebreakReplacement: true` on `hard_break`** makes `setBlockType`
+  turn hard breaks into `\n` when a paragraph becomes a code block, and back.
+  Without it they are deleted (`a\` + `b` became `ab`). It is a node-spec
+  flag only, so the Task 8 schema-shape check and the paste checks still
+  pass.
+- **Task checkbox:** with the checkbox `contenteditable="false"` (Task 8's
+  `toDOM`), a real mouse click on it moves no caret. A `click` handler that
+  only dispatches the toggle is enough. ProseMirror redraws the item from
+  the new attrs, so the DOM never disagrees with the document. Handlers
+  that call `preventDefault` on `mousedown` and `click` changed no check
+  outcome, so there are none.
+- **The serializer's own choices** (Tasks 6-7), which the expected
+  Markdown below follows:
+  - A rule inside a list item is written `___`.
+  - A link whose text equals its href, between letters, is written
+    `<https://e.com/>`.
+  - A paragraph `# ` loses its trailing space (`\#`).
+  - The empty paragraph after an inserted rule writes nothing.
+- **ArrowDown from a code block with a block after it** keeps the caret's
+  horizontal position. The code block's padding puts it past the end of a
+  one-letter next line, so the check types at the end of `b`.
+
+**Design decisions:**
+
+- **Files:** the commands live in `web-src/src/commands.js` (~300 lines)
+  and the keyboard and mouse input in `web-src/src/input.js` (~170 lines).
+  `editor.js` only merges them. The outline allowed this split ("or
+  `commands.js` if it exceeds ~300 lines"); the File Map gets the two rows.
+- **Command contract** (Task 9's `COMMANDS` entries):
+  - `run(state, dispatch, view, args)` returns a boolean.
+  - Called without `dispatch`, it only answers whether the command would
+    apply. `can` reuses that dry run, except where the toolbar needs one
+    answer for several arguments.
+  - Every command refuses (`false`, nothing changes) when it does not apply
+    or `args` is invalid.
+- **Command names and args** (Python calls `mdEditor.command(name, args)`):
+
+  | Name | Args | Effect |
+  |---|---|---|
+  | `toggleMark` | `"strong"`, `"em"`, `"strike"` or `"code"` | ProseMirror's `toggleMark`. Links are not toggled. |
+  | `setBlock` | `{type: "paragraph"}`, `{type: "heading", level: 1-6}`, `{type: "code_block", language?}` | `setBlockType` on the selected textblocks |
+  | `toggleList` | `"bullet"`, `"ordered"` or `"task"` | Same kind of list: lift the items. Another kind: change the list in place. Not in a list: wrap. |
+  | `toggleQuote` | none | Lift the selection out of its blockquote, else wrap it in one |
+  | `insertCodeBlock` | `{language?}` | Insert an empty code block, caret inside |
+  | `insertTable` | `{rows, cols}`, each 1-50; `rows` includes the header row | Insert a table, caret in the first header cell |
+  | `insertImage` | `{src, display_src?, alt?, title?}` | Insert an image at the caret. `src` is the Markdown path, `display_src` the URI Python resolved. Both must pass `isSafeUrl`. |
+  | `insertRule` | none | Insert a rule. If nothing follows it, an empty paragraph is added for the caret. |
+  | `setLink` | `{href, text?, title?}` | Link the selection, or the link around the caret, or insert a link at the caret. `href` must pass `isSafeUrl`. |
+  | `removeLink` | none | Unlink the selection, or the link around the caret |
+  | `linkDialog` | none | Send `requestLinkDialog(text, href)` for the selection or the link around the caret (Ctrl+K, toolbar Link) |
+  | `imageDialog` | none | Send `requestImageDialog()` (toolbar Image) |
+  | `clearFormatting` | none | Remove bold, italic, strikethrough and code, and make the textblocks paragraphs |
+  | `setCodeLanguage` | language string (cleaned with `cleanLanguage`) | Set the language of the code block at the caret and clear its `highlight` |
+
+  - `linkDialog` and `imageDialog` are not in the outline's name list. The
+    toolbar's Link and Image buttons need the same JS-side applicability
+    and link lookup as Ctrl+K, so the dialogs are always requested through
+    the page (spec section 6.2's `requestLinkDialog` /
+    `requestImageDialog`).
+- **`can` keys** in `selectionState.can`: every name above, plus Task 9's
+  `undo` and `redo`.
+  - `toggleMark` means "marks are allowed here". It is false inside a code
+    block.
+  - `setBlock` means "some block type can be set here". It is false in
+    table cells.
+  - `toggleList` means "a bulleted or numbered list applies".
+- **Insertion point:** a block command replaces an empty paragraph at the
+  caret. Otherwise it inserts after the current textblock (or selected
+  block), at the first level up that allows the block: inside a list item
+  or blockquote, or after a table when the caret is in a cell. Selected
+  text is never replaced by an inserted block; converting text is
+  `setBlock`'s job.
+- **Links:**
+  - The link "around the caret" is the contiguous run with the same link
+    mark, at the caret or just before it, so the end of a link still
+    counts.
+  - `setLink` with unchanged (or empty) `text` adds the mark and keeps the
+    inner marks.
+  - New text replaces the run, carrying the marks of the replaced text's
+    first character. A link's `title` is kept unless `args.title` is
+    given.
+  - Empty text with an empty selection uses the href as the text.
+- **`clearFormatting` keeps links:** they are content, not formatting.
+  Spec section 3 says "Remove inline marks". This plan decides that links
+  survive, so that Ctrl+Space cannot silently drop URLs.
+- **Keymaps:**
+  - Spec section 3, plus Mod-z / Mod-y / Mod-Shift-z (history) and
+    Backspace = `undoInputRule` (undoes a just-applied input rule).
+  - Our keymap runs before ProseMirror's `baseKeymap`.
+  - Tab and Shift+Tab:
+    - in a code block, Tab inserts 4 spaces and Shift+Tab does nothing;
+    - in a list, they sink / lift the item;
+    - elsewhere they are consumed, so the focus never jumps out of the
+      editor.
+  - Task 11's table keymap must run before this keymap.
+- **Enter:**
+  1. A paragraph holding only ```` ``` ```` + optional language becomes a
+     code block. A paragraph holding only `---` becomes a rule plus a new
+     paragraph.
+  2. Otherwise `splitListItem`, where a new item after a task item is an
+     unchecked task item.
+  3. Then `baseKeymap`'s Enter: `liftEmptyBlock` makes Enter on an empty
+     item leave the list, and `newlineInCode` handles code blocks.
+- **Code blocks:**
+  - Ctrl+Enter is `baseKeymap`'s `exitCode`.
+  - The arrow keys leave a code block that is the last (down / right) or
+    first (up / left) child of its parent by adding a paragraph there.
+    With a neighbor, the normal caret movement applies.
+- **Input rules:** spec section 4.
+  - Headings `#`-`######` + space; `-` or `*` + space for a bulleted list;
+    `N.` + space for a numbered list starting at N; `> `; and `[ ] ` /
+    `[x] ` at the start of a list item's first paragraph.
+  - Inline `**b**`, `*i*`, `~~s~~` and `` `c` ``. A closing marker only
+    matches when the opening one does not follow a word character or the
+    same marker, so `2*3*4` stays literal. The stored mark is dropped
+    afterwards, so typing continues unmarked.
+  - The rules never fire inside code blocks (ProseMirror's default), and
+    the mark rules not inside inline code (`inCodeMark: false`).
+- **Gap cursor and drop cursor** (`prosemirror-gapcursor`,
+  `-dropcursor`, listed in spec section 6.1):
+  - The gap cursor lets the caret reach the space beside a rule, table or
+    protected block at the edge of the document. Typing there makes a
+    paragraph.
+  - Both are drawn in the theme's text color (`var(--fg)`).
+
+**Files:**
+- Create: `web-src/src/commands.js`, `web-src/src/input.js`
+- Modify: `web-src/src/editor.js`, `web-src/src/schema.js` (`hard_break`), `web-src/src/editor.css`, `scripts/check_web.py`
+- Modify: this plan's File Map (two rows)
+- Regenerate and commit: `mdviewer/web/editor.js`, `mdviewer/web/editor.css`, `mdviewer/web/THIRD_PARTY.txt`
+
+**Interfaces:**
+- Consumes:
+  - Task 8: `schema`, `isSafeUrl(url)`, `cleanLanguage(value)` and the
+    task-item DOM (`li.task-list-item > input.task-list-item-checkbox` +
+    content `div`)
+  - Task 9: `COMMANDS` in `editor.js`, `send(name, ...args)`,
+    `selectionState.can`, and `check_web.py`'s `Bridge.args`,
+    `latest_state`, `select()` / `window.TextSelection` (from
+    `check_bridge`) and `set_doc` / `get_doc`
+  - Tasks 4-7: `docmodel.from_markdown(body)` and
+    `serialize.to_markdown(doc)`
+- Produces (later tasks rely on these exact names):
+  - `web-src/src/commands.js`: `FORMATTING_COMMANDS`, holding the 14
+    commands in the table above
+  - `web-src/src/input.js`: `inputPlugins()`. It returns the input rules,
+    our keymap, `baseKeymap`, the task-checkbox plugin, the gap cursor and
+    the drop cursor, in that order.
+  - **Task 11** puts `tableEditing()` and its table keymap (Tab / Shift+Tab
+    between cells) **before** `...inputPlugins()` in `editor.js`'s plugin
+    list. Otherwise our Tab handler consumes Tab in cells.
+  - **Task 12 / 16** handle the dialog requests:
+    - `requestLinkDialog(text, href)` -> `run_link_dialog`. Python then
+      calls `command("setLink", {"text": ..., "href": ...})`, or
+      `command("removeLink")` for `"remove"`, or nothing for `None`.
+    - `requestImageDialog()` -> `run_image_dialog`. Python then calls
+      `command("insertImage", {"src": src, "display_src": <resolved URI>, "alt": alt})`.
+  - **Task 15**'s toolbar:
+    - The buttons call `toggleMark` / `toggleList` / `toggleQuote` /
+      `insertCodeBlock` / `insertTable {rows: 3, cols: 3}` / `insertRule` /
+      `clearFormatting`; Link calls `linkDialog` and Image `imageDialog`.
+    - The combo calls `setBlock`.
+    - Enablement reads `selectionState.can[name]`.
+    - The toolbar's tooltips show the shortcuts, but the keys are handled
+      in the page. Task 15 and Task 17 must not register Qt shortcuts for
+      Ctrl+B / I / Shift+X / `, Ctrl+K, Ctrl+Shift+7/8/9/., Ctrl+Space or
+      Ctrl+Alt+0..6, or the key would be handled twice or never reach the
+      page.
+  - `scripts/check_web.py`:
+    - `history_view()` and `PLACE_JS` (`place(needle, start, end)`,
+      `span(first, last)`)
+    - `COMMAND_CASES`, `REFUSED_CASES` and `KEY_CASES`
+    - `load_md()`, `as_markdown()`, `command()` (it returns the exception
+      text when the command throws) and `press()`
+    - `check_editing(app, view, bridge)`
+    - Task 11 appends its table and paste checks after `check_editing`,
+      reusing these helpers.
+
+- [ ] **Step 1: Write the failing page checks**
+
+All edits are in `scripts/check_web.py`.
+
+a. Replace
+
+```python
+from PySide6.QtCore import QEventLoop, QObject, QUrl, Slot  # noqa: E402
+```
+
+with
+
+```python
+from PySide6.QtCore import QEventLoop, QObject, QPoint, Qt, QUrl, Slot  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
+```
+
+and
+
+```python
+from mdviewer.core import docschema, render  # noqa: E402
+```
+
+with
+
+```python
+from mdviewer.core import docmodel, docschema, render, serialize  # noqa: E402
+```
+
+b. The Task 9 checks compare whole `selectionState` payloads, and
+`selectionState.can` is about to gain the formatting commands. Insert
+directly above `def latest_state(`:
+
+```python
+def history_view(state: dict | None) -> dict | None:
+    """`state` with only undo and redo in `can`: the Task 9 checks predate the formatting commands."""
+    if state is None:
+        return None
+    return {**state, "can": {name: state["can"].get(name) for name in ("undo", "redo")}}
+
+
+```
+
+Then, in `check_bridge`:
+
+- replace `    calls = bridge.calls[mark:]` with
+
+  ```python
+      calls = [[name, *(history_view(arg) if name == "selectionState" else arg for arg in args)]
+               for name, *args in bridge.calls[mark:]]
+  ```
+
+- replace `    states = bridge.args("selectionState", mark)` with
+
+  ```python
+      states = [[history_view(state)] for state, in bridge.args("selectionState", mark)]
+  ```
+
+- replace each of the four `state = latest_state(app, bridge)` lines (one in
+  the `expected` loop, three in the undo part) with
+  `state = history_view(latest_state(app, bridge))`, keeping its
+  indentation.
+
+c. Insert the following block directly above `def main() -> int:`, with two
+blank lines before and after it:
+
+```python
+# --- Task 10: formatting commands, keymaps and input rules ------------------------------------
+
+CTRL = Qt.KeyboardModifier.ControlModifier
+SHIFT = Qt.KeyboardModifier.ShiftModifier
+ALT = Qt.KeyboardModifier.AltModifier
+K = Qt.Key
+# place(needle, start, end) selects from `start` to `end` characters into the first text that
+# contains `needle`; span(a, b) selects from the start of `a` to the end of `b`. Both focus the
+# editor. They need select() and window.TextSelection (set by check_bridge).
+PLACE_JS = """(window.findText = (needle) => {
+  let found = null;
+  window.mdEditor.view.state.doc.descendants((node, pos) => {
+    if (found === null && node.isText && node.text.includes(needle)) found = pos + node.text.indexOf(needle);
+    return found === null;
+  });
+  if (found === null) throw new Error('text not found: ' + needle);
+  return found;
+}, window.place = (needle, start = 0, end = start) => {
+  select(findText(needle) + start, findText(needle) + end);
+  window.mdEditor.view.focus();
+}, window.span = (first, last) => {
+  select(findText(first), findText(last) + last.length);
+  window.mdEditor.view.focus();
+}, 0)"""
+
+# (markdown, selection, command name, args, Markdown after the command)
+COMMAND_CASES = [
+    ("a word b\n", "place('word', 0, 4)", "toggleMark", "strong", "a **word** b\n"),
+    ("a **word** b\n", "place('word', 0, 4)", "toggleMark", "strong", "a word b\n"),
+    ("a word\n", "place('word', 0, 4)", "toggleMark", "strike", "a ~~word~~\n"),
+    ("Title\n", "place('Title')", "setBlock", {"type": "heading", "level": 2}, "## Title\n"),
+    ("## Title\n", "place('Title')", "setBlock", {"type": "paragraph"}, "Title\n"),
+    ("a\\\nb\n", "place('a')", "setBlock", {"type": "code_block", "language": "py"}, "```py\na\nb\n```\n"),
+    ("```\na\nb\n```\n", "place('a')", "setBlock", {"type": "paragraph"}, "a\\\nb\n"),
+    ("a\n", "place('a')", "toggleList", "bullet", "- a\n"),
+    ("- a\n", "place('a')", "toggleList", "bullet", "a\n"),
+    ("a\n", "place('a')", "toggleList", "ordered", "1. a\n"),
+    ("a\n", "place('a')", "toggleList", "task", "- [ ] a\n"),
+    ("- [x] a\n- [ ] b\n", "place('a')", "toggleList", "bullet", "- a\n- b\n"),
+    ("3. a\n4. b\n", "place('b')", "toggleList", "task", "- [ ] a\n- [ ] b\n"),
+    ("a\n", "place('a')", "toggleQuote", None, "> a\n"),
+    ("> - a\n", "place('a')", "toggleQuote", None, "- a\n"),
+    ("a\n", "place('a', 1)", "insertCodeBlock", {"language": "py thon"}, "a\n\n```py\n```\n"),
+    ("a\n", "place('a', 1)", "insertTable", {"rows": 2, "cols": 2}, "a\n\n|  |  |\n| --- | --- |\n|  |  |\n"),
+    ("a\n", "place('a', 1)", "insertRule", None, "a\n\n---\n"),
+    ("- a\n", "place('a', 1)", "insertRule", None, "- a\n  ___\n"),
+    ("a b\n", "place('a', 1)", "insertImage",
+     {"src": "pics/x.png", "display_src": "file:///C:/pics/x.png", "alt": "X"}, "a![X](pics/x.png) b\n"),
+    ("a word\n", "place('word', 0, 4)", "setLink", {"text": "word", "href": "https://e.com/"},
+     "a [word](https://e.com/)\n"),
+    ("a **wo**rd\n", "span('wo', 'rd')", "setLink", {"text": "word", "href": "https://e.com/"},
+     "a [**wo**rd](https://e.com/)\n"),
+    ("ab\n", "place('ab', 1)", "setLink", {"text": "site", "href": "https://e.com/"}, "a[site](https://e.com/)b\n"),
+    ("ab\n", "place('ab', 1)", "setLink", {"text": "", "href": "https://e.com/"},
+     "a<https://e.com/>b\n"),
+    ("x [old](https://o.com/ \"T\")\n", "place('old', 1)", "setLink", {"text": "new", "href": "https://n.com/"},
+     "x [new](https://n.com/ \"T\")\n"),
+    ("[old](https://o.com/) x\n", "place('old', 1)", "removeLink", None, "old x\n"),
+    ("## **a** *b* [l](https://l.com/)\n", "span('a', 'l')", "clearFormatting", None, "a b [l](https://l.com/)\n"),
+    ("```py\nx\n```\n", "place('x')", "setCodeLanguage", "rust extra", "```rust\nx\n```\n"),
+]
+# (markdown, selection, command name, args): the command refuses and changes nothing.
+REFUSED_CASES = [
+    ("```\nx\n```\n", "place('x', 0, 1)", "toggleMark", "strong"),
+    ("a\n", "place('a', 0, 1)", "toggleMark", "link"),
+    ("a\n", "place('a')", "setBlock", {"type": "heading", "level": 9}),
+    ("a\n", "place('a')", "toggleList", "numbered"),
+    ("a\n", "place('a')", "insertTable", {"rows": 0, "cols": 3}),
+    ("a\n", "place('a')", "insertTable", {"rows": 51, "cols": 3}),
+    ("a\n", "place('a')", "insertImage", {"src": "javascript:alert(1)", "alt": "x"}),
+    ("a\n", "place('a')", "insertImage", {"src": "x.png", "display_src": "data:text/html,x"}),
+    ("```\nx\n```\n", "place('x')", "insertImage", {"src": "x.png"}),
+    ("a\n", "place('a', 0, 1)", "setLink", {"text": "a", "href": "java\tscript:alert(1)"}),
+    ("```\nx\n```\n", "place('x', 0, 1)", "setLink", {"text": "x", "href": "https://e.com/"}),
+    ("a\n", "place('a')", "removeLink", None),
+    ("a\n", "place('a')", "setCodeLanguage", "py"),
+]
+# (markdown, selection, keys, Markdown after them); a str is typed, a tuple is (key, modifiers).
+KEY_CASES = [
+    ("a word\n", "place('word', 0, 4)", [(K.Key_B, CTRL)], "a **word**\n"),
+    ("a word\n", "place('word', 0, 4)", [(K.Key_I, CTRL)], "a *word*\n"),
+    ("a word\n", "place('word', 0, 4)", [(K.Key_X, CTRL | SHIFT)], "a ~~word~~\n"),
+    ("a word\n", "place('word', 0, 4)", [(K.Key_QuoteLeft, CTRL)], "a `word`\n"),
+    ("word\n", "place('word')", [(K.Key_2, CTRL | ALT)], "## word\n"),
+    ("## word\n", "place('word')", [(K.Key_0, CTRL | ALT)], "word\n"),
+    ("word\n", "place('word')", [(K.Key_Asterisk, CTRL | SHIFT)], "- word\n"),
+    ("word\n", "place('word')", [(K.Key_8, CTRL | SHIFT)], "- word\n"),
+    ("word\n", "place('word')", [(K.Key_Ampersand, CTRL | SHIFT)], "1. word\n"),
+    ("word\n", "place('word')", [(K.Key_ParenLeft, CTRL | SHIFT)], "- [ ] word\n"),
+    ("word\n", "place('word')", [(K.Key_Greater, CTRL | SHIFT)], "> word\n"),
+    ("**a** *b*\n", "span('a', 'b')", [(K.Key_Space, CTRL)], "a b\n"),
+    ("a word\n", "place('word', 0, 4)", [(K.Key_B, CTRL), (K.Key_Z, CTRL)], "a word\n"),
+    ("a word\n", "place('word', 0, 4)", [(K.Key_B, CTRL), (K.Key_Z, CTRL), (K.Key_Y, CTRL)], "a **word**\n"),
+    # Input rules, typed over a selected placeholder paragraph.
+    ("x\n", "place('x', 0, 1)", ["# Title"], "# Title\n"),
+    ("x\n", "place('x', 0, 1)", ["###### T"], "###### T\n"),
+    ("x\n", "place('x', 0, 1)", ["- a"], "- a\n"),
+    ("x\n", "place('x', 0, 1)", ["* a"], "- a\n"),
+    ("x\n", "place('x', 0, 1)", ["3. a"], "3. a\n"),
+    ("x\n", "place('x', 0, 1)", ["> a"], "> a\n"),
+    ("x\n", "place('x', 0, 1)", ["- [ ] a"], "- [ ] a\n"),
+    ("x\n", "place('x', 0, 1)", ["- [x] a"], "- [x] a\n"),
+    ("x\n", "place('x', 0, 1)", ["a **b** c"], "a **b** c\n"),
+    ("x\n", "place('x', 0, 1)", ["a *i* c"], "a *i* c\n"),
+    ("x\n", "place('x', 0, 1)", ["a `c` d"], "a `c` d\n"),
+    ("x\n", "place('x', 0, 1)", ["a ~~s~~ d"], "a ~~s~~ d\n"),
+    ("x\n", "place('x', 0, 1)", ["2*3*4"], "2\\*3\\*4\n"),
+    ("x\n", "place('x', 0, 1)", ["```py", (K.Key_Return, None), "x"], "```py\nx\n```\n"),
+    ("x\n", "place('x', 0, 1)", ["---", (K.Key_Return, None), "x"], "---\n\nx\n"),
+    ("x\n", "place('x', 0, 1)", ["# ", (K.Key_Backspace, None)], "\\#\n"),
+    ("```\nx\n```\n", "place('x', 0, 1)", ["**b**"], "```\n**b**\n```\n"),
+    # Lists.
+    ("- a\n", "place('a', 1)", [(K.Key_Return, None), (K.Key_Tab, None), "b"], "- a\n  - b\n"),
+    ("- a\n  - b\n", "place('b', 1)", [(K.Key_Tab, SHIFT)], "- a\n- b\n"),
+    ("- a\n", "place('a', 1)", [(K.Key_Return, None), (K.Key_Return, None), "b"], "- a\n\nb\n"),
+    ("- [x] a\n", "place('a', 1)", [(K.Key_Return, None), "b"], "- [x] a\n- [ ] b\n"),
+    # Code blocks.
+    ("```\nx\n```\n", "place('x')", [(K.Key_Tab, None)], "```\n    x\n```\n"),
+    ("```\nx\n```\n", "place('x')", [(K.Key_Tab, SHIFT), "y"], "```\nyx\n```\n"),
+    ("```\nx\n```\n", "place('x', 1)", [(K.Key_Return, None), "y"], "```\nx\ny\n```\n"),
+    ("```\nx\n```\n", "place('x', 1)", [(K.Key_Return, CTRL), "y"], "```\nx\n```\n\ny\n"),
+    ("```\nx\n```\n", "place('x', 1)", [(K.Key_Down, None), "y"], "```\nx\n```\n\ny\n"),
+    ("```\nx\n```\n", "place('x')", [(K.Key_Up, None), "y"], "y\n\n```\nx\n```\n"),
+    # With a block after it, ArrowDown just moves there (to the end of "b": the code's padding).
+    ("a\n\n```\nx\n```\n\nb\n", "place('x')", [(K.Key_Down, None), "y"], "a\n\n```\nx\n```\n\nby\n"),
+    # Tab outside lists and code keeps the focus in the editor; the gap cursor passes a final rule.
+    ("a\n", "place('a', 1)", [(K.Key_Tab, None), "b"], "ab\n"),
+    ("a\n", "place('a', 1)", [(K.Key_Tab, SHIFT), "b"], "ab\n"),
+    ("a\n\n---\n", "place('a', 1)", [(K.Key_Right, None), (K.Key_Right, None), "z"], "a\n\n---\n\nz\n"),
+]
+
+
+def load_md(app: QApplication, view: QWebEngineView, markdown: str) -> None:
+    set_doc(app, view, docmodel.from_markdown(markdown))
+
+
+def as_markdown(app: QApplication, view: QWebEngineView) -> str:
+    return serialize.to_markdown(get_doc(app, view))
+
+
+def command(app: QApplication, view: QWebEngineView, name: str, args=None):
+    """mdEditor.command's result, or the text of the exception it threw."""
+    return run_js(app, view, f"""(() => {{
+      try {{ return window.mdEditor.command({json.dumps(name)}, {json.dumps(args)}); }}
+      catch (error) {{ return String(error); }}
+    }})()""")
+
+
+def press(app: QApplication, view: QWebEngineView, strokes: list) -> None:
+    for stroke in strokes:
+        if isinstance(stroke, str):
+            QTest.keyClicks(view.focusProxy(), stroke)
+        else:
+            key, modifiers = stroke
+            QTest.keyClick(view.focusProxy(), key, modifiers or Qt.KeyboardModifier.NoModifier)
+    pump(app, lambda: False, 0.2)
+
+
+def check_editing(app: QApplication, view: QWebEngineView, bridge: Bridge) -> None:
+    run_js(app, view, PLACE_JS)
+    for markdown, selection, name, args, expected in COMMAND_CASES:
+        load_md(app, view, markdown)
+        run_js(app, view, f"({selection}, 0)")
+        done = command(app, view, name, args)
+        result = as_markdown(app, view)
+        check(done is True and result == expected,
+              f"command {name}({args!r}) on {markdown!r}: {result!r} (returned {done!r})")
+    for markdown, selection, name, args in REFUSED_CASES:
+        load_md(app, view, markdown)
+        run_js(app, view, f"({selection}, 0)")
+        before = get_doc(app, view)
+        done = command(app, view, name, args)
+        check(done is False and get_doc(app, view) == before, f"command {name}({args!r}) refused on {markdown!r}")
+
+    # The caret goes into an inserted code block or table.
+    load_md(app, view, "a\n")
+    run_js(app, view, "(place('a', 1), 0)")
+    command(app, view, "insertTable", {"rows": 3, "cols": 3})
+    check((latest_state(app, bridge) or {}).get("block") == {"type": "table_header"},
+          "insertTable puts the caret in the first header cell")
+    command(app, view, "insertCodeBlock", None)
+    check((latest_state(app, bridge) or {}).get("block") == {"type": "code_block"},
+          "insertCodeBlock puts the caret in the new code block")
+    load_md(app, view, "a\n")
+    run_js(app, view, "(place('a', 1), 0)")
+    command(app, view, "insertRule")
+    pump(app, lambda: False, 0.2)
+    types = [node["type"] for node in get_doc(app, view)["content"]]
+    check(types == ["paragraph", "horizontal_rule", "paragraph"] and bridge.args("caretBlock")[-1] == [2],
+          f"a rule inserted at the end gets a paragraph after it for the caret ({types})")
+
+    # selectionState.can follows the selection.
+    load_md(app, view, "a\n\n```\nx\n```\n\n| h |\n| --- |\n| c |\n")
+    expected_can = {
+        "place('a')": {"toggleMark": True, "setBlock": True, "setLink": True, "insertImage": True,
+                       "setCodeLanguage": False, "removeLink": False, "insertTable": True},
+        "place('x')": {"toggleMark": False, "setBlock": True, "setLink": False, "insertImage": False,
+                       "setCodeLanguage": True, "linkDialog": False, "imageDialog": False},
+        "place('h')": {"toggleMark": True, "setBlock": False, "setLink": True, "insertImage": True,
+                       "setCodeLanguage": False, "toggleList": False, "toggleQuote": False},
+    }
+    for selection, wanted in expected_can.items():
+        run_js(app, view, f"({selection}, 0)")
+        can = (latest_state(app, bridge) or {}).get("can", {})
+        check({name: can.get(name) for name in wanted} == wanted, f"selectionState.can after {selection} ({can})")
+
+    # Link and image dialogs are requested from Python; refused where they do not apply.
+    load_md(app, view, "[old](https://o.com/) a word\n\n```\nx\n```\n")
+    mark = len(bridge.calls)
+    for selection in ("place('old', 1)", "place('word', 0, 4)"):
+        run_js(app, view, f"({selection}, 0)")
+        check(command(app, view, "linkDialog") is True, f"linkDialog applies after {selection}")
+    run_js(app, view, "(place('x'), 0)")
+    check(command(app, view, "linkDialog") is False and command(app, view, "imageDialog") is False,
+          "no link or image dialog inside a code block")
+    run_js(app, view, "(place('a', 0), 0)")
+    check(command(app, view, "imageDialog") is True, "imageDialog applies in a paragraph")
+    run_js(app, view, "(place('old', 1), 0)")
+    press(app, view, [(K.Key_K, CTRL)])
+    pump(app, lambda: len(bridge.args("requestLinkDialog", mark)) >= 3, 3)
+    dialogs = [call for call in bridge.calls[mark:] if call[0] in ("requestLinkDialog", "requestImageDialog")]
+    check(dialogs == [["requestLinkDialog", "old", "https://o.com/"], ["requestLinkDialog", "word", ""],
+                      ["requestImageDialog"], ["requestLinkDialog", "old", "https://o.com/"]],
+          f"dialog requests carry the link text and href ({dialogs})")
+
+    # Keys and input rules, typed for real.
+    for markdown, selection, strokes, expected in KEY_CASES:
+        load_md(app, view, markdown)
+        run_js(app, view, f"({selection}, 0)")
+        press(app, view, strokes)
+        result = as_markdown(app, view)
+        check(result == expected, f"keys {strokes!r} on {markdown!r}: {result!r}")
+
+    # Task checkboxes: a real mouse click toggles the item, leaves the caret, reports a change.
+    load_md(app, view, "- [ ] a\n")
+    run_js(app, view, "(place('a', 1), 0)")
+    mark = len(bridge.calls)
+    box = run_js(app, view, """(() => {
+      const box = document.querySelector('#editor input.task-list-item-checkbox').getBoundingClientRect();
+      return [Math.round(box.left + box.width / 2), Math.round(box.top + box.height / 2)];
+    })()""")
+    caret = "window.mdEditor.view.state.selection.from"
+    before = run_js(app, view, caret)
+    for expected in ("- [x] a\n", "- [ ] a\n"):
+        QTest.mouseClick(view.focusProxy(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(*box))
+        pump(app, lambda: False, 0.3)
+        result = as_markdown(app, view)
+        check(result == expected and run_js(app, view, caret) == before,
+              f"clicking a task checkbox toggles the item and leaves the caret ({result!r})")
+    pump(app, lambda: bridge.args("changed", mark), 3)
+    check(bridge.args("changed", mark) == [[]], "toggling a task checkbox reports a change")
+```
+
+d. In `main()`, directly after `    check_bridge(app, view, page, bridge)` add
+
+```python
+    check_editing(app, view, bridge)
+```
+
+- [ ] **Step 2: Run the page check to verify it fails**
+
+Run: `.venv/Scripts/python scripts/check_web.py`
+Expected: exit code 1 with 80 failure labels. The first is
+`command toggleMark('strong') on 'a word b\n': 'a word b\n' (returned False)`,
+and every command and key case fails, because the Task 9 bundle knows only
+`undo` and `redo`. The Task 8 and Task 9 labels must not appear.
+
+- [ ] **Step 3: Write the commands**
+
+Create `web-src/src/commands.js`:
+
+```js
+// Formatting commands of the Rendered editor, run by toolbar buttons, menus and keys.
+// Each entry is { run(state, dispatch, view, args) -> boolean, can(state) -> boolean };
+// editor.js merges them into COMMANDS (mdEditor.command), and `can` is reported in
+// selectionState.can. run(state) without dispatch only answers "would it apply".
+import { setBlockType, toggleMark, wrapIn } from "prosemirror-commands";
+import { liftListItem, wrapInList } from "prosemirror-schema-list";
+import { Selection, TextSelection } from "prosemirror-state";
+import { liftTarget } from "prosemirror-transform";
+import { send } from "./bridge.js";
+import { cleanLanguage, isSafeUrl, schema } from "./schema.js";
+
+const { nodes, marks } = schema;
+// Marks the toolbar toggles; links have their own commands.
+const TOGGLED_MARKS = ["strong", "em", "strike", "code"];
+const LIST_TYPES = { bullet: nodes.bullet_list, ordered: nodes.ordered_list, task: nodes.bullet_list };
+const MAX_TABLE_SIZE = 50;
+
+const isList = (node) => node.type === nodes.bullet_list || node.type === nodes.ordered_list;
+
+// `attrs` limited to the attrs `type` declares (the others default): a node refuses unknown attrs.
+function ownAttrs(type, attrs) {
+  return Object.fromEntries(Object.entries(type.spec.attrs).map(([name, spec]) => [name, name in attrs ? attrs[name] : spec.default]));
+}
+
+// "bullet", "ordered" or "task": task items carry a checkbox in either list type.
+function listKind(list, item) {
+  if (item.attrs.checked !== null) return "task";
+  return list.type === nodes.ordered_list ? "ordered" : "bullet";
+}
+
+// True when both ends of the selection sit in inline content that allows `type`.
+function marksAllowed(state, type) {
+  const { $from, $to } = state.selection;
+  return [$from, $to].every(($pos) => $pos.parent.inlineContent && $pos.parent.type.allowsMarkType(type));
+}
+
+// The code block holding the selection start: { node, pos } or null.
+function codeBlockAt(state) {
+  const { $from } = state.selection;
+  for (let depth = $from.depth; depth > 0; depth--) {
+    if ($from.node(depth).type === nodes.code_block) return { node: $from.node(depth), pos: $from.before(depth) };
+  }
+  return null;
+}
+
+// The whole link next to `$pos` (the text after it first, then the text before it):
+// { from, to, mark } or null.
+function linkAround($pos) {
+  const parent = $pos.parent;
+  const candidates = $pos.textOffset ? [$pos.index()] : [$pos.index(), $pos.index() - 1];
+  for (const index of candidates) {
+    const child = index >= 0 && index < parent.childCount ? parent.child(index) : null;
+    const mark = child ? marks.link.isInSet(child.marks) : null;
+    if (!mark) continue;
+    let first = index;
+    let last = index;
+    while (first > 0 && mark.isInSet(parent.child(first - 1).marks)) first--;
+    while (last + 1 < parent.childCount && mark.isInSet(parent.child(last + 1).marks)) last++;
+    let from = $pos.start();
+    for (let i = 0; i < first; i++) from += parent.child(i).nodeSize;
+    let to = from;
+    for (let i = first; i <= last; i++) to += parent.child(i).nodeSize;
+    return { from, to, mark };
+  }
+  return null;
+}
+
+// What a link command acts on: the selection, else the link around the caret, else the caret.
+function linkTarget(state) {
+  const { from, to, empty, $from } = state.selection;
+  if (!empty) {
+    const around = linkAround($from);
+    const mark = around && around.from <= from && around.to >= to ? around.mark : null;
+    return { from, to, mark };
+  }
+  return linkAround($from) ?? { from, to, mark: null };
+}
+
+// Inserts block `node` after the textblock (or selected block) at the selection, at the
+// first level up that allows it; an empty paragraph is replaced instead. The caret goes
+// into the new block (its first cell for a table) or, for an atom, to the next textblock:
+// `trailingParagraph` adds an empty paragraph when nothing follows the new block.
+function insertBlock(state, dispatch, node, trailingParagraph = false) {
+  const { $from, $to, empty } = state.selection;
+  const tr = state.tr;
+  let pos = null;
+  if (empty && $from.parent.type === nodes.paragraph && $from.parent.content.size === 0
+      && $from.node(-1).canReplaceWith($from.index(-1), $from.index(-1) + 1, node.type)) {
+    pos = $from.before();
+    tr.replaceWith(pos, $from.after(), node);
+  } else {
+    for (let depth = $to.depth; depth >= 0 && pos === null; depth--) {
+      const index = $to.indexAfter(depth);
+      if ($to.node(depth).canReplaceWith(index, index, node.type)) {
+        pos = depth === $to.depth ? $to.pos : $to.after(depth + 1);
+      }
+    }
+    if (pos === null) return false;
+    tr.insert(pos, node);
+  }
+  if (!dispatch) return true;
+  const end = pos + node.nodeSize;
+  if (trailingParagraph && !tr.doc.resolve(end).nodeAfter) tr.insert(end, nodes.paragraph.create());
+  tr.setSelection(Selection.near(tr.doc.resolve(pos + 1)));
+  dispatch(tr.scrollIntoView());
+  return true;
+}
+
+function blockType(args) {
+  const type = args?.type;
+  if (type === "paragraph") return [nodes.paragraph, null];
+  if (type === "code_block") return [nodes.code_block, { language: cleanLanguage(args.language ?? "") }];
+  if (type === "heading" && Number.isInteger(args.level) && args.level >= 1 && args.level <= 6) {
+    return [nodes.heading, { level: args.level }];
+  }
+  return null;
+}
+
+function toggleList(state, dispatch, kind) {
+  const type = LIST_TYPES[kind];
+  if (!type) return false;
+  const { $from, $to } = state.selection;
+  const range = $from.blockRange($to, isList);
+  if (range) {
+    const list = range.parent;
+    if (listKind(list, list.child(range.startIndex)) === kind) return liftListItem(nodes.list_item)(state, dispatch);
+    // Another kind of list: change the list in place (type, then every item's checkbox).
+    if (dispatch) {
+      const listPos = range.$from.before(range.depth);
+      const tr = state.tr.setNodeMarkup(listPos, type, ownAttrs(type, list.attrs));
+      let pos = listPos + 1;
+      list.forEach((item) => {
+        const checked = kind === "task" ? item.attrs.checked ?? false : null;
+        tr.setNodeMarkup(pos, null, { ...item.attrs, checked });
+        pos += item.nodeSize;
+      });
+      dispatch(tr.scrollIntoView());
+    }
+    return true;
+  }
+  return wrapInList(type)(state, dispatch && ((tr) => {
+    if (kind === "task") {
+      const wrapped = tr.selection.$from.blockRange(tr.selection.$to, isList);
+      if (wrapped) {
+        for (let i = wrapped.startIndex; i < wrapped.endIndex; i++) {
+          const pos = tr.doc.resolve(wrapped.start).posAtIndex(i);
+          tr.setNodeMarkup(pos, null, { ...tr.doc.nodeAt(pos).attrs, checked: false });
+        }
+      }
+    }
+    dispatch(tr);
+  }));
+}
+
+function toggleQuote(state, dispatch) {
+  const { $from, $to } = state.selection;
+  const range = $from.blockRange($to, (node) => node.type === nodes.blockquote);
+  if (!range) return wrapIn(nodes.blockquote)(state, dispatch);
+  // Lift the selected blocks out of the blockquote that holds them.
+  const target = liftTarget(range);
+  if (target === null) return false;
+  if (dispatch) dispatch(state.tr.lift(range, target).scrollIntoView());
+  return true;
+}
+
+function setLink(state, dispatch, args) {
+  const href = String(args?.href ?? "").trim();
+  if (!href || !isSafeUrl(href) || !marksAllowed(state, marks.link)) return false;
+  if (!dispatch) return true;
+  const target = linkTarget(state);
+  const link = marks.link.create({ href, title: args.title ?? target.mark?.attrs.title ?? null });
+  const current = state.doc.textBetween(target.from, target.to);
+  const text = String(args.text ?? "") || current || href;
+  const tr = state.tr;
+  const $start = state.doc.resolve(target.from);
+  if (text === current || !$start.sameParent(state.doc.resolve(target.to))) {
+    tr.addMark(target.from, target.to, link);
+  } else {
+    // New text: it takes the marks of the text it replaces, plus the link.
+    const old = target.from < target.to ? state.doc.nodeAt(target.from)?.marks ?? [] : $start.marks();
+    tr.replaceWith(target.from, target.to, schema.text(text, link.addToSet(marks.link.removeFromSet(old))));
+    tr.setSelection(TextSelection.create(tr.doc, target.from + text.length));
+  }
+  dispatch(tr.scrollIntoView());
+  return true;
+}
+
+function removeLink(state, dispatch) {
+  const { empty, from, to, $from } = state.selection;
+  const target = empty ? linkAround($from) : { from, to };
+  if (!target || !state.doc.rangeHasMark(target.from, target.to, marks.link)) return false;
+  if (dispatch) dispatch(state.tr.removeMark(target.from, target.to, marks.link).scrollIntoView());
+  return true;
+}
+
+// Removes bold, italic, strikethrough and code (links stay: they are content) and turns
+// the textblocks in the selection into paragraphs.
+function clearFormatting(state, dispatch) {
+  const { from, to, empty, $from } = state.selection;
+  if (empty && !$from.parent.isTextblock) return false;
+  if (dispatch) {
+    const tr = state.tr;
+    if (empty) tr.setStoredMarks([]);
+    else for (const name of TOGGLED_MARKS) tr.removeMark(from, to, marks[name]);
+    tr.setBlockType(from, to, nodes.paragraph);
+    dispatch(tr.scrollIntoView());
+  }
+  return true;
+}
+
+function command(run) {
+  return { run, can: (state) => run(state, null, null, undefined) };
+}
+
+export const FORMATTING_COMMANDS = {
+  // args: "strong" | "em" | "strike" | "code"; can: any of them applies here.
+  toggleMark: {
+    run: (state, dispatch, view, name) => TOGGLED_MARKS.includes(name) && toggleMark(marks[name])(state, dispatch),
+    can: (state) => marksAllowed(state, marks.strong),
+  },
+  // args: {type: "paragraph"} | {type: "heading", level: 1-6} | {type: "code_block", language?}
+  setBlock: {
+    run: (state, dispatch, view, args) => {
+      const target = blockType(args);
+      return Boolean(target) && setBlockType(...target)(state, dispatch);
+    },
+    can: (state) => [nodes.paragraph, nodes.heading, nodes.code_block]
+      .some((type) => setBlockType(type, type === nodes.heading ? { level: 1 } : null)(state)),
+  },
+  // args: "bullet" | "ordered" | "task"
+  toggleList: {
+    run: (state, dispatch, view, kind) => toggleList(state, dispatch, kind),
+    can: (state) => ["bullet", "ordered"].some((kind) => toggleList(state, null, kind)),
+  },
+  toggleQuote: command((state, dispatch) => toggleQuote(state, dispatch)),
+  // args: {language?}
+  insertCodeBlock: command((state, dispatch, view, args) => insertBlock(
+    state, dispatch, nodes.code_block.create({ language: cleanLanguage(args?.language ?? "") }),
+  )),
+  // args: {rows, cols}: rows includes the header row
+  insertTable: {
+    run: (state, dispatch, view, args) => {
+      const { rows, cols } = args ?? {};
+      const ok = (n) => Number.isInteger(n) && n >= 1 && n <= MAX_TABLE_SIZE;
+      if (!ok(rows) || !ok(cols)) return false;
+      const row = (cell) => nodes.table_row.create(null, Array.from({ length: cols }, () => cell.create()));
+      const table = nodes.table.create(null, [
+        row(nodes.table_header), ...Array.from({ length: rows - 1 }, () => row(nodes.table_cell)),
+      ]);
+      return insertBlock(state, dispatch, table);
+    },
+    can: (state) => insertBlock(state, null, nodes.table.createAndFill()),
+  },
+  // args: {src, display_src?, alt?, title?}: src as written in Markdown, display_src resolved by Python
+  insertImage: {
+    run: (state, dispatch, view, args) => {
+      const src = String(args?.src ?? "");
+      const displaySrc = String(args?.display_src ?? src);
+      if (!src || !isSafeUrl(src) || !isSafeUrl(displaySrc) || !canInsertImage(state)) return false;
+      const image = nodes.image.create({ src, display_src: displaySrc, alt: args.alt ?? "", title: args.title ?? null });
+      if (dispatch) dispatch(state.tr.replaceSelectionWith(image).scrollIntoView());
+      return true;
+    },
+    can: (state) => canInsertImage(state),
+  },
+  insertRule: command((state, dispatch) => insertBlock(state, dispatch, nodes.horizontal_rule.create(), true)),
+  // args: {href, text?, title?}: text "" keeps the current text
+  setLink: {
+    run: (state, dispatch, view, args) => setLink(state, dispatch, args),
+    can: (state) => marksAllowed(state, marks.link),
+  },
+  removeLink: command((state, dispatch) => removeLink(state, dispatch)),
+  // Asks Python for the link dialog (Ctrl+K, toolbar); Python answers with setLink or removeLink.
+  linkDialog: command((state, dispatch) => {
+    if (!marksAllowed(state, marks.link)) return false;
+    if (dispatch) {
+      const target = linkTarget(state);
+      send("requestLinkDialog", state.doc.textBetween(target.from, target.to, " "), target.mark?.attrs.href ?? "");
+    }
+    return true;
+  }),
+  // Asks Python for the image dialog; Python answers with insertImage.
+  imageDialog: command((state, dispatch) => {
+    if (!canInsertImage(state)) return false;
+    if (dispatch) send("requestImageDialog");
+    return true;
+  }),
+  clearFormatting: command((state, dispatch) => clearFormatting(state, dispatch)),
+  // args: language string; the highlight belongs to the old language and is dropped
+  setCodeLanguage: {
+    run: (state, dispatch, view, language) => {
+      const block = codeBlockAt(state);
+      if (!block) return false;
+      const attrs = { ...block.node.attrs, language: cleanLanguage(language ?? ""), highlight: "" };
+      if (dispatch) dispatch(state.tr.setNodeMarkup(block.pos, null, attrs));
+      return true;
+    },
+    can: (state) => codeBlockAt(state) !== null,
+  },
+};
+
+function canInsertImage(state) {
+  const { $from } = state.selection;
+  return $from.parent.inlineContent && $from.parent.canReplaceWith($from.index(), $from.index(), nodes.image);
+}
+```
+
+- [ ] **Step 4: Write the keymaps, input rules and checkbox handling**
+
+Create `web-src/src/input.js`:
+
+```js
+// Keyboard and mouse input of the Rendered editor: shortcuts (spec section 3), Markdown
+// input rules, lists, code blocks and task checkboxes (section 4).
+import { baseKeymap, chainCommands } from "prosemirror-commands";
+import { dropCursor } from "prosemirror-dropcursor";
+import { gapCursor } from "prosemirror-gapcursor";
+import { redo, undo } from "prosemirror-history";
+import { InputRule, inputRules, textblockTypeInputRule, undoInputRule, wrappingInputRule } from "prosemirror-inputrules";
+import { keymap } from "prosemirror-keymap";
+import { liftListItem, sinkListItem, splitListItem } from "prosemirror-schema-list";
+import { Plugin, TextSelection } from "prosemirror-state";
+import { FORMATTING_COMMANDS } from "./commands.js";
+import { cleanLanguage, schema } from "./schema.js";
+
+const { nodes, marks } = schema;
+const CODE_INDENT = "    ";
+
+const bind = (name, args) => (state, dispatch, view) => FORMATTING_COMMANDS[name].run(state, dispatch, view, args);
+const inCode = (state) => Boolean(state.selection.$from.parent.type.spec.code);
+
+// `**text**`, `*text*`, `~~text~~`, `` `text` `` typed inline: the markers become the mark.
+function markRule(regexp, type) {
+  return new InputRule(regexp, (state, match, start, end) => {
+    const $start = state.doc.resolve(start);
+    if (!$start.parent.type.allowsMarkType(type)) return null;
+    return state.tr
+      .replaceWith(start, end, schema.text(match[1], type.create().addToSet($start.marks())))
+      .removeStoredMark(type);
+  }, { inCodeMark: false });
+}
+
+// `[ ] ` or `[x] ` at the start of a list item's first paragraph makes it a task item.
+const taskRule = new InputRule(/^\[([ xX])\]\s$/, (state, match, start, end) => {
+  const $start = state.doc.resolve(start);
+  const item = $start.node(-1);
+  if (item?.type !== nodes.list_item || $start.index(-1) !== 0 || item.attrs.checked !== null) return null;
+  return state.tr.delete(start, end).setNodeMarkup($start.before(-1), null, { ...item.attrs, checked: match[1] !== " " });
+});
+
+const rules = inputRules({
+  rules: [
+    textblockTypeInputRule(/^(#{1,6})\s$/, nodes.heading, (match) => ({ level: match[1].length })),
+    wrappingInputRule(/^\s*[-*]\s$/, nodes.bullet_list),
+    wrappingInputRule(
+      /^(\d{1,9})\.\s$/, nodes.ordered_list, (match) => ({ start: Number(match[1]) }),
+      (match, node) => node.childCount + node.attrs.start === Number(match[1]),
+    ),
+    wrappingInputRule(/^\s*>\s$/, nodes.blockquote),
+    taskRule,
+    markRule(/(?<![*\w])\*\*([^*\s](?:[^*]*[^*\s])?)\*\*$/, marks.strong),
+    markRule(/(?<![*\w])\*([^*\s](?:[^*]*[^*\s])?)\*$/, marks.em),
+    markRule(/(?<!~)~~([^~\s](?:[^~]*[^~\s])?)~~$/, marks.strike),
+    markRule(/(?<!`)`([^`]+)`$/, marks.code),
+  ],
+});
+
+// Enter at the end of a paragraph holding only ``` + optional language makes a code block;
+// one holding only --- makes a horizontal rule followed by a new paragraph.
+function fenceOrRule(state, dispatch) {
+  const { $from, empty } = state.selection;
+  const block = $from.parent;
+  if (!empty || block.type !== nodes.paragraph || block.childCount !== 1 || !block.firstChild.isText
+      || $from.parentOffset !== block.content.size) return false;
+  const fence = /^```([^\s`]*)$/.exec(block.textContent);
+  const replacement = fence
+    ? [nodes.code_block.create({ language: cleanLanguage(fence[1]) })]
+    : block.textContent === "---" ? [nodes.horizontal_rule.create(), nodes.paragraph.create()] : null;
+  if (!replacement) return false;
+  const index = $from.index(-1);
+  if (!replacement.every((node) => $from.node(-1).canReplaceWith(index, index + 1, node.type))) return false;
+  if (dispatch) {
+    const start = $from.before();
+    const tr = state.tr.replaceWith(start, $from.after(), replacement);
+    const caret = start + (fence ? 1 : replacement[0].nodeSize + 1);
+    dispatch(tr.setSelection(TextSelection.create(tr.doc, caret)).scrollIntoView());
+  }
+  return true;
+}
+
+// A new item after a task item is an unchecked task item.
+function splitItem(state, dispatch) {
+  const { $from } = state.selection;
+  const item = $from.depth >= 2 ? $from.node(-1) : null;
+  const attrs = item?.type === nodes.list_item && item.attrs.checked !== null ? { checked: false } : undefined;
+  return splitListItem(nodes.list_item, attrs)(state, dispatch);
+}
+
+function codeTab(state, dispatch) {
+  if (!inCode(state)) return false;
+  if (dispatch) dispatch(state.tr.insertText(CODE_INDENT).scrollIntoView());
+  return true;
+}
+
+// Arrow keys leave a code block that has no block after (or before) it in its parent:
+// a new paragraph is added there.
+function leaveCode(dir) {
+  const after = dir === "down" || dir === "right";
+  return (state, dispatch, view) => {
+    const { $head, empty } = state.selection;
+    if (!empty || !$head.parent.type.spec.code || !view?.endOfTextblock(dir)) return false;
+    const parent = $head.node(-1);
+    const index = $head.index(-1);
+    if (after ? index < parent.childCount - 1 : index > 0) return false;
+    const at = after ? index + 1 : index;
+    if (!parent.canReplaceWith(at, at, nodes.paragraph)) return false;
+    if (dispatch) {
+      const pos = after ? $head.after() : $head.before();
+      const tr = state.tr.insert(pos, nodes.paragraph.create());
+      dispatch(tr.setSelection(TextSelection.create(tr.doc, pos + 1)).scrollIntoView());
+    }
+    return true;
+  };
+}
+
+const consume = () => true; // Tab never moves the focus out of the editor
+
+const keys = {
+  "Mod-z": undo,
+  "Mod-y": redo,
+  "Mod-Shift-z": redo,
+  "Backspace": undoInputRule,
+  "Mod-b": bind("toggleMark", "strong"),
+  "Mod-i": bind("toggleMark", "em"),
+  "Mod-Shift-x": bind("toggleMark", "strike"),
+  "Mod-`": bind("toggleMark", "code"),
+  "Mod-k": bind("linkDialog"),
+  "Mod-Shift-8": bind("toggleList", "bullet"),
+  "Mod-Shift-7": bind("toggleList", "ordered"),
+  "Mod-Shift-9": bind("toggleList", "task"),
+  "Mod-Shift-.": bind("toggleQuote"),
+  "Mod-Space": bind("clearFormatting"),
+  "Mod-Alt-0": bind("setBlock", { type: "paragraph" }),
+  "Enter": chainCommands(fenceOrRule, splitItem),
+  "Tab": chainCommands(codeTab, sinkListItem(nodes.list_item), consume),
+  "Shift-Tab": chainCommands((state) => inCode(state), liftListItem(nodes.list_item), consume),
+  "ArrowDown": leaveCode("down"),
+  "ArrowRight": leaveCode("right"),
+  "ArrowUp": leaveCode("up"),
+  "ArrowLeft": leaveCode("left"),
+};
+for (let level = 1; level <= 6; level++) keys[`Mod-Alt-${level}`] = bind("setBlock", { type: "heading", level });
+
+function isTaskBox(view, target) {
+  return target instanceof HTMLInputElement && target.classList.contains("task-list-item-checkbox")
+    && view.dom.contains(target);
+}
+
+// Clicking a task checkbox toggles the item (an edit: undoable, marks the document dirty).
+const taskBoxPlugin = new Plugin({
+  props: {
+    handleDOMEvents: {
+      click(view, event) {
+        if (!isTaskBox(view, event.target)) return false;
+        const $pos = view.state.doc.resolve(view.posAtDOM(event.target.nextElementSibling, 0));
+        for (let depth = $pos.depth; depth > 0; depth--) {
+          const item = $pos.node(depth);
+          if (item.type !== nodes.list_item) continue;
+          if (item.attrs.checked !== null) {
+            view.dispatch(view.state.tr.setNodeMarkup($pos.before(depth), null, { ...item.attrs, checked: !item.attrs.checked }));
+          }
+          break;
+        }
+        return true;
+      },
+    },
+  },
+});
+
+// Order matters: our keys run before ProseMirror's base keymap (Enter, Backspace, ...).
+export function inputPlugins() {
+  return [rules, keymap(keys), keymap(baseKeymap), taskBoxPlugin, gapCursor(), dropCursor({ color: "var(--fg)" })];
+}
+```
+
+- [ ] **Step 5: Wire them into the editor**
+
+In `web-src/src/editor.js`, replace
+
+```js
+// Rendered editor bundle: EditorView, document lifecycle and window.mdEditor, the API
+// Python calls through runJavaScript. Calls to Python go through bridge.js.
+import "prosemirror-view/style/prosemirror.css";
+import "./editor.css";
+```
+
+with
+
+```js
+// Rendered editor bundle: EditorView, document lifecycle and window.mdEditor, the API
+// Python calls through runJavaScript. Calls to Python go through bridge.js; commands.js
+// and input.js hold the formatting commands, shortcuts and input rules.
+import "prosemirror-view/style/prosemirror.css";
+import "prosemirror-gapcursor/style/gapcursor.css";
+import "./editor.css";
+```
+
+Directly after `import { connectBridge, send } from "./bridge.js";` add
+
+```js
+import { FORMATTING_COMMANDS } from "./commands.js";
+import { inputPlugins } from "./input.js";
+```
+
+In `COMMANDS`, directly after the `redo:` line add
+
+```js
+  ...FORMATTING_COMMANDS,
+```
+
+and replace
+
+```js
+const plugins = [history(), linkPlugin, ...displayPlugins(callbacks)];
+```
+
+with
+
+```js
+const plugins = [history(), ...inputPlugins(), linkPlugin, ...displayPlugins(callbacks)];
+```
+
+In `web-src/src/schema.js`, in the `hard_break` spec, directly after
+`    selectable: false,` add
+
+```js
+    // Turning a paragraph into a code block makes its hard breaks newlines, and back.
+    linebreakReplacement: true,
+```
+
+In `web-src/src/editor.css`, directly above
+`/* Images: a missing file shows its alt text in a dashed box. */` add
+
+```css
+/* Gap cursor (beside a table, rule or protected block): in the theme's text color. */
+.ProseMirror-gapcursor:after { border-top-color: var(--fg); }
+
+```
+
+In this plan's File Map, replace the row
+
+```
+| `web-src/src/editor.js` | new | EditorView, commands, keymaps, input rules, tables, paste | 9, 10, 11 |
+```
+
+with
+
+```
+| `web-src/src/editor.js` | new | EditorView, document lifecycle, `window.mdEditor`, tables, paste | 9, 10, 11 |
+| `web-src/src/commands.js` | new | formatting commands (`FORMATTING_COMMANDS`) | 10 |
+| `web-src/src/input.js` | new | keymaps, input rules, list/code keys, task checkbox, gap and drop cursor | 10 |
+```
+
+- [ ] **Step 6: Rebuild the bundle**
+
+Run: `.venv/Scripts/python scripts/build_web.py`
+Expected: exit code 0. esbuild reports `editor.js` at about 255 KB and
+`editor.css` at about 2.8 KB, and the output ends with
+`THIRD_PARTY.txt: 15 packages`. That is Task 9's 10 plus
+`prosemirror-commands`, `-dropcursor`, `-gapcursor`, `-inputrules` and
+`-schema-list`.
+
+- [ ] **Step 7: Run the page check to verify it passes**
+
+Run: `.venv/Scripts/python scripts/check_web.py`
+Expected: `WEB OK`, exit code 0 (plus the 6 expected GLES lines on stderr).
+
+If a key case fails only on a machine with a non-US keyboard layout, the
+fix is not in the keymap: `QTest` sends the Qt key given in the case. First
+check that `view.focusProxy()` has the focus. Do **not** loosen the
+expected Markdown of a case to make it pass. Each one was checked against
+the spec rule it names.
+
+- [ ] **Step 8: Run the full verification**
+
+Run:
+
+```bash
+.venv/Scripts/python -m pytest -v
+.venv/Scripts/python scripts/smoke_ui.py
+.venv/Scripts/python scripts/check_web.py
+rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests
+sha256sum mdviewer/web/* > /tmp/web1.txt && .venv/Scripts/python scripts/build_web.py > /dev/null && sha256sum mdviewer/web/* | diff /tmp/web1.txt - && echo REPRODUCIBLE
+```
+
+Expected: all tests pass (725 at the time of writing); `SMOKE OK`; `WEB OK`;
+the `rg` line prints nothing; `REPRODUCIBLE`.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add web-src/src/commands.js web-src/src/input.js web-src/src/editor.js web-src/src/schema.js web-src/src/editor.css mdviewer/web scripts/check_web.py docs/superpowers/plans/2026-10-20-wysiwyg-editing.md
+git status --short   # must not list web-src/node_modules
+git commit -m "feat: add formatting commands, keymaps and input rules to the editor"
+```
+
+**Review Focus:**
+
+- **Refusal is total:** every command returns `false` and leaves the
+  document unchanged when `args` is invalid (unknown mark, list kind or
+  heading level, table size outside 1-50, unsafe URL) or the selection
+  does not allow it.
+  - `run` without `dispatch` never dispatches.
+  - `insertBlock` builds its transaction on a throwaway `state.tr` during a
+    dry run.
+- **No unsafe URL enters the document:**
+  - `setLink` checks `href` with `isSafeUrl`.
+  - `insertImage` checks both `src` and `display_src`.
+  - Input rules create no links.
+- **Input rules stay out of code:** the block rules use ProseMirror's
+  default `inCode: false`, and the mark rules add `inCodeMark: false`.
+  `2*3*4`, snake_case-like text and markers inside words stay literal.
+- **Undo:**
+  - Each command is one undo step.
+  - An input rule can be undone with Backspace right after it fires.
+  - Enter's fence and rule conversions are single steps.
+- **Lists:**
+  - Converting a list changes only its type and its items' `checked`, and
+    keeps `tight`.
+  - `start` is kept for ordered lists and dropped for bulleted ones.
+  - Nested lists are not touched: only the innermost list holding the
+    selection changes.
+- **Accepted behaviors:**
+  - `clearFormatting` keeps links (decided above).
+  - `setBlock` to a code block drops inline atoms the code block cannot
+    hold (images, footnote and HTML chips). That is ProseMirror's
+    `clearIncompatible`, and one undo restores them.
+  - `toggleList` off in a nested list lifts the item one level, not out of
+    every list.
+  - With a block after a code block, ArrowDown keeps the horizontal caret
+    position.
+- **Handed on:**
+  - Task 11 orders its table plugins before `inputPlugins()`.
+  - Tasks 15 and 17 register no Qt shortcuts for the page's keys.
+  - Task 16 resolves `display_src` in Python before `insertImage`.
+- **No regressions:** `tests/` stays Qt-free; `mdviewer/` still does not
+  load `mdviewer/web`.
 
 ### Task 11: Tables, paste and links
 
-- **Files:** `web-src/src/editor.js`, `web-src/src/tables.js`, rebuilt bundle.
-- **Produces:** `prosemirror-tables` integration (cell navigation, Tab in last cell appends a row), context-menu commands (`addRowBefore/After`, `addColumnBefore/After`, `deleteRow`, `deleteColumn`, `deleteTable`, `setColumnAlign`); paste coerced to schema with unsafe URLs stripped and merged table cells (`colspan`/`rowspan` > 1) split, since merged cells are a non-goal; Ctrl+Shift+V plain paste; protected nodes selectable and deletable as a unit.
-- **Test:** smoke checks in Task 14 (table edits round-trip; pasted `javascript:` link dropped).
-- **Commit:** `feat: add table editing, safe paste and plain-text paste`
+**Status: steps detailed.** All code below was run before being written into
+this plan (2026-10-20, PySide6 6.12.0 offscreen, Node 26, prosemirror-tables
+1.8.5), on top of Task 10's code as this plan details it. Results:
+- `scripts/check_web.py` prints `WEB OK`.
+- The full suite passes (727 tests: Task 10's 725 + 2), `SMOKE OK`, and a
+  second `build_web.py` changes no bytes.
+- Run against the Task 10 bundle, the new checks fail with 22 labels
+  (Step 6).
+- Nine deliberate breaks each fail a check:
+  - shape plugin after `tableEditing()`
+  - no shape plugin
+  - aligns not propagated
+  - cell types not fixed
+  - table always rebuilt (the caret leaves it)
+  - no row added by Tab in the last cell
+  - no caret move on right-click
+  - table keys after Task 10's keys
+  - nested tables allowed in the JS schema
+
+The user decided on 2026-10-20 that the cell context menu is a **native Qt
+menu**: standard edit actions plus a table section. Task 11 supplies the JS
+side, and Task 17 builds the menu.
+
+**Findings that shape this task:**
+
+- **mistune reads pipe tables only at the top level.** A table inside a
+  blockquote or list item comes back as a paragraph (checked for `> |...`,
+  `- a` + indented table, `- |...` and `1.` + indented table). If the
+  editor allowed nested tables, a save and reload would silently turn them
+  into text. Tables are therefore made top-level only in both
+  `core/docschema.py` and `schema.js`. ProseMirror then places an inserted
+  or pasted table after the enclosing list or quote by itself, and Task
+  10's `insertBlock` finds the top level.
+- **The serializer** writes the first row as the header and takes column
+  alignment from the header cells (`serialize._table`). A table's cell
+  types and per-cell aligns are therefore display state that can disagree
+  with what is saved. The editor keeps them in Markdown's shape.
+- **`tableEditing()` fixes tables first.** Its own `appendTransaction`
+  (`fixTables`) rearranges a pasted row with a `colspan=2` header, putting
+  the empty cell before `h`. Our shape plugin must come **before**
+  `tableEditing()` in the plugin list, so that it splits the raw pasted
+  table first.
+- **Replacing a whole table moves the caret out of it.** Only merged or
+  short-row tables are rebuilt. Type and align fixes use `setNodeMarkup`
+  per cell, so the caret stays (checked after deleting the header row).
+- **Clipboard (offscreen, real Qt clipboard):**
+  - HTML reaches the page only with the CF_HTML fragment markers that a
+    browser copy carries (`<!--StartFragment-->...`). `QMimeData.setHtml`
+    alone arrives as an empty `text/html`.
+  - A real Ctrl+V then uses Task 8's paste rules: bold kept, the
+    `javascript:` link becomes plain text.
+- **Ctrl+Shift+V needs no code.** With the key text a real keyboard sends
+  (`"\x16"`), Chromium runs paste-as-plain-text, and the paste event
+  carries only `text/plain`. `QTest.keyClick` sends the text `"V"`
+  instead, and Chromium then also inserts a `V`. The check therefore sends
+  `"\x16"` via `QTest.sendKeyEvent`. `QWebEnginePage.WebAction.PasteAndMatchStyle`
+  (Task 17's menu item) pastes plain text too.
+- **Right-click:**
+  - The DOM `contextmenu` event runs before Qt's context-menu request
+    (`customContextMenuRequested` with `Qt.CustomContextMenu`).
+  - A `page.runJavaScript` issued from that signal sees the caret already
+    moved by our `contextmenu` handler.
+  - Calling the check's nested-pumping `run_js` inside the signal handler
+    returned `None`. Use the asynchronous callback, as Task 17 will.
+- **Clipboard ownership at exit:** a `QClipboard` still holding our
+  `QMimeData` crashed Python at interpreter exit (segfault, exit 139). The
+  check clears the clipboard after its paste checks.
+- **The Task 8 fixture table** had body aligns that differ from their
+  header's (right/center under left/none), which Markdown cannot hold. The
+  shape plugin aligned them on paste, failing Task 8's copy-and-paste
+  check. The fixture now aligns each cell like its header (left, center),
+  and it still covers aligns on both cell types.
+
+**Design decisions:**
+
+- **Table shape** (`tableShapePlugin`, `appendTransaction`, grouped with
+  the edit in history). Every table a transaction touched gets Markdown's
+  shape:
+  - The first row is `table_header` cells and the other rows are
+    `table_cell` cells.
+  - Merged cells are split, with the content staying in the top-left cell.
+  - Short rows are padded with empty cells.
+  - Every cell takes its column's header align.
+  - Consequences:
+    - Deleting the header row promotes the next row.
+    - "Insert row above" on the header row makes the new empty row the
+      header, as the Markdown would.
+    - Pasted merged cells come out split, which covers the spec's "No
+      merged cells".
+- **Commands** (`TABLE_COMMANDS`, merged into `COMMANDS`, each with `can`):
+  - `addRowBefore`, `addRowAfter`, `addColumnBefore`, `addColumnAfter`,
+    `deleteRow`, `deleteColumn` and `deleteTable` (prosemirror-tables).
+    These refuse deleting a table's only row or only column.
+  - `setColumnAlign("left" | "center" | "right")` aligns every cell of the
+    selected columns, header included.
+- **Keys:**
+  - Tab moves to the next cell (prosemirror-tables `goToNextCell`, which
+    selects the cell's content). In the last cell it adds a row and puts
+    the caret in its first cell.
+  - Shift+Tab moves to the previous cell. In the first cell it falls
+    through to Task 10's chain, which consumes it.
+  - `tablePlugins()` goes before `inputPlugins()`.
+  - The arrow keys and the cell selection by mouse are `tableEditing()`'s.
+- **Context menu (JS side):**
+  - A right-click outside the current selection first moves the caret to
+    the clicked position (`posAtCoords`, `Selection.near`) and never
+    cancels the event, so Qt still gets its context-menu request.
+  - `mdEditor.selectionState()` returns the payload synchronously, so
+    Python (Task 17) builds the menu from it.
+- **Paste:**
+  - No extra code. Task 8's `parseDOM` rules strip unsafe URLs.
+  - The shape plugin splits merged cells, and the schema lifts tables to
+    the top level.
+  - Chromium handles Ctrl+Shift+V.
+- **Protected blocks:** Task 8 made them atoms. The checks prove that a
+  clicked raw-HTML block is deleted with Backspace, a clicked footnote
+  definition with Delete, and an HTML chip with one Backspace.
+- `prosemirror-tables/style/tables.css` (cell selection highlight) is
+  imported. Column resizing is not used, since `colwidth` is not in
+  docschema.
+
+**Files:**
+- Create: `web-src/src/tables.js`
+- Modify: `web-src/src/editor.js`, `web-src/src/schema.js`, `mdviewer/core/docschema.py`, `tests/test_docschema.py`, `scripts/check_web.py`
+- Modify: `docs/superpowers/specs/2026-10-20-wysiwyg-editing-design.md` (section 4, Tables); this plan's File Map and Task 17 outline
+- Regenerate and commit: `mdviewer/web/editor.js`, `mdviewer/web/editor.css`, `mdviewer/web/THIRD_PARTY.txt` (unchanged: no new package)
+
+**Interfaces:**
+- Consumes:
+  - Task 8: `schema`, the `tables` node specs (`tableNodes`) and the paste
+    rules
+  - Task 9: `COMMANDS`, `selectionState(state)` and `getDocument()`, and
+    `check_web.py`'s `Page`, `Bridge`, `latest_state` and `run_js`
+  - Task 10: `inputPlugins()`, `insertBlock` (via `insertTable`), and
+    `check_web.py`'s `PLACE_JS` helpers, `load_md`, `as_markdown`,
+    `command` and `press`
+- Produces (later tasks rely on these exact names):
+  - `web-src/src/tables.js`: `TABLE_COMMANDS` and `tablePlugins()`
+  - `window.mdEditor.selectionState()`. It returns the same payload as the
+    `selectionState` signal; `can` holds the eight table commands.
+  - `core/docschema.py`: `table` is no longer in `BLOCK_CONTENT`. It is in
+    `TOP_LEVEL_NODES` only, so a nested table fails `validate`.
+  - **Task 17** builds the cell context menu:
+    - On Qt's context-menu request, call
+      `runJavaScript("JSON.stringify(window.mdEditor.selectionState())", 0, callback)`
+      (asynchronous, never a nested event loop).
+    - In the callback, build a `QMenu` with Undo, Cut, Copy, Paste and
+      Select All (`QWebEnginePage` web actions).
+    - When `can.addRowAfter` is true, add the table section in this order:
+      - `Insert row above` / `Insert row below` -> `addRowBefore` / `addRowAfter`
+      - `Insert column left` / `Insert column right` -> `addColumnBefore` / `addColumnAfter`
+      - `Delete row`, `Delete column`, `Delete table` -> `deleteRow`, `deleteColumn`, `deleteTable`
+      - `Align column left` / `center` / `right` -> `setColumnAlign` with `"left"` / `"center"` / `"right"`
+    - Each item is enabled from `can[name]`.
+    - Paste as plain text is `QWebEnginePage.WebAction.PasteAndMatchStyle`.
+  - `scripts/check_web.py`:
+    - `TABLE_MD`, `TABLE_CASES`, `TABLE_REFUSED` and `TABLE_KEYS`
+    - `PASTE_HTML` / `PASTED_MD` and `NESTED_PASTE_HTML` / `NESTED_PASTE_MD`
+    - `to_clipboard(html, text)` and `click(app, view, selector, button)`
+    - `check_tables(app, view, page, bridge)`
+    - `press()` strokes may carry the key text as a third item, e.g.
+      `(K.Key_V, CTRL | SHIFT, "\x16")`.
+
+- [ ] **Step 1: Write the failing docschema tests**
+
+In `tests/test_docschema.py`, directly above the
+`@pytest.mark.parametrize("block, message", [` that precedes
+`def test_child_not_allowed_in_parent`, insert
+
+```python
+ONE_CELL_TABLE = {"type": "table", "content": [
+    {"type": "table_row", "content": [{"type": "table_header", "attrs": {"align": None}}]},
+]}
+
+
+```
+
+and in that parametrize list, directly after the
+`"$.content[0].content[0]: table_cell is not allowed in table"),` line, add
+
+```python
+    # mistune reads pipe tables at the top level only: a nested one would come back as a paragraph.
+    ({"type": "blockquote", "content": [ONE_CELL_TABLE]}, "$.content[0].content[0]: table is not allowed in blockquote"),
+    ({"type": "bullet_list", "attrs": {"tight": True}, "content": [item(ONE_CELL_TABLE)]},
+     "$.content[0].content[0].content[0]: table is not allowed in list_item"),
+```
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `.venv/Scripts/python -m pytest tests/test_docschema.py -v`
+Expected: 2 FAILED, the two new `test_child_not_allowed_in_parent` cases
+(`validate` returns `[]` for them); 59 passed.
+
+- [ ] **Step 3: Make tables top-level only in docschema**
+
+In `mdviewer/core/docschema.py`, replace
+
+```python
+# Blocks allowed wherever block content goes: doc, blockquote, list_item.
+BLOCK_CONTENT = frozenset({
+    "paragraph", "heading", "blockquote", "bullet_list", "ordered_list",
+    "code_block", "horizontal_rule", "table", "html_block",
+})
+# Blocks allowed directly in doc; front_matter only as its first child.
+TOP_LEVEL_NODES = BLOCK_CONTENT | {"front_matter", "footnote_def"}
+```
+
+with
+
+```python
+# Blocks allowed wherever block content goes: doc, blockquote, list_item.
+BLOCK_CONTENT = frozenset({
+    "paragraph", "heading", "blockquote", "bullet_list", "ordered_list",
+    "code_block", "horizontal_rule", "html_block",
+})
+# Blocks allowed directly in doc; front_matter only as its first child. Tables are
+# top-level only: mistune reads a pipe table inside a blockquote or list item as a paragraph.
+TOP_LEVEL_NODES = BLOCK_CONTENT | {"table", "front_matter", "footnote_def"}
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `.venv/Scripts/python -m pytest -v`
+Expected: all pass (727 at the time of writing: 61 in
+`tests/test_docschema.py`). docmodel never produces a nested table, so the
+corpus and round-trip tests are unaffected.
+
+- [ ] **Step 5: Write the failing page checks**
+
+All edits are in `scripts/check_web.py`.
+
+a. Replace
+
+```python
+from PySide6.QtCore import QEventLoop, QObject, QPoint, Qt, QUrl, Slot  # noqa: E402
+```
+
+with
+
+```python
+from PySide6.QtCore import QEventLoop, QMimeData, QObject, QPoint, Qt, QUrl, Slot  # noqa: E402
+```
+
+b. In `every_node_doc()`, replace
+
+```python
+            {"type": "table_row", "content": [cell("table_header", "left", text("h")), cell("table_header", None)]},
+            {"type": "table_row", "content": [cell("table_cell", "right", text("c", {"type": "em"})),
+                                              cell("table_cell", "center")]},
+```
+
+with
+
+```python
+            # Columns aligned like Markdown can write them: each cell like its column's header.
+            {"type": "table_row", "content": [cell("table_header", "left", text("h")), cell("table_header", "center")]},
+            {"type": "table_row", "content": [cell("table_cell", "left", text("c", {"type": "em"})),
+                                              cell("table_cell", "center")]},
+```
+
+c. In `press()`, replace
+
+```python
+        else:
+            key, modifiers = stroke
+            QTest.keyClick(view.focusProxy(), key, modifiers or Qt.KeyboardModifier.NoModifier)
+```
+
+with
+
+```python
+        else:
+            key, modifiers, *text = stroke
+            modifiers = modifiers or Qt.KeyboardModifier.NoModifier
+            if text:  # the text a real keyboard sends, e.g. "\x16" with Ctrl+Shift+V
+                QTest.sendKeyEvent(QTest.KeyAction.Click, view.focusProxy(), key, text[0], modifiers)
+            else:
+                QTest.keyClick(view.focusProxy(), key, modifiers)
+```
+
+d. Insert the following block directly above `def main() -> int:`, with two
+blank lines before and after it:
+
+```python
+# --- Task 11: tables, paste and protected blocks --------------------------------------------
+
+TABLE_MD = "| h | i |\n| --- | --- |\n| c | d |\n"
+# (markdown, selection, command name, args, Markdown after the command)
+TABLE_CASES = [
+    (TABLE_MD, "place('c')", "addRowBefore", None, "| h | i |\n| --- | --- |\n|  |  |\n| c | d |\n"),
+    (TABLE_MD, "place('c')", "addRowAfter", None, "| h | i |\n| --- | --- |\n| c | d |\n|  |  |\n"),
+    (TABLE_MD, "place('d')", "addColumnBefore", None, "| h |  | i |\n| --- | --- | --- |\n| c |  | d |\n"),
+    (TABLE_MD, "place('d')", "addColumnAfter", None, "| h | i |  |\n| --- | --- | --- |\n| c | d |  |\n"),
+    (TABLE_MD, "place('c')", "deleteRow", None, "| h | i |\n| --- | --- |\n"),
+    (TABLE_MD, "place('c')", "deleteColumn", None, "| i |\n| --- |\n| d |\n"),
+    ("a\n\n" + TABLE_MD, "place('c')", "deleteTable", None, "a\n"),
+    (TABLE_MD, "place('d')", "setColumnAlign", "center", "| h | i |\n| --- | :---: |\n| c | d |\n"),
+    (TABLE_MD, "place('h')", "setColumnAlign", "right", "| h | i |\n| --- | --- |\n| c | d |\n".replace(
+        "| --- | --- |", "| ---: | --- |")),
+    # Markdown's header is the first row: deleting it promotes the next row, a row above it replaces it.
+    (TABLE_MD, "place('h')", "deleteRow", None, "| c | d |\n| --- | --- |\n"),
+    (TABLE_MD, "place('h')", "addRowBefore", None, "|  |  |\n| --- | --- |\n| h | i |\n| c | d |\n"),
+    # Tables are top-level only (mistune reads nested ones as paragraphs): inserted after the list or quote.
+    ("- a\n", "place('a', 1)", "insertTable", {"rows": 2, "cols": 1}, "- a\n\n|  |\n| --- |\n|  |\n"),
+    ("> a\n", "place('a', 1)", "insertTable", {"rows": 2, "cols": 1}, "> a\n\n|  |\n| --- |\n|  |\n"),
+]
+TABLE_REFUSED = [
+    ("| h |\n| --- |\n", "place('h')", "deleteRow", None),
+    ("| h |\n| --- |\n| c |\n", "place('c')", "deleteColumn", None),
+    (TABLE_MD, "place('c')", "setColumnAlign", "justify"),
+    ("a\n", "place('a')", "addRowAfter", None),
+    ("a\n", "place('a')", "deleteTable", None),
+    ("a\n", "place('a')", "setColumnAlign", "left"),
+]
+# (markdown, selection, keys, Markdown after them)
+TABLE_KEYS = [
+    (TABLE_MD, "place('h', 1)", [(K.Key_Tab, None), "x"], "| h | x |\n| --- | --- |\n| c | d |\n"),
+    (TABLE_MD, "place('i', 1)", [(K.Key_Tab, None), "x"], "| h | i |\n| --- | --- |\n| x | d |\n"),
+    (TABLE_MD, "place('d', 1)", [(K.Key_Tab, None), "e"], "| h | i |\n| --- | --- |\n| c | d |\n| e |  |\n"),
+    (TABLE_MD, "place('d')", [(K.Key_Tab, SHIFT), "x"], "| h | i |\n| --- | --- |\n| x | d |\n"),
+    (TABLE_MD, "place('h')", [(K.Key_Tab, SHIFT), "y"], "| yh | i |\n| --- | --- |\n| c | d |\n"),
+]
+# HTML as a browser puts it on the Windows clipboard (CF_HTML keeps the fragment markers).
+PASTE_HTML = (
+    '<html><body><!--StartFragment--><p><b>bold</b> <a href="javascript:alert(1)">bad</a> '
+    '<a href="https://ok.example/">ok</a></p>'
+    '<table><tr><th colspan="2">h</th></tr><tr><td>1</td><td>2</td><td>3</td></tr></table>'
+    '<table><tr><th rowspan="2">a</th><th>b</th></tr><tr><td>c</td></tr></table>'
+    "<!--EndFragment--></body></html>"
+)
+PASTED_MD = (
+    "**bold** bad [ok](https://ok.example/)\n\n"
+    "| h |  |  |\n| --- | --- | --- |\n| 1 | 2 | 3 |\n\n"
+    "| a | b |\n| --- | --- |\n|  | c |\n"
+)
+NESTED_PASTE_HTML = (
+    "<html><body><!--StartFragment--><table><tr><th>h</th></tr><tr><td>c</td></tr></table>"
+    "<!--EndFragment--></body></html>"
+)
+NESTED_PASTE_MD = "- x\n\n| h |\n| --- |\n| c |\n"
+
+
+def to_clipboard(html: str, text: str) -> None:
+    mime = QMimeData()
+    mime.setData("text/html", html.encode("utf-8"))
+    mime.setText(text)
+    QApplication.clipboard().setMimeData(mime)
+
+
+def click(app: QApplication, view: QWebEngineView, selector: str, button=Qt.MouseButton.LeftButton) -> None:
+    """A real mouse click in the middle of the first element matching `selector`."""
+    point = run_js(app, view, f"""(() => {{
+      const box = document.querySelector({json.dumps(selector)}).getBoundingClientRect();
+      return [Math.round(box.left + box.width / 2), Math.round(box.top + box.height / 2)];
+    }})()""")
+    QTest.mouseClick(view.focusProxy(), button, Qt.KeyboardModifier.NoModifier, QPoint(*point))
+    pump(app, lambda: False, 0.3)
+
+
+def check_tables(app: QApplication, view: QWebEngineView, page: Page, bridge: Bridge) -> None:
+    for markdown, selection, name, args, expected in TABLE_CASES:
+        load_md(app, view, markdown)
+        run_js(app, view, f"({selection}, 0)")
+        done = command(app, view, name, args)
+        result = as_markdown(app, view)
+        check(done is True and result == expected,
+              f"table command {name}({args!r}) after {selection}: {result!r} (returned {done!r})")
+    for markdown, selection, name, args in TABLE_REFUSED:
+        load_md(app, view, markdown)
+        run_js(app, view, f"({selection}, 0)")
+        before = get_doc(app, view)
+        check(command(app, view, name, args) is False and get_doc(app, view) == before,
+              f"table command {name}({args!r}) refused on {markdown!r}")
+    for markdown, selection, strokes, expected in TABLE_KEYS:
+        load_md(app, view, markdown)
+        run_js(app, view, f"({selection}, 0)")
+        press(app, view, strokes)
+        result = as_markdown(app, view)
+        check(result == expected, f"table keys {strokes!r} after {selection}: {result!r}")
+
+    # Deleting the header row keeps the caret in the table (the cells change type in place).
+    load_md(app, view, TABLE_MD)
+    run_js(app, view, "(place('h'), 0)")
+    command(app, view, "deleteRow")
+    check((latest_state(app, bridge) or {}).get("block") == {"type": "table_header"},
+          "after deleting the header row the caret is in the new header row")
+
+    # Paste: unsafe links dropped, merged cells split, short rows padded; Ctrl+Shift+V pastes plain text.
+    load_md(app, view, "x\n")
+    run_js(app, view, "(place('x', 0, 1), 0)")
+    to_clipboard(PASTE_HTML, "bold bad ok")
+    press(app, view, [(K.Key_V, CTRL)])
+    result = as_markdown(app, view)
+    check(result == PASTED_MD, f"Ctrl+V pastes formatting, drops unsafe links, splits merged cells ({result!r})")
+    check(docschema.validate(get_doc(app, view)) == [], "the pasted document is valid in Python")
+    load_md(app, view, "- x\n")
+    run_js(app, view, "(place('x', 1), 0)")
+    to_clipboard(NESTED_PASTE_HTML, "h c")
+    press(app, view, [(K.Key_V, CTRL)])
+    result = as_markdown(app, view)
+    check(result == NESTED_PASTE_MD and docschema.validate(get_doc(app, view)) == [],
+          f"a table pasted into a list item lands after the list ({result!r})")
+    load_md(app, view, "x\n")
+    run_js(app, view, "(place('x', 0, 1), 0)")
+    to_clipboard(PASTE_HTML, "bold bad ok")
+    press(app, view, [(K.Key_V, CTRL | SHIFT, "\x16")])
+    result = as_markdown(app, view)
+    check(result == "bold bad ok\n", f"Ctrl+Shift+V pastes plain text ({result!r})")
+    QApplication.clipboard().clear()  # a clipboard still owning our data crashes Qt at exit
+
+    # Right-click: the caret moves to the clicked cell before Qt's context menu request, so
+    # the menu built from selectionState() offers the table items.
+    states: list = []
+
+    def menu_requested(_point) -> None:
+        page.runJavaScript("JSON.stringify(window.mdEditor.selectionState?.() ?? null)", 0, states.append)
+
+    view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    view.customContextMenuRequested.connect(menu_requested)
+    load_md(app, view, "a\n\n" + TABLE_MD)
+    for selection, target, in_table in (("place('a')", "#editor td:last-child", True),
+                                        ("place('d')", "#editor p", False)):
+        run_js(app, view, f"({selection}, 0)")
+        states.clear()
+        click(app, view, target, Qt.MouseButton.RightButton)
+        pump(app, lambda: states, 3)
+        state = (json.loads(states[0]) if states else None) or {}
+        can = state.get("can", {})
+        check(bool(state) and can.get("addRowAfter") is in_table and can.get("deleteTable") is in_table
+              and can.get("setColumnAlign") is in_table,
+              f"right-click on {target} moves the caret there before the menu request ({state})")
+    view.customContextMenuRequested.disconnect(menu_requested)
+    view.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)
+
+    # Protected blocks and chips are selected and deleted as a unit.
+    load_md(app, view, "a\n\n<div>raw</div>\n\nb<kbd>c\n")
+    click(app, view, "#editor .md-html-block")
+    press(app, view, [(K.Key_Backspace, None)])
+    result = as_markdown(app, view)
+    check(result == "a\n\nb<kbd>c\n", f"a clicked raw HTML block is deleted with Backspace ({result!r})")
+    run_js(app, view, "(place('c'), 0)")
+    press(app, view, [(K.Key_Backspace, None)])
+    result = as_markdown(app, view)
+    check(result == "a\n\nbc\n", f"Backspace after an HTML chip deletes the whole chip ({result!r})")
+    load_md(app, view, "a[^1]\n\n[^1]: note\n")
+    click(app, view, "#editor .md-footnote-def")
+    press(app, view, [(K.Key_Delete, None)])
+    result = as_markdown(app, view)
+    check(result == "a[^1]\n", f"a clicked footnote definition is deleted with Delete ({result!r})")
+```
+
+e. In `main()`, directly after `    check_editing(app, view, bridge)` add
+
+```python
+    check_tables(app, view, page, bridge)
+```
+
+- [ ] **Step 6: Run the page check to verify it fails**
+
+Run: `.venv/Scripts/python scripts/check_web.py`
+Expected: exit code 1 with 22 failure labels:
+- `JS schema: names, attrs, content rules and mark ranks match core/docschema.py`
+  (docschema changed in Step 3; the bundle still nests tables)
+- the 11 table-command cases of `TABLE_CASES` that change a table
+  (`returned False`), and the two nested `insertTable` cases (the table
+  lands inside the list or quote)
+- the 4 `TABLE_KEYS` cases that move between cells
+- the Ctrl+V merged-cell paste, and the nested paste
+- the 2 right-click labels (`({})`: `selectionState()` does not exist yet)
+
+No Task 8-10 label appears.
+
+- [ ] **Step 7: Write the table module**
+
+Create `web-src/src/tables.js`:
+
+```js
+// Tables in the Rendered editor: prosemirror-tables (cell selection, arrow keys), Tab
+// between cells, the commands of the cell context menu, and Markdown's table shape.
+import { keymap } from "prosemirror-keymap";
+import { Plugin, TextSelection } from "prosemirror-state";
+import {
+  addColumnAfter, addColumnBefore, addRowAfter, addRowBefore, deleteColumn, deleteRow, deleteTable,
+  goToNextCell, isInTable, selectedRect, selectionCell, tableEditing,
+} from "prosemirror-tables";
+import { schema } from "./schema.js";
+
+const { nodes } = schema;
+const ALIGNMENTS = ["left", "center", "right"];
+
+// Tab moves to the next cell; in the last cell it adds a row and moves into it.
+function nextCell(state, dispatch) {
+  if (goToNextCell(1)(state, dispatch)) return true;
+  if (!isInTable(state)) return false;
+  if (dispatch) {
+    const rowEnd = selectionCell(state).after();
+    let tr = null;
+    addRowAfter(state, (added) => { tr = added; });
+    if (!tr) return false;
+    dispatch(tr.setSelection(TextSelection.create(tr.doc, rowEnd + 2)).scrollIntoView());
+  }
+  return true;
+}
+
+// Aligns the columns of the selected cells, header included.
+function setColumnAlign(state, dispatch, align) {
+  if (!ALIGNMENTS.includes(align) || !isInTable(state)) return false;
+  if (dispatch) {
+    const { map, left, right, tableStart } = selectedRect(state);
+    const tr = state.tr;
+    for (let row = 0; row < map.height; row++) {
+      for (let col = left; col < right; col++) {
+        const pos = tableStart + map.map[row * map.width + col];
+        tr.setNodeMarkup(pos, null, { ...state.doc.nodeAt(pos).attrs, align });
+      }
+    }
+    dispatch(tr);
+  }
+  return true;
+}
+
+const tableCommand = (command) => ({
+  run: (state, dispatch) => command(state, dispatch),
+  can: (state) => command(state),
+});
+
+// Cell context menu commands (Python builds the menu from selectionState.can).
+export const TABLE_COMMANDS = {
+  addRowBefore: tableCommand(addRowBefore),
+  addRowAfter: tableCommand(addRowAfter),
+  addColumnBefore: tableCommand(addColumnBefore),
+  addColumnAfter: tableCommand(addColumnAfter),
+  deleteRow: tableCommand(deleteRow),
+  deleteColumn: tableCommand(deleteColumn),
+  deleteTable: tableCommand(deleteTable),
+  // args: "left" | "center" | "right"
+  setColumnAlign: {
+    run: (state, dispatch, view, align) => setColumnAlign(state, dispatch, align),
+    can: (state) => isInTable(state),
+  },
+};
+
+// The cells of `table` on a grid: merged cells are split (the content stays in the
+// top-left cell) and short rows are padded with empty cells.
+function cellGrid(table) {
+  const grid = [];
+  table.forEach((row, offset, r) => {
+    grid[r] = grid[r] || [];
+    let c = 0;
+    row.forEach((cell) => {
+      while (grid[r][c]) c++;
+      const colspan = cell.attrs.colspan || 1;
+      const rowspan = cell.attrs.rowspan || 1;
+      for (let dr = 0; dr < rowspan && r + dr < table.childCount; dr++) {
+        grid[r + dr] = grid[r + dr] || [];
+        for (let dc = 0; dc < colspan; dc++) grid[r + dr][c + dc] = dr || dc ? cell.type.create() : cell;
+      }
+      c += colspan;
+    });
+  });
+  return grid;
+}
+
+// Puts the table at `pos` into the shape Markdown can hold: the first row is the header
+// row, no merged cells, all rows as wide as the widest, every cell aligned like its
+// column's header cell. Merged cells and short rows rebuild the table; otherwise only
+// the cells that differ change, so the caret stays where it is.
+function fixTableShape(tr, pos, table) {
+  const grid = cellGrid(table);
+  const width = Math.max(...grid.map((row) => row.length));
+  const reshape = grid.some((row, r) => row.length !== width || table.child(r).childCount !== width)
+    || table.childCount !== grid.length;
+  const typeAt = (r) => (r === 0 ? nodes.table_header : nodes.table_cell);
+  const alignAt = (c) => grid[0][c]?.attrs.align ?? null;
+  if (reshape) {
+    const rows = grid.map((row, r) => nodes.table_row.create(null, Array.from({ length: width }, (_, c) => (
+      typeAt(r).create({ align: alignAt(c) }, row[c]?.content)
+    ))));
+    tr.replaceWith(pos, pos + table.nodeSize, nodes.table.create(table.attrs, rows));
+    return;
+  }
+  let cellPos = pos + 1;
+  table.forEach((row, offset, r) => {
+    cellPos += 1;
+    row.forEach((cell, cellOffset, c) => {
+      if (cell.type !== typeAt(r) || cell.attrs.align !== alignAt(c)) {
+        tr.setNodeMarkup(cellPos, typeAt(r), { ...cell.attrs, align: alignAt(c) });
+      }
+      cellPos += cell.nodeSize;
+    });
+    cellPos += 1;
+  });
+}
+
+// Keeps every table the transaction touched in Markdown's shape (paste, drop, row and
+// column commands). Grouped with the change in the undo history.
+const tableShapePlugin = new Plugin({
+  appendTransaction(transactions, oldState, newState) {
+    if (!transactions.some((tr) => tr.docChanged)) return null;
+    const start = oldState.doc.content.findDiffStart(newState.doc.content);
+    if (start === null) return null;
+    const end = Math.max(start, oldState.doc.content.findDiffEnd(newState.doc.content).b);
+    const tr = newState.tr;
+    newState.doc.nodesBetween(start, end, (node, pos) => {
+      if (node.type !== nodes.table) return true;
+      fixTableShape(tr, tr.mapping.map(pos), node);
+      return false;
+    });
+    return tr.docChanged ? tr : null;
+  },
+});
+
+// The shape plugin goes before tableEditing(), whose own table fixing would otherwise
+// rearrange merged cells first; the keymap goes before the other keymaps, so Tab and
+// Shift+Tab move between cells inside tables.
+export function tablePlugins() {
+  return [tableShapePlugin, tableEditing(), keymap({ Tab: nextCell, "Shift-Tab": goToNextCell(-1) })];
+}
+```
+
+- [ ] **Step 8: Wire it in and make tables top-level in the JS schema**
+
+In `web-src/src/editor.js`, replace
+
+```js
+// and input.js hold the formatting commands, shortcuts and input rules.
+import "prosemirror-view/style/prosemirror.css";
+import "prosemirror-gapcursor/style/gapcursor.css";
+```
+
+with
+
+```js
+// and input.js hold the formatting commands, shortcuts and input rules; tables.js the
+// table editing.
+import "prosemirror-view/style/prosemirror.css";
+import "prosemirror-gapcursor/style/gapcursor.css";
+import "prosemirror-tables/style/tables.css";
+```
+
+directly after `import { schema } from "./schema.js";` add
+
+```js
+import { TABLE_COMMANDS, tablePlugins } from "./tables.js";
+```
+
+in `COMMANDS`, directly after `  ...FORMATTING_COMMANDS,` add
+
+```js
+  ...TABLE_COMMANDS,
+```
+
+replace
+
+```js
+const callbacks = { editProtected: (index) => send("editProtected", index) };
+const plugins = [history(), ...inputPlugins(), linkPlugin, ...displayPlugins(callbacks)];
+```
+
+with
+
+```js
+// A right-click outside the selection first moves the caret there, so the context menu
+// Python then shows (edit and table items, built from selectionState()) acts on that place.
+const contextMenuPlugin = new Plugin({
+  props: {
+    handleDOMEvents: {
+      contextmenu(view, event) {
+        const hit = view.posAtCoords({ left: event.clientX, top: event.clientY });
+        const { from, to } = view.state.selection;
+        if (hit && (hit.pos < from || hit.pos > to)) {
+          view.dispatch(view.state.tr.setSelection(Selection.near(view.state.doc.resolve(hit.pos))));
+        }
+        return false;
+      },
+    },
+  },
+});
+
+const callbacks = { editProtected: (index) => send("editProtected", index) };
+// Table keys first: Tab moves between cells before input.js consumes it.
+const plugins = [
+  history(), ...tablePlugins(), ...inputPlugins(), linkPlugin, contextMenuPlugin, ...displayPlugins(callbacks),
+];
+```
+
+and directly after
+`  getDocument: () => withoutCellExtras(view.state.doc.toJSON()),` add
+
+```js
+  // The selectionState payload for the current selection, at once (context menu).
+  selectionState: () => selectionState(view.state),
+```
+
+In `web-src/src/schema.js`, delete the line `  tableGroup: "block",` (in
+the `tableNodes({...})` call) and replace
+
+```js
+  doc: { content: "front_matter? (block | footnote_def)+" },
+```
+
+with
+
+```js
+  // Tables only here: mistune reads a pipe table inside a blockquote or list item as a paragraph.
+  doc: { content: "front_matter? (block | table | footnote_def)+" },
+```
+
+In `docs/superpowers/specs/2026-10-20-wysiwyg-editing-design.md`, section
+4, "Tables", replace `- No merged cells.` with
+
+```
+- No merged cells: pasted merged cells are split, the content staying in the
+  top-left cell.
+- The first row is always the header row and every cell takes its column's
+  header alignment, as in the Markdown that is saved.
+- Tables live at the top level only (Markdown readers such as mistune read a
+  pipe table inside a blockquote or list item as text): an inserted or pasted
+  table goes after the enclosing list or quote.
+- The cell context menu is a native menu: the usual edit items plus the table
+  items above.
+```
+
+In this plan's File Map, replace
+
+```
+| `web-src/src/editor.js` | new | EditorView, document lifecycle, `window.mdEditor`, tables, paste | 9, 10, 11 |
+```
+
+with
+
+```
+| `web-src/src/editor.js` | new | EditorView, document lifecycle, `window.mdEditor`, right-click caret | 9, 10, 11 |
+| `web-src/src/tables.js` | new | table keys, cell commands, Markdown table shape | 11 |
+```
+
+and in Task 17's outline, replace its **Files** and **Covers** lines with
+
+```
+- **Files:** `mdviewer/main_window.py`, `mdviewer/richview.py`, `mdviewer/findbar.py`, `scripts/smoke_ui.py`.
+- **Covers:** Undo/Redo/Cut/Copy/Paste/Select All routed to the web view in Rendered mode; Paste as plain text (Ctrl+Shift+V, `PasteAndMatchStyle`); native cell context menu per Task 11's Produces (built in a callback from `mdEditor.selectionState()`, never in a nested event loop; the smoke inspects the built `QMenu` without `exec`); FindBar find-only mode via `QWebEnginePage.findText` (match count, Previous/Next); Ctrl+H switches to Source and opens Replace.
+```
+
+- [ ] **Step 9: Rebuild the bundle**
+
+Run: `.venv/Scripts/python scripts/build_web.py`
+Expected: exit code 0. esbuild reports `editor.js` at about 270 KB and
+`editor.css` at about 3.5 KB, and the output ends with
+`THIRD_PARTY.txt: 15 packages` (no new package).
+
+- [ ] **Step 10: Run the page check to verify it passes**
+
+Run: `.venv/Scripts/python scripts/check_web.py`
+Expected: `WEB OK`, exit code 0 (plus the 6 expected GLES lines on stderr).
+Python must not crash at exit: if the exit code is 139, the clipboard was
+not cleared.
+
+- [ ] **Step 11: Run the full verification**
+
+Run:
+
+```bash
+.venv/Scripts/python -m pytest -v
+.venv/Scripts/python scripts/smoke_ui.py
+.venv/Scripts/python scripts/check_web.py
+rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests
+sha256sum mdviewer/web/* > /tmp/web1.txt && .venv/Scripts/python scripts/build_web.py > /dev/null && sha256sum mdviewer/web/* | diff /tmp/web1.txt - && echo REPRODUCIBLE
+```
+
+Expected: all tests pass (727); `SMOKE OK`; `WEB OK`; the `rg` line prints
+nothing; `REPRODUCIBLE`.
+
+- [ ] **Step 12: Commit**
+
+```bash
+git add web-src/src/tables.js web-src/src/editor.js web-src/src/schema.js mdviewer/core/docschema.py tests/test_docschema.py scripts/check_web.py mdviewer/web docs/superpowers/specs/2026-10-20-wysiwyg-editing-design.md docs/superpowers/plans/2026-10-20-wysiwyg-editing.md
+git status --short   # must not list web-src/node_modules
+git commit -m "feat: add table editing, safe paste and plain-text paste"
+```
+
+**Review Focus:**
+
+- **No nested table can be saved:** check the schema in both places.
+  - `docschema.validate` rejects tables in blockquotes and list items.
+  - The JS `doc` content expression is the only one that names `table`.
+  - Paste and `insertTable` place tables at the top level.
+- **The shape plugin terminates and touches only tables in the changed
+  range.** It returns `null` when nothing changed, and its second run sees
+  a normal table and adds nothing (no `appendTransaction` loop).
+- **The caret stays:** only merged or short-row tables are replaced as a
+  whole. Type and align fixes are in place.
+- **Merged-cell split:** the content stays in the top-left cell, rows
+  spanned past the table's end are clipped, and cell aligns come from the
+  header row.
+- **Right-click** only moves the caret when the click is outside the
+  selection (a right-click on selected text keeps the selection for Cut
+  and Copy), and it never prevents Qt's menu.
+- **Accepted behaviors:**
+  - Tab in a cell selects the next cell's content, as prosemirror-tables
+    does. Typing replaces it.
+  - Inserting a row above the header makes the empty row the header.
+  - Deleting the header row promotes the next row.
+- **Handed on:** Task 17 builds the native menu from
+  `mdEditor.selectionState()` and the item list in Produces.
+- **No regressions:** `tests/` stays Qt-free; `mdviewer/` still does not
+  load `mdviewer/web`.
 
 ## Phase 3 - Qt integration
 

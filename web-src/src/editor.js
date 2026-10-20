@@ -1,11 +1,15 @@
 // Rendered editor bundle: EditorView, document lifecycle and window.mdEditor, the API
-// Python calls through runJavaScript. Calls to Python go through bridge.js.
+// Python calls through runJavaScript. Calls to Python go through bridge.js; commands.js
+// and input.js hold the formatting commands, shortcuts and input rules.
 import "prosemirror-view/style/prosemirror.css";
+import "prosemirror-gapcursor/style/gapcursor.css";
 import "./editor.css";
 import { history, redo, redoDepth, undo, undoDepth } from "prosemirror-history";
 import { EditorState, NodeSelection, Plugin, Selection } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import { connectBridge, send } from "./bridge.js";
+import { FORMATTING_COMMANDS } from "./commands.js";
+import { inputPlugins } from "./input.js";
 import { createNodeViews, displayPlugins, refreshFrames } from "./nodeviews.js";
 import { schema } from "./schema.js";
 
@@ -18,6 +22,7 @@ const CELL_EXTRAS = ["colspan", "rowspan", "colwidth"];
 const COMMANDS = {
   undo: { run: (state, dispatch) => undo(state, dispatch), can: (state) => undoDepth(state) > 0 },
   redo: { run: (state, dispatch) => redo(state, dispatch), can: (state) => redoDepth(state) > 0 },
+  ...FORMATTING_COMMANDS,
 };
 
 // What has been reported to Python since the last setDocument.
@@ -61,7 +66,7 @@ const linkPlugin = new Plugin({
 });
 
 const callbacks = { editProtected: (index) => send("editProtected", index) };
-const plugins = [history(), linkPlugin, ...displayPlugins(callbacks)];
+const plugins = [history(), ...inputPlugins(), linkPlugin, ...displayPlugins(callbacks)];
 
 function createState(json) {
   if (!json) return EditorState.create({ schema, plugins });

@@ -21,6 +21,9 @@
 .md-code-language { width: 9em; font: 12px Consolas, Menlo, monospace; color: var(--fg);
   background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; }
 
+/* Gap cursor (beside a table, rule or protected block): in the theme's text color. */
+.ProseMirror-gapcursor:after { border-top-color: var(--fg); }
+
 /* Images: a missing file shows its alt text in a dashed box. */
 .md-image-broken { display: inline-block; padding: 0 .4em; color: var(--muted);
   border: 1px dashed var(--border); border-radius: 4px; }
