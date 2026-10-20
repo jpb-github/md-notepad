@@ -1809,7 +1809,7 @@ fail. Speed: 1 MB of Markdown converts in about 0.5 s, the same as
     - autolink round trip: text equal to href, or `mailto:` + text, can be
       written bare.
 
-- [ ] **Step 1: Write the failing URL tests**
+- [x] **Step 1: Write the failing URL tests**
 
 Create `tests/test_urls.py`:
 
@@ -1875,12 +1875,12 @@ def test_unsafe_urls(url):
     assert not is_safe(url)
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_urls.py -v`
 Expected: collection error, `ModuleNotFoundError: No module named 'mdviewer.core.urls'`.
 
-- [ ] **Step 3: Create `mdviewer/core/urls.py`**
+- [x] **Step 3: Create `mdviewer/core/urls.py`**
 
 ```python
 """URL helpers shared by the preview renderer and the document model (pure, Qt-free)."""
@@ -1921,7 +1921,7 @@ def is_safe(url: str) -> bool:
     return compact.startswith(_ALLOWED_DATA_PREFIX) or not compact.startswith(_BLOCKED_PREFIXES)
 ```
 
-- [ ] **Step 4: Make `render.py` use `urls.resolve`**
+- [x] **Step 4: Make `render.py` use `urls.resolve`**
 
 In `mdviewer/core/render.py`, replace the imports
 
@@ -1982,12 +1982,12 @@ with
         return urls.resolve(url, self._base_dir)
 ```
 
-- [ ] **Step 5: Run the URL and render tests**
+- [x] **Step 5: Run the URL and render tests**
 
 Run: `.venv/Scripts/python -m pytest tests/test_urls.py tests/test_render.py -v`
 Expected: 56 passed (35 + 21).
 
-- [ ] **Step 6: Write the failing document-model tests**
+- [x] **Step 6: Write the failing document-model tests**
 
 Create `tests/test_docmodel.py`:
 
@@ -2279,12 +2279,12 @@ def test_documents_with_footnotes_convert():
     assert convert("A[^1]\n\n[^1]: note\n")["content"][0]["attrs"]["line"] == 1
 ```
 
-- [ ] **Step 7: Run them to verify they fail**
+- [x] **Step 7: Run them to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_docmodel.py -v`
 Expected: collection error, `ImportError: cannot import name 'docmodel' from 'mdviewer.core'`.
 
-- [ ] **Step 8: Create `mdviewer/core/docmodel.py`**
+- [x] **Step 8: Create `mdviewer/core/docmodel.py`**
 
 ```python
 """Markdown -> ProseMirror document JSON for the Rendered editor (spec 6.3, 6.4).
@@ -2526,12 +2526,12 @@ def _decode(raw: str) -> str:
     return _ENTITY.sub(lambda m: html.unescape(m.group()), raw)
 ```
 
-- [ ] **Step 9: Run the document-model tests to verify they pass**
+- [x] **Step 9: Run the document-model tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_docmodel.py -v`
 Expected: 51 passed.
 
-- [ ] **Step 10: Run the full suite, the Qt-import check and the UI smoke**
+- [x] **Step 10: Run the full suite, the Qt-import check and the UI smoke**
 
 Run:
 
@@ -2544,7 +2544,7 @@ rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests
 Expected: all tests pass; the `rg` line prints nothing; `SMOKE OK`. The
 preview still resolves relative images and links through `urls.resolve`.
 
-- [ ] **Step 11: Commit**
+- [x] **Step 11: Commit**
 
 ```bash
 git add mdviewer/core/urls.py mdviewer/core/render.py mdviewer/core/docmodel.py tests/test_urls.py tests/test_docmodel.py
