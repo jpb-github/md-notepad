@@ -1599,6 +1599,34 @@ check(saved_table == "intro\n\n| h **bold** bad [ok](https://ok.example/) |  |\n
       f"the saved file has the table, and the paste without its javascript: link or script ({saved_table!r})")
 check(page_js(window.rich, "window.pasted === undefined") is True, "the pasted script never ran")
 
+# --- Task 14 review fixes ------------------------------------------------------------
+# The page fails after a Rendered save: Source shows the saved text, not the older editor text
+fw = main_window.MainWindow({"theme": "light", "window": None, "preview_zoom": 1.0})
+fw.show()
+check(pump(lambda: fw.rich.is_ready, 5), "a third window's page is ready")
+fail_md = TMP / "fail.md"
+fail_md.write_bytes(b"# One\n")
+fw.open_file(fail_md)
+edit_rendered(fw, 2)
+fw.on_save()
+check(pump(lambda: not fw.dirty, 5) and fail_md.read_bytes() == b"## One\n", "a Rendered edit is saved")
+fw.rich.load_failed.emit()
+check(fw.mode == "source" and fw.buffer == "## One\n" and not fw.dirty,
+      f"a page failure after a save shows the saved text in Source ({fw.buffer!r})")
+check(fw.on_save() and fail_md.read_bytes() == b"## One\n", "and saving from there keeps the edit")
+fw.hide()
+
+# a language typed into a code block's field and not committed is saved by Ctrl+S
+lang_md = TMP / "lang.md"
+lang_md.write_bytes(b"```\nx\n```\n")
+window.open_file(lang_md)
+page_js(window.rich, """(() => { const field = document.querySelector('#editor .md-code-language');
+  field.focus(); field.value = 'go'; field.dispatchEvent(new Event('input')); return 0; })()""")
+check(pump(lambda: window.dirty, 3), "typing a language in a code block marks the document dirty")
+window.on_save()
+check(pump(lambda: not window.dirty, 5) and lang_md.read_bytes() == b"```go\nx\n```\n",
+      f"Save takes a language that was typed but not committed ({lang_md.read_bytes()!r})")
+
 # --- Later tasks insert their checks directly above this line. ---
 
 shutil.rmtree(TMP, ignore_errors=True)

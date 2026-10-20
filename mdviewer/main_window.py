@@ -556,11 +556,7 @@ class MainWindow(QMainWindow):
             self.with_buffer(self._enter_source)  # typed since the pull's snapshot: pull again
             return
         line = self._line_of_block(self._caret_block)
-        if self.editor.document().toRawText().replace("\u2029", "\n") != text:
-            self.editor.setPlainText(text)
-        self.editor.document().clearUndoRedoStacks()
-        self.editor.document().setModified(self.dirty)
-        self._show_mode(self.SOURCE)
+        self._show_mode(self.SOURCE)  # puts `text` (== _rendered_text) into the editor
         self.editor.setTextCursor(QTextCursor(self.editor.document().findBlockByNumber(line - 1)))
         self.editor.ensureCursorVisible()
 
@@ -572,11 +568,21 @@ class MainWindow(QMainWindow):
             shown = not self.rich.failed and self._render(self.buffer, keep_scroll)
             if not shown:
                 mode = self.SOURCE
+        if mode == self.SOURCE and self.mode == self.RENDERED:
+            self._sync_editor()  # a pull or save moved the Rendered buffer past the editor's text
         self.mode = mode
         self.stack.setCurrentIndex(0 if mode == self.RENDERED else 1)
         (self.rich if mode == self.RENDERED else self.editor).setFocus()
         self._update_chrome()
         return shown
+
+    def _sync_editor(self) -> None:
+        """Rendered -> Source: the editor takes the Rendered buffer (an unchanged text keeps the
+        editor's own), with a new undo history and the dirty flag."""
+        if self.editor.document().toRawText().replace("\u2029", "\n") != self._rendered_text:
+            self.editor.setPlainText(self._rendered_text)
+        self.editor.document().clearUndoRedoStacks()
+        self.editor.document().setModified(self.dirty)
 
     def _render(self, text: str, keep_scroll: bool = False) -> bool:
         """Load `text` into the editor page (new undo history); False when docmodel fails."""

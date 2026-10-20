@@ -12,7 +12,7 @@ import { EditorView } from "prosemirror-view";
 import { connectBridge, send } from "./bridge.js";
 import { FORMATTING_COMMANDS } from "./commands.js";
 import { inputPlugins } from "./input.js";
-import { createNodeViews, displayPlugins, refreshFrames } from "./nodeviews.js";
+import { createNodeViews, displayPlugins, flushLanguageFields, refreshFrames } from "./nodeviews.js";
 import { schema } from "./schema.js";
 import { TABLE_COMMANDS, tablePlugins } from "./tables.js";
 
@@ -89,7 +89,14 @@ const contextMenuPlugin = new Plugin({
   },
 });
 
-const callbacks = { editProtected: (index) => send("editProtected", index) };
+// The first change since the last setDocument or markClean goes to Python once.
+function reportChange() {
+  if (sent.changed) return;
+  sent.changed = true;
+  send("changed", epoch);
+}
+
+const callbacks = { editProtected: (index) => send("editProtected", index), pendingEdit: reportChange };
 // Table keys first: Tab moves between cells before input.js consumes it.
 const plugins = [
   history(), ...tablePlugins(), ...inputPlugins(), linkPlugin, contextMenuPlugin, ...displayPlugins(callbacks),
@@ -149,14 +156,11 @@ function report(state) {
 
 const view = new EditorView(document.getElementById("editor"), {
   state: createState(null),
-  nodeViews: createNodeViews(),
+  nodeViews: createNodeViews(callbacks),
   dispatchTransaction(tr) {
     const before = view.state.doc;
     view.updateState(view.state.apply(tr));
-    if (view.state.doc !== before && !sent.changed) {
-      sent.changed = true;
-      send("changed", epoch);
-    }
+    if (view.state.doc !== before) reportChange();
     report(view.state);
   },
 });
@@ -193,7 +197,10 @@ window.mdEditor = {
   schema,
   view,
   setDocument,
-  getDocument: () => withoutCellExtras(view.state.doc.toJSON()),
+  getDocument() {
+    flushLanguageFields(); // a language typed but not yet committed is part of the document
+    return withoutCellExtras(view.state.doc.toJSON());
+  },
   // Python has the current document (a pull): the next edit reports changed(cleanEpoch).
   markClean(cleanEpoch = epoch) {
     epoch = cleanEpoch;

@@ -350,6 +350,28 @@ def check_editor(app: QApplication, view: QWebEngineView, folder: Path, bridge: 
     check(run_js(app, view, "document.querySelectorAll('datalist#md-fence-languages option').length")
           == len(FENCE_LANGUAGES), "the language field offers the fence languages")
 
+    # A language typed into the field but not committed (no Enter, no blur) still counts: it is
+    # reported as a change, and the next getDocument() (a pull) takes it. Escape drops it.
+    FIELD_JS = """(() => {
+      const field = document.querySelectorAll('#editor .md-code-block')[1].querySelector('input');
+      field.value = %s;
+      %s
+      return 0;
+    })()"""
+    original = doc["content"][CODE_INDEX]["attrs"]["language"]
+    set_doc(app, view, doc)
+    mark = len(bridge.calls)
+    run_js(app, view, FIELD_JS % ("'go extra'", "field.dispatchEvent(new Event('input'));"))
+    check(pump(app, lambda: bridge.args("changed", mark), 3), "typing in the language field reports changed")
+    block = get_doc(app, view)["content"][CODE_INDEX]["attrs"]
+    check(block["language"] == "go" and block["highlight"] == "",
+          f"a typed, uncommitted language is part of the next getDocument() ({block})")
+    set_doc(app, view, doc)
+    run_js(app, view, FIELD_JS % ("'go'", "field.dispatchEvent(new Event('input')); "
+                                  "field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));"))
+    check(get_doc(app, view)["content"][CODE_INDEX]["attrs"]["language"] == original,
+          "Escape drops a typed language")
+
     set_doc(app, view, {"type": "doc", "content": [
         {"type": "code_block", "attrs": {"language": "x", "highlight": '<img src="x">', "line": None},
          "content": [{"type": "text", "text": "x"}]}]})

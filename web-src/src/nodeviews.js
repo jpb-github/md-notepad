@@ -48,11 +48,20 @@ function topLevelIndex(state, pos) {
   return state.doc.resolve(pos).index(0);
 }
 
+// Code blocks whose language field holds typed text that is not yet in the document (it
+// commits on Enter or blur): a pull must not miss it, see flushLanguageFields().
+const uncommittedLanguage = new Set();
+
+export function flushLanguageFields() {
+  for (const block of [...uncommittedLanguage]) block.commitLanguage();
+}
+
 class CodeBlockView {
-  constructor(node, view, getPos) {
+  constructor(node, view, getPos, callbacks) {
     this.node = node;
     this.view = view;
     this.getPos = getPos;
+    this.callbacks = callbacks;
     this.dom = element("div", "md-code-block");
     this.tools = element("div", "md-code-tools");
     this.tools.contentEditable = "false";
@@ -61,6 +70,10 @@ class CodeBlockView {
     this.language.placeholder = "language";
     this.language.spellcheck = false;
     this.language.setAttribute("list", languageList());
+    this.language.addEventListener("input", () => {
+      uncommittedLanguage.add(this);
+      this.callbacks.pendingEdit();
+    });
     this.language.addEventListener("change", () => this.commitLanguage());
     this.language.addEventListener("keydown", (event) => this.languageKey(event));
     this.tools.append(this.language);
@@ -97,6 +110,7 @@ class CodeBlockView {
   }
 
   commitLanguage() {
+    uncommittedLanguage.delete(this);
     const language = cleanLanguage(this.language.value);
     this.language.value = language;
     const pos = this.getPos();
@@ -112,6 +126,7 @@ class CodeBlockView {
       this.view.focus();
     } else if (event.key === "Escape") {
       event.preventDefault();
+      uncommittedLanguage.delete(this);
       this.language.value = this.node.attrs.language;
       this.view.focus();
     }
@@ -120,6 +135,10 @@ class CodeBlockView {
   // Keys and clicks in the language field belong to the field, not to ProseMirror.
   stopEvent(event) {
     return this.tools.contains(event.target);
+  }
+
+  destroy() {
+    uncommittedLanguage.delete(this);
   }
 
   ignoreMutation(mutation) {
@@ -238,9 +257,10 @@ export function refreshFrames() {
   for (const view of frames) view.render();
 }
 
-export function createNodeViews() {
+// callbacks.pendingEdit(): a language field holds typed text that is not in the document yet.
+export function createNodeViews(callbacks) {
   return {
-    code_block: (node, view, getPos) => new CodeBlockView(node, view, getPos),
+    code_block: (node, view, getPos) => new CodeBlockView(node, view, getPos, callbacks),
     image: (node) => new ImageView(node),
     html_block: (node) => new HtmlBlockView(node),
   };
