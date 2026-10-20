@@ -10480,7 +10480,7 @@ side, and Task 17 builds the menu.
     - `press()` strokes may carry the key text as a third item, e.g.
       `(K.Key_V, CTRL | SHIFT, "\x16")`.
 
-- [ ] **Step 1: Write the failing docschema tests**
+- [x] **Step 1: Write the failing docschema tests**
 
 In `tests/test_docschema.py`, directly above the
 `@pytest.mark.parametrize("block, message", [` that precedes
@@ -10504,13 +10504,13 @@ and in that parametrize list, directly after the
      "$.content[0].content[0].content[0]: table is not allowed in list_item"),
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_docschema.py -v`
 Expected: 2 FAILED, the two new `test_child_not_allowed_in_parent` cases
 (`validate` returns `[]` for them); 59 passed.
 
-- [ ] **Step 3: Make tables top-level only in docschema**
+- [x] **Step 3: Make tables top-level only in docschema**
 
 In `mdviewer/core/docschema.py`, replace
 
@@ -10537,14 +10537,14 @@ BLOCK_CONTENT = frozenset({
 TOP_LEVEL_NODES = BLOCK_CONTENT | {"table", "front_matter", "footnote_def"}
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest -v`
 Expected: all pass (727 at the time of writing: 61 in
 `tests/test_docschema.py`). docmodel never produces a nested table, so the
 corpus and round-trip tests are unaffected.
 
-- [ ] **Step 5: Write the failing page checks**
+- [x] **Step 5: Write the failing page checks**
 
 All edits are in `scripts/check_web.py`.
 
@@ -10774,7 +10774,7 @@ e. In `main()`, directly after `    check_editing(app, view, bridge)` add
     check_tables(app, view, page, bridge)
 ```
 
-- [ ] **Step 6: Run the page check to verify it fails**
+- [x] **Step 6: Run the page check to verify it fails**
 
 Run: `.venv/Scripts/python scripts/check_web.py`
 Expected: exit code 1 with 22 failure labels:
@@ -10789,7 +10789,7 @@ Expected: exit code 1 with 22 failure labels:
 
 No Task 8-10 label appears.
 
-- [ ] **Step 7: Write the table module**
+- [x] **Step 7: Write the table module**
 
 Create `web-src/src/tables.js`:
 
@@ -10937,7 +10937,7 @@ export function tablePlugins() {
 }
 ```
 
-- [ ] **Step 8: Wire it in and make tables top-level in the JS schema**
+- [x] **Step 8: Wire it in and make tables top-level in the JS schema**
 
 In `web-src/src/editor.js`, replace
 
@@ -11060,21 +11060,21 @@ and in Task 17's outline, replace its **Files** and **Covers** lines with
 - **Covers:** Undo/Redo/Cut/Copy/Paste/Select All routed to the web view in Rendered mode; Paste as plain text (Ctrl+Shift+V, `PasteAndMatchStyle`); native cell context menu per Task 11's Produces (built in a callback from `mdEditor.selectionState()`, never in a nested event loop; the smoke inspects the built `QMenu` without `exec`); FindBar find-only mode via `QWebEnginePage.findText` (match count, Previous/Next); Ctrl+H switches to Source and opens Replace.
 ```
 
-- [ ] **Step 9: Rebuild the bundle**
+- [x] **Step 9: Rebuild the bundle**
 
 Run: `.venv/Scripts/python scripts/build_web.py`
 Expected: exit code 0. esbuild reports `editor.js` at about 270 KB and
 `editor.css` at about 3.5 KB, and the output ends with
 `THIRD_PARTY.txt: 15 packages` (no new package).
 
-- [ ] **Step 10: Run the page check to verify it passes**
+- [x] **Step 10: Run the page check to verify it passes**
 
 Run: `.venv/Scripts/python scripts/check_web.py`
 Expected: `WEB OK`, exit code 0 (plus the 6 expected GLES lines on stderr).
 Python must not crash at exit: if the exit code is 139, the clipboard was
 not cleared.
 
-- [ ] **Step 11: Run the full verification**
+- [x] **Step 11: Run the full verification**
 
 Run:
 
@@ -11089,7 +11089,7 @@ sha256sum mdviewer/web/* > /tmp/web1.txt && .venv/Scripts/python scripts/build_w
 Expected: all tests pass (727); `SMOKE OK`; `WEB OK`; the `rg` line prints
 nothing; `REPRODUCIBLE`.
 
-- [ ] **Step 12: Commit**
+- [x] **Step 12: Commit**
 
 ```bash
 git add web-src/src/tables.js web-src/src/editor.js web-src/src/schema.js mdviewer/core/docschema.py tests/test_docschema.py scripts/check_web.py mdviewer/web docs/superpowers/specs/2026-10-20-wysiwyg-editing-design.md docs/superpowers/plans/2026-10-20-wysiwyg-editing.md
