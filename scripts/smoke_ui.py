@@ -118,11 +118,13 @@ sample.write_bytes("# Café\r\n\r\nline\u00a0two\r\n".encode("utf-8"))
 SAMPLE_TEXT = "# Café\n\nline\u00a0two\n"
 
 # --- Startup state ---------------------------------------------------------
-check(window.mode == "preview", "starts in preview mode")
-check(window.stack.currentIndex() == 0, "preview page shown at startup")
+window.show()  # shown like the app: Chromium throttles the timers of hidden pages
+check(window.mode == "rendered", "starts in Rendered mode")
+check(window.stack.currentWidget() is window.rich, "the Rendered editor is shown at startup")
 check(window.windowTitle() == "Untitled - MD Viewer", "Untitled title at startup")
+check(pump(lambda: window.rich.is_ready, 5), "the Rendered editor page is ready")
 
-# --- Menus and shortcuts (spec section 3) ----------------------------------
+# --- Menus and shortcuts (spec section 3; v2 spec section 2) ----------------
 check(
     [a.text() for a in window.menuBar().actions()] == ["&File", "&Edit", "&View", "&Help"],
     "menu bar is File / Edit / View / Help",
@@ -135,25 +137,29 @@ for act, keys in [
     (window.act_cut, "Ctrl+X"), (window.act_copy, "Ctrl+C"),
     (window.act_paste, "Ctrl+V"), (window.act_find, "Ctrl+F"),
     (window.act_replace, "Ctrl+H"), (window.act_select_all, "Ctrl+A"),
-    (window.act_preview, "Ctrl+P"), (window.act_edit, "Ctrl+E"),
+    (window.act_rendered, "Ctrl+P"), (window.act_source, "Ctrl+E"),
     (window.act_zoom_in, "Ctrl+="), (window.act_zoom_out, "Ctrl+-"),
     (window.act_zoom_reset, "Ctrl+0"),
 ]:
     check(act.shortcut().toString() == keys, f"{act.text()} shortcut is {keys}")
-check(window.act_copy.isEnabled(), "Copy enabled in preview mode")
-check(not window.act_paste.isEnabled(), "Paste disabled in preview mode")
-check(window.act_zoom_in.isEnabled(), "Zoom enabled in preview mode")
+check([a.text() for a in window.menu_view.actions()[:2]] == ["&Rendered", "&Source"], "View menu starts with Rendered / Source")
+check(window.act_rendered.isChecked() and window.act_rendered.actionGroup().isExclusive(), "the two modes are a radio pair")
+check(window.act_copy.isEnabled(), "Copy enabled in Rendered mode")
+check(not window.act_paste.isEnabled(), "Paste disabled in Rendered mode (its keys go to the page)")
+check(window.act_zoom_in.isEnabled(), "Zoom enabled in Rendered mode")
 check(window.act_wrap.isChecked(), "Word Wrap on by default")
 
-# --- Open: encoding, CRLF, NBSP, title, status bar --------------------------
+# --- Open: Rendered mode, encoding, CRLF, NBSP, title, status bar ------------
 check(window.open_file(sample), "open_file returns True")
+check(window.mode == "rendered" and window.stack.currentWidget() is window.rich, "a file opens in Rendered mode")
 check(window.buffer == SAMPLE_TEXT, "buffer uses \\n breaks and keeps NBSP")
 check(window.newline == "\r\n", "CRLF newline style detected")
 check(window.encoding == "utf-8", "UTF-8 detected")
 check(window.windowTitle() == "sample.md - MD Viewer", "title shows file name")
-check(window._left_label.text() == "Preview", "status left shows Preview")
+check(window._left_label.text() == "Rendered", "status left shows Rendered")
 size = len(sample.read_bytes())
 check(window._right_label.text() == f"100% | UTF-8 | {size} B", "status right shows zoom, encoding, size")
+check(page_js(window.rich, "document.querySelector('#editor h1')?.textContent") == "Café", "the editor page shows the file")
 
 # --- Open failure keeps the current document --------------------------------
 ERRORS.clear()
@@ -161,47 +167,75 @@ check(not window.open_file(TMP / "missing.md"), "missing file returns False")
 check(len(ERRORS) == 1 and "File not found." in ERRORS[0], "missing-file error uses Notepad wording")
 check(window.loaded_path == sample, "failed open keeps the current document")
 
-# --- Edit mode chrome -------------------------------------------------------
-window.act_edit.trigger()
-check(window.mode == "edit" and window.stack.currentIndex() == 1, "Edit Mode shows the editor page")
-check(window.act_undo.isEnabled() and window.act_paste.isEnabled(), "edit actions enabled in edit mode")
-check(window.act_copy.isEnabled(), "Copy enabled in edit mode")
-check(not window.act_zoom_in.isEnabled(), "Zoom disabled in edit mode")
-check(window.act_find.isEnabled() and window.act_replace.isEnabled(), "Find/Replace enabled in edit mode")
+# --- Switching without edits never touches the buffer (v2 spec section 2) ----
+window.act_source.trigger()
+check(window.mode == "source" and window.stack.currentIndex() == 1, "Source shows the plain-text editor")
+check(window.buffer == SAMPLE_TEXT and not window.dirty, "Rendered -> Source without edits keeps the buffer")
+check(window.act_undo.isEnabled() and window.act_paste.isEnabled(), "edit actions enabled in Source mode")
+check(window.act_copy.isEnabled(), "Copy enabled in Source mode")
+check(not window.act_zoom_in.isEnabled(), "Zoom disabled in Source mode")
+check(window.act_find.isEnabled() and window.act_replace.isEnabled(), "Find/Replace enabled in Source mode")
 window.editor.moveCursor(START)
 check(window._left_label.text() == "Ln 1, Col 1", "status shows Ln 1, Col 1 at start")
 window.editor.moveCursor(END)
 check(window._left_label.text() == "Ln 4, Col 1", "status follows the cursor")
+window.act_rendered.trigger()
+check(window.mode == "rendered" and window.buffer == SAMPLE_TEXT and not window.dirty, "Source -> Rendered keeps the buffer")
+window.act_source.trigger()
+check(window.buffer == SAMPLE_TEXT, "and back: still byte-identical")
 
-# --- Dirty buffer, Edit -> Preview prompt: Cancel ---------------------------
+# --- The caret maps across a switch by top-level block -----------------------
+window.editor.setTextCursor(QTextCursor(window.editor.document().findBlockByNumber(2)))  # "line\u00a0two"
+window.act_rendered.trigger()
+check(pump(lambda: window._caret_block == 1, 3), "Source -> Rendered puts the caret in the block of the source line")
+window.rich.focus_block(0)
+check(pump(lambda: window._caret_block == 0, 3), "the Rendered caret moves")
+window.rich.focus_block(1)
+pump(lambda: window._caret_block == 1, 3)
+window.act_source.trigger()
+check(window.editor.textCursor().blockNumber() == 2, "Rendered -> Source puts the caret on the block's first line")
+
+# --- Dirty carries across switches, with no prompt ---------------------------
+window.editor.moveCursor(END)
 window.editor.insertPlainText("edited\n")
 check(window.dirty, "typing marks the buffer dirty")
 check(window.windowTitle() == "*sample.md - MD Viewer", "dirty title has * prefix")
-FAKE["answer"] = S.Cancel
 ASKED.clear()
-window.act_preview.trigger()
-check(ASKED == ["Save changes to sample.md?"], "Edit -> Preview asks to save")
-check(window.mode == "edit" and window.dirty, "Cancel stays in edit mode with edits")
-check(window.act_edit.isChecked() and not window.act_preview.isChecked(), "Cancel restores the Edit Mode radio")
+window.act_rendered.trigger()
+check(not ASKED and window.mode == "rendered" and window.dirty, "switching asks nothing and keeps the buffer dirty")
+check(window.windowTitle() == "*sample.md - MD Viewer", "the * stays in Rendered mode")
+window.act_source.trigger()
+check(window.buffer == SAMPLE_TEXT + "edited\n" and window.dirty, "unedited Rendered mode hands the same text back")
+check(not window.editor.document().isUndoAvailable(), "each switch starts a new undo history")
 
-# --- Don't Save restores disk content ---------------------------------------
-FAKE["answer"] = S.Discard
-window.act_preview.trigger()
-check(window.mode == "preview" and window.stack.currentIndex() == 0, "Don't Save switches to preview")
-check(not window.dirty and window.buffer == SAMPLE_TEXT, "Don't Save restores the disk content")
-
-# --- Save keeps CRLF and NBSP -----------------------------------------------
-window.act_edit.trigger()
-window.editor.moveCursor(END)
-window.editor.insertPlainText("more\n")
-FAKE["answer"] = S.Save
-window.act_preview.trigger()
+# --- Save keeps CRLF and NBSP ------------------------------------------------
+check(window.on_save(), "Save in Source mode")
 check(
-    sample.read_bytes() == "# Café\r\n\r\nline\u00a0two\r\nmore\r\n".encode("utf-8"),
+    sample.read_bytes() == "# Café\r\n\r\nline\u00a0two\r\nedited\r\n".encode("utf-8"),
     "save writes CRLF and NBSP exactly",
 )
-check(window.mode == "preview" and not window.dirty, "Save switches to preview and clears dirty")
-check(window.windowTitle() == "sample.md - MD Viewer", "title clean after save")
+check(not window.dirty and window.windowTitle() == "sample.md - MD Viewer", "title clean after save")
+
+# --- Rendered edits: Save pulls and serializes, editing goes on (v2 spec 6.4) -
+window.act_rendered.trigger()
+window.rich.focus_block(0)
+window.rich.command("setBlock", {"type": "heading", "level": 2})
+check(pump(lambda: window.dirty, 3), "an edit in Rendered mode marks the buffer dirty")
+check(window.windowTitle() == "*sample.md - MD Viewer", "and shows the * prefix")
+check(not window.on_save(), "Save with unpulled edits returns before the pull")
+check(pump(lambda: not window.dirty, 5), "the pulled document is saved")
+RENDERED_SAVED = "## Café\n\nline\u00a0two edited\n"  # normalized: the soft break becomes a space
+check(sample.read_bytes() == RENDERED_SAVED.replace("\n", "\r\n").encode("utf-8"),
+      "Save writes normalized Markdown with the file's CRLF and NBSP")
+check(window.buffer == RENDERED_SAVED and window.mode == "rendered", "the buffer holds the saved text")
+check(page_js(window.rich, "window.mdEditor.command('undo')") is True, "Save keeps the Rendered undo history")
+check(pump(lambda: window.dirty, 3), "the first edit after a save marks the buffer dirty again")
+window.act_source.trigger()
+check(pump(lambda: window.mode == "source", 5), "Rendered -> Source with edits switches once the pull is done")
+check(window.buffer == "# Café\n\nline\u00a0two edited\n" and window.dirty, "the Source text has the edits, still unsaved")
+check(window.editor.document().isModified() and not window.editor.document().isUndoAvailable(),
+      "the editor marks it unsaved, with a new undo history")
+check(window.editor.textCursor().blockNumber() == 0, "the caret lands on the edited block's line")
 
 # --- Unencodable text in a Windows-1252 file --------------------------------
 legacy = TMP / "legacy.md"
@@ -209,7 +243,7 @@ legacy.write_bytes(b"caf\xe9\n")
 window.open_file(legacy)
 check(window.encoding == "windows-1252", "Windows-1252 detected")
 check("Windows-1252" in window._right_label.text(), "status shows Windows-1252")
-window.act_edit.trigger()
+window.act_source.trigger()
 window.editor.moveCursor(START)
 window.editor.insertPlainText("日本")
 FAKE["answer"] = S.Cancel
@@ -223,9 +257,10 @@ check(window.encoding == "utf-8", "encoding switches to UTF-8 after the offer")
 
 # --- New / Save As on Untitled ----------------------------------------------
 window.on_new()
-check(window.mode == "edit" and window.stack.currentIndex() == 1, "New opens in edit mode")
+check(window.mode == "rendered" and window.stack.currentWidget() is window.rich, "New opens in Rendered mode")
 check(window.loaded_path is None and window.buffer == "", "New gives an empty Untitled buffer")
 check(window.windowTitle() == "Untitled - MD Viewer", "New shows Untitled title")
+window.act_source.trigger()
 window.editor.insertPlainText("hello")
 FAKE["save_path"] = ""
 check(not window.on_save(), "cancelled Save As returns False")
@@ -241,26 +276,52 @@ FAKE["answer"] = S.Cancel
 window.on_new()
 check(window.loaded_path == TMP / "fresh.md" and window.dirty, "cancelled New keeps the buffer")
 
-# --- Open from edit mode lands in preview -----------------------------------
+# --- Open from Source mode lands in Rendered mode ---------------------------
 FAKE["answer"] = S.Discard
 FAKE["open_path"] = str(sample)
 window.on_open()
 check(window.loaded_path == sample, "File > Open loads the picked file")
-check(window.mode == "preview" and window.stack.currentIndex() == 0, "open from edit mode shows preview")
-check(window.act_preview.isChecked(), "open from edit mode checks Preview Mode")
+check(window.mode == "rendered" and window.stack.currentWidget() is window.rich, "open from Source mode shows Rendered")
+check(window.act_rendered.isChecked(), "open from Source mode checks Rendered")
 
 # --- Drag-and-drop with a dirty buffer --------------------------------------
-window.act_edit.trigger()
+window.act_source.trigger()
 window.editor.insertPlainText("x")
 FAKE["answer"] = S.Cancel
 window._open_dropped([str(legacy)])
 check(window.loaded_path == sample and window.dirty, "cancelled drop keeps the document")
 FAKE["answer"] = S.Discard
 window._open_dropped([str(legacy)])
-check(window.loaded_path == legacy and window.mode == "preview", "drop opens the file in preview")
+check(window.loaded_path == legacy and window.mode == "rendered", "drop opens the file in Rendered mode")
+
+# --- Files dropped on the editor page open; web links stay in the page --------
+from PySide6.QtCore import QMimeData, QPointF, Qt, QUrl  # noqa: E402
+from PySide6.QtGui import QDragEnterEvent, QDropEvent  # noqa: E402
+
+
+def drop_on_page(url: QUrl) -> None:
+    """A drag from Explorer: DragEnter then Drop on the page's focus proxy (Qt needs both)."""
+    mime = QMimeData()
+    mime.setUrls([url])
+    for kind in (QDragEnterEvent, QDropEvent):
+        qt_app.sendEvent(window.rich.focusProxy(), kind(QPointF(40, 40), Qt.DropAction.CopyAction, mime,
+                                                        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+    pump(lambda: False, 0.3)  # the open is deferred to the next event-loop turn
+
+
+drop_on_page(QUrl.fromLocalFile(str(sample)))
+check(window.loaded_path == sample and window.mode == "rendered", "a file dropped on the Rendered page opens")
+drop_on_page(QUrl("https://example.com/page.md"))
+check(window.loaded_path == sample, "a web link dropped on the page opens nothing")
+os.kill(window.rich.page().renderProcessPid(), signal.SIGTERM)  # a crash replaces the focus proxy
+pump(lambda: window.rich.focusProxy() is None, 5)
+window.rich.restart()
+check(pump(lambda: window.rich.is_ready and window.rich.focusProxy() is not None, 5), "the restarted page is ready")
+drop_on_page(QUrl.fromLocalFile(str(legacy)))
+check(window.loaded_path == legacy, "files dropped on a restarted page still open")
 
 # --- Window close with unsaved changes --------------------------------------
-window.act_edit.trigger()
+window.act_source.trigger()
 window.editor.insertPlainText("unsaved")
 FAKE["answer"] = S.Cancel
 event = QCloseEvent()
@@ -274,13 +335,13 @@ check(event.isAccepted(), "Don't Save on close lets the window close")
 # --- File > Close resets to a fresh state -----------------------------------
 window.on_close()  # still dirty: FAKE answer is Discard
 check(window.loaded_path is None and window.buffer == "", "Close empties the buffer")
-check(window.mode == "preview" and not window.dirty, "Close returns to clean preview")
+check(window.mode == "rendered" and not window.dirty, "Close returns to a clean Rendered page")
 check(window.windowTitle() == "Untitled - MD Viewer", "Close shows Untitled title")
 
 # --- Zoom -------------------------------------------------------------------
 window._zoom_in()
 check(window._zoom == 1.25, "Zoom In multiplies by 1.25")
-check(window._left_label.text() == "Preview 125%", "status left shows zoom when not 100%")
+check(window._left_label.text() == "Rendered 125%", "status left shows zoom when not 100%")
 check(window._right_label.text().startswith("125% | "), "status right shows zoom")
 for _ in range(20):
     window._zoom_in()
@@ -289,7 +350,7 @@ for _ in range(40):
     window._zoom_out()
 check(window._zoom == 0.25, "zoom clamps at 25%")
 window._zoom_reset()
-check(window._zoom == 1.0 and window.preview.zoomFactor() == 1.0, "Zoom Reset returns to 100%")
+check(window._zoom == 1.0 and window.rich.zoomFactor() == 1.0, "Zoom Reset returns to 100%")
 
 # --- Word Wrap --------------------------------------------------------------
 window.act_wrap.setChecked(False)
@@ -329,60 +390,110 @@ except OSError:
 settings.save = original_save
 check(survived, "save_settings swallows write errors on exit")
 
-# --- Task 9: preview rendering ------------------------------------------------
-from PySide6.QtCore import QUrl  # noqa: E402
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings  # noqa: E402
+# --- WYSIWYG Task 13: the Rendered editor in the window -----------------------
+from mdviewer import richview  # noqa: E402
+from mdviewer.core import docmodel, render, serialize  # noqa: E402
 
-from mdviewer import preview as preview_module  # noqa: E402
-from mdviewer.core import render  # noqa: E402
-
-check(isinstance(window.preview, preview_module.MarkdownPreview), "preview is a MarkdownPreview")
-check(
-    not window.preview.settings().testAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled),
-    "JavaScript is disabled in the preview",
-)
-doc = TMP / "doc.md"
-doc.write_text("# Title\n\n![pic](pic.png)\n\n[web](https://example.com)\n", encoding="utf-8")
+check(isinstance(window.rich, richview.RichView), "the Rendered view is a RichView")
+doc_md = TMP / "doc.md"
+doc_md.write_text("# Title\n\n![pic](pic.png)\n\n[web](https://example.com)\n", encoding="utf-8")
 FAKE["answer"] = S.Discard
-check(window.open_file(doc), "open doc.md")
-rendered = window.preview.last_html
-check("<h1>Title</h1>" in rendered, "preview renders Markdown headings")
-check((TMP / "pic.png").as_uri() in rendered, "relative image resolved against the file's folder")
-check(window.preview.page_file.read_text(encoding="utf-8") == rendered, "page file holds the rendered HTML")
-check("#1f2328" in rendered, "light CSS by default")
-window._effective_theme = "dark"
-window._render_preview()
-check("#0d1117" in window.preview.last_html, "dark CSS when the effective theme is dark")
-window._effective_theme = "light"
+check(window.open_file(doc_md), "open doc.md")
+check(page_js(window.rich, "window.mdEditor.getDocument().content[1].content[0].attrs.display_src")
+      == (TMP / "pic.png").as_uri(), "relative image resolved against the file's folder")
+check(page_js(window.rich, "getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()")
+      == render.PAGE_BACKGROUND["light"], "light theme by default")
+
+# a file docmodel cannot load opens in Source mode; a switch to Rendered then stays in Source
+def boom(*args, **kwargs):
+    raise RuntimeError("docmodel bug")
 
 
-def boom(text, base_dir=None):
-    raise RuntimeError("renderer bug")
-
-
-original_render_body = render.render_body
-render.render_body = boom
+original_from_markdown = docmodel.from_markdown
+docmodel.from_markdown = boom
 window.statusBar().clearMessage()
-window._render_preview()
-render.render_body = original_render_body
-check('<pre class="fallback">' in window.preview.last_html, "render failure falls back to <pre>")
-check("plain text" in window.statusBar().currentMessage(), "render failure shows a status warning")
+check(window.open_file(doc_md), "a file docmodel cannot load still opens")
+check(window.mode == "source" and window.buffer == doc_md.read_text(encoding="utf-8"), "it opens in Source mode")
+check(window.statusBar().currentMessage() == main_window.OPEN_FAILED_NOTE, "with the Source-mode warning")
+window.act_rendered.trigger()
+check(window.mode == "source" and window.act_source.isChecked(), "a switch to Rendered that cannot load stays in Source")
+check(window.statusBar().currentMessage() == main_window.SWITCH_FAILED_NOTE, "and says so")
+docmodel.from_markdown = original_from_markdown
 
-OPENED: list = []
-preview_module.open_external = OPENED.append
-LINK = QWebEnginePage.NavigationType.NavigationTypeLinkClicked
-page = window.preview.page()
-check(not page.acceptNavigationRequest(QUrl("https://example.com"), LINK, True), "web link does not navigate the preview")
-check(OPENED == [QUrl("https://example.com")], "web link opens externally")
-anchor = QUrl.fromLocalFile(str(window.preview.page_file))
-anchor.setFragment("fn-1")
-check(page.acceptNavigationRequest(anchor, LINK, True), "in-page anchor stays in the preview")
-check(len(OPENED) == 1, "in-page anchor does not open externally")
+# files larger than 5 MB open in Source mode, smaller ones in Rendered mode
+saved_limit = main_window.LARGE_FILE_BYTES
+main_window.LARGE_FILE_BYTES = 10
+small, large = TMP / "ten.md", TMP / "eleven.md"
+small.write_bytes(b"0123456789")
+large.write_bytes(b"0123456789\n")
+window.statusBar().clearMessage()
+check(window.open_file(small) and window.mode == "rendered", "a file at the limit opens in Rendered mode")
+check(window.open_file(large) and window.mode == "source", "a file over the limit opens in Source mode")
+check(window.statusBar().currentMessage() == "Large file: opened in Source mode", "with the large-file note")
+window.act_rendered.trigger()
+check(window.mode == "rendered", "a large file can still be switched to Rendered mode")
+main_window.LARGE_FILE_BYTES = saved_limit
+check(saved_limit == 5 * 1024 * 1024, "the limit is 5 MB")
 
-big = TMP / "big.md"
-big.write_text("".join(f"Line {i} with some **bold** text.\n\n" for i in range(60000)), encoding="utf-8")
-check(window.open_file(big), "open a large document")
-check(window.preview.page_file.stat().st_size > 2 * 1024 * 1024, "pages over 2 MB are rendered")
+# a Rendered pull that gets no answer saves nothing and keeps the edits
+window.open_file(doc_md)
+window.rich.focus_block(0)
+window.rich.command("setBlock", {"type": "heading", "level": 3})
+pump(lambda: window.dirty, 3)
+saved_timeout = richview.PULL_TIMEOUT_MS
+richview.PULL_TIMEOUT_MS = 300
+window.rich.page().runJavaScript("(() => { const t = Date.now(); while (Date.now() - t < 1200); })()", 0)
+window.statusBar().clearMessage()
+window.on_save()
+check(pump(lambda: window.statusBar().currentMessage() == main_window.PULL_FAILED_NOTE, 3), "a pull with no answer warns")
+richview.PULL_TIMEOUT_MS = saved_timeout
+pump(lambda: False, 1.2)
+check(doc_md.read_text(encoding="utf-8").startswith("# Title") and window.dirty, "nothing was saved; still dirty")
+
+# a serializer failure saves nothing and keeps the edits for the next try
+def bad_to_text(doc):
+    raise ValueError("serializer bug")
+
+
+ERRORS.clear()
+original_to_text = serialize.to_text
+serialize.to_text = bad_to_text
+window.on_save()
+check(pump(lambda: ERRORS, 3) and "could not be converted to Markdown" in ERRORS[0], "a serializer failure is reported")
+serialize.to_text = original_to_text
+check(doc_md.read_text(encoding="utf-8").startswith("# Title") and window.dirty, "nothing was saved")
+window.on_save()
+check(pump(lambda: not window.dirty, 5) and doc_md.read_text(encoding="utf-8").startswith("### Title"),
+      "the next Save writes the edits")
+
+# a pull in flight: other pulls are dropped; a pull of a replaced document is discarded
+window.rich.focus_block(0)
+window.rich.command("setBlock", {"type": "heading", "level": 1})
+pump(lambda: window.dirty, 3)
+window.rich.page().runJavaScript("(() => { const t = Date.now(); while (Date.now() - t < 600); })()", 0)
+window.on_save()
+window.act_source.trigger()
+check(window.mode == "rendered" and window.act_rendered.isChecked(), "a switch while a pull is in flight is dropped")
+check(pump(lambda: not window.dirty, 5) and doc_md.read_text(encoding="utf-8").startswith("# Title"), "the first pull saves")
+window.rich.command("setBlock", {"type": "heading", "level": 2})
+pump(lambda: window.dirty, 3)
+window.rich.page().runJavaScript("(() => { const t = Date.now(); while (Date.now() - t < 600); })()", 0)
+window.on_save()
+window.open_file(sample)
+pump(lambda: False, 1)
+check(window.buffer == RENDERED_SAVED and doc_md.read_text(encoding="utf-8").startswith("# Title"),
+      "a pull from a document replaced meanwhile is discarded")
+
+# a page that never loads: Source mode only, with a warning
+saved_web = render.WEB_DIR
+render.WEB_DIR = TMP / "no-web"
+broken = main_window.MainWindow({"theme": "light", "window": None, "preview_zoom": 1.0})
+render.WEB_DIR = saved_web
+check(pump(lambda: broken.rich.failed, 2) and broken.mode == "source", "a page that never loads leaves Source mode")
+check(not broken.act_rendered.isEnabled(), "Rendered is greyed for the session")
+check(broken.statusBar().currentMessage() == main_window.EDITOR_FAILED_NOTE, "with a warning")
+check(broken.open_file(doc_md) and broken.mode == "source", "files then open in Source mode")
+
 
 # --- Task 10: editor intelligence ---------------------------------------------
 from PySide6.QtCore import Qt  # noqa: E402
@@ -396,6 +507,7 @@ check(isinstance(ed, editor_module.MarkdownEditor), "editor is a MarkdownEditor"
 window.show()  # the completer popup only opens for a visible editor
 FAKE["answer"] = S.Discard
 window.on_new()
+window.act_source.trigger()
 qt_app.processEvents()
 LIGHT = editor_module.COLORS["light"]
 WAVE = QTextCharFormat.UnderlineStyle.WaveUnderline
@@ -520,6 +632,7 @@ window.on_close()
 
 # --- Task 11: file watching -----------------------------------------------------
 check(window._watch_timer.interval() == 1000 and window._watch_timer.isActive(), "watcher polls every 1000 ms")
+window._watch_timer.stop()  # the checks below poll by hand; pump() would let the timer poll too
 watched = TMP / "watched.md"
 watched.write_bytes(b"one\n")
 FAKE["answer"] = S.Discard
@@ -528,14 +641,15 @@ ASKED.clear()
 window._poll_disk()
 check(window.buffer == "one\n" and not ASKED, "unchanged file: nothing happens")
 
-# preview mode: silent re-render
+# Rendered mode, no edits: silent reload
 watched.write_bytes(b"two two\n")
 window._poll_disk()
-check(window.buffer == "two two\n" and "two two" in window.preview.last_html, "preview re-renders silently")
-check(not ASKED and not window.dirty, "silent re-render asks nothing")
+check(window.buffer == "two two\n" and window.mode == "rendered", "Rendered mode reloads silently")
+check(page_js(window.rich, "document.querySelector('#editor p')?.textContent") == "two two", "the page shows the new text")
+check(not ASKED and not window.dirty, "silent reload asks nothing")
 
 # own save is not an external change
-window.act_edit.trigger()
+window.act_source.trigger()
 window.editor.moveCursor(END)
 window.editor.insertPlainText("mine\n")
 check(window.on_save(), "save in edit mode")
@@ -546,9 +660,9 @@ check(not ASKED, "own save does not trigger the dialog")
 watched.write_bytes(b"external 1\n")
 FAKE["answer"] = S.Yes
 window._poll_disk()
-check(len(ASKED) == 1 and '"watched.md" was modified externally at' in ASKED[0], "edit mode asks before replacing")
+check(len(ASKED) == 1 and '"watched.md" was modified externally at' in ASKED[0], "Source mode asks before replacing")
 check(window.buffer == "external 1\n" and not window.dirty, "Reload loads the disk content")
-check(window.mode == "edit", "Reload stays in edit mode")
+check(window.mode == "source", "Reload stays in Source mode")
 
 # Keep my version
 ASKED.clear()
@@ -582,7 +696,7 @@ window._poll_disk()
 check(len(ASKED) == 2 and window.buffer == "during the dialog\n", "a change made during the dialog is picked up next")
 
 # missing file: one warning, then recovery
-window.act_preview.trigger()
+window.act_rendered.trigger()
 ASKED.clear()
 watched.unlink()
 window.statusBar().clearMessage()
@@ -593,10 +707,10 @@ window._poll_disk()
 check(window.statusBar().currentMessage() == "", "missing-file warning is shown once")
 watched.write_bytes(b"back again\n")
 window._poll_disk()
-check(window.buffer == "back again\n", "reappearing file re-renders")
+check(window.buffer == "back again\n", "reappearing file reloads")
 
 # Save recreates a deleted file without a false alarm
-window.act_edit.trigger()
+window.act_source.trigger()
 watched.unlink()
 window._poll_disk()
 window.editor.insertPlainText("x")
@@ -604,14 +718,15 @@ check(window.on_save() and watched.exists(), "Save recreates a deleted file")
 window._poll_disk()
 check(not ASKED, "recreating save raises no change dialog")
 
-# preview read failure is retried on the next tick
-window.act_preview.trigger()
+# a Rendered-mode read failure is retried on the next tick
+window.act_rendered.trigger()
+before_lock = window.buffer
 window._read_disk = lambda: None
 watched.write_bytes(b"locked content!\n")
 window.statusBar().clearMessage()
 window._poll_disk()
 check("Could not read" in window.statusBar().currentMessage(), "read failure warns")
-check("locked content" not in window.preview.last_html, "read failure keeps the last render")
+check(window.buffer == before_lock, "read failure keeps the last version")
 del window._read_disk
 window._poll_disk()
 check(window.buffer == "locked content!\n", "the failed read is retried on the next tick")
@@ -627,6 +742,24 @@ moved.write_bytes(b"new path changed\n")
 window._poll_disk()
 check(window.buffer == "new path changed\n", "watcher follows the Save As path")
 
+# Rendered mode with edits: the dialog, as in Source mode (v2 spec section 2)
+window.rich.focus_block(0)
+window.rich.command("setBlock", {"type": "heading", "level": 1})
+check(pump(lambda: window.dirty, 3), "a Rendered edit marks the buffer dirty")
+ASKED.clear()
+moved.write_bytes(b"changed under an edit\n")
+FAKE["answer"] = S.No
+window._poll_disk()
+check(len(ASKED) == 1 and window.mode == "rendered" and window.dirty, "Rendered mode with edits asks first")
+check(page_js(window.rich, "document.querySelector('#editor h1')?.textContent") == "new path changed",
+      "Keep my version keeps the edited page")
+moved.write_bytes(b"changed again\n")
+FAKE["answer"] = S.Yes
+window._poll_disk()
+check(len(ASKED) == 2 and window.buffer == "changed again\n" and not window.dirty, "Reload replaces the edits")
+check(window.mode == "rendered" and page_js(window.rich, "document.querySelector('#editor p')?.textContent")
+      == "changed again", "the page shows the reloaded file")
+
 # Untitled: nothing to watch
 window.on_close()
 window._poll_disk()
@@ -636,9 +769,10 @@ check(window._watcher is None, "no watcher for Untitled")
 bar = window.find_bar
 FAKE["answer"] = S.Discard
 window.on_close()
-check(not window.act_find.isEnabled() and not window.act_replace.isEnabled(), "Find/Replace disabled in preview")
+check(not window.act_find.isEnabled() and not window.act_replace.isEnabled(), "Find/Replace disabled in Rendered mode")
 window.on_new()
-check(window.act_find.isEnabled() and window.act_replace.isEnabled(), "Find/Replace enabled in edit mode")
+window.act_source.trigger()
+check(window.act_find.isEnabled() and window.act_replace.isEnabled(), "Find/Replace enabled in Source mode")
 check(not bar.isVisible(), "find bar hidden by default")
 
 
@@ -724,13 +858,17 @@ FAKE["answer"] = S.Discard
 window.open_file(sample)
 sample_before = sample.read_bytes()
 sample.write_bytes(sample_before + b"on disk only\r\n")  # not polled: a theme switch must not reload
+theme_loads: list = []
+window.rich.loadStarted.connect(lambda: theme_loads.append(1))
 FAKE["system_theme"] = "dark"
 window._poll_theme()
 check(window._effective_theme == "dark", "System mode follows Windows switching to dark")
 check(qt_app.style().name().lower() == "fusion" and window_color() == DARK_WINDOW, "dark palette on the Fusion style")
-check("#0d1117" in window.preview.last_html, "preview re-rendered with dark CSS")
-check("on disk only" not in window.preview.last_html, "theme switch re-renders the buffer, not the disk")
-check(window.mode == "preview" and not window.dirty, "theme switch keeps mode and dirty state")
+check(pump(lambda: page_js(window.rich, "getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()")
+           == "#0d1117", 3), "the editor page switches to the dark CSS")
+check(page_js(window.rich, "document.body.innerText.includes('on disk only')") is False,
+      "theme switch keeps the document, not the disk")
+check(window.mode == "rendered" and not window.dirty, "theme switch keeps mode and dirty state")
 check(heading_color(window) == editor_module.COLORS["dark"]["heading"], "editor recolored for dark")
 sample.write_bytes(sample_before)
 
@@ -752,7 +890,9 @@ GRAY_WINDOW = main_window.GRAY_PALETTE_COLORS["window"]
 choose_theme("gray")
 check(window._effective_theme == "gray" and not window._theme_timer.isActive(), "forced Gray applies without polling")
 check(qt_app.style().name().lower() == "fusion" and window_color() == GRAY_WINDOW, "gray palette on the Fusion style")
-check("#3a3d41" in window.preview.last_html, "preview re-rendered with gray CSS")
+check(pump(lambda: page_js(window.rich, "getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()")
+           == "#3a3d41", 3), "the editor page switches to the gray CSS")
+check(theme_loads == [], "theme changes never reload the editor page")
 check(heading_color(window) == editor_module.COLORS["gray"]["heading"], "editor recolored for gray")
 FAKE["system_theme"] = "dark"
 window._poll_theme()
@@ -767,7 +907,7 @@ check(window.settings_snapshot()["theme"] == "system", "System (auto) is saved")
 
 restarted = main_window.MainWindow({"theme": "dark", "window": None, "preview_zoom": 1.0})
 check(restarted._theme_choice == "dark" and restarted._effective_theme == "dark", "saved Dark is restored")
-check("#0d1117" in restarted.preview.last_html, "startup preview is already dark")
+check("#0d1117" in restarted.rich.page_file.read_text(encoding="utf-8"), "the startup editor page is already dark")
 check(heading_color(restarted) == editor_module.COLORS["dark"]["heading"], "startup editor is already dark")
 choose_theme("system")  # back to light for any later checks
 
@@ -812,7 +952,7 @@ check(not rw.open_file(TMP / "never-existed.md"), "failed open returns False")
 check(abs_(TMP / "never-existed.md") not in recent_paths(rw), "failed open is not remembered")
 
 # clicking an entry opens it (through the unsaved-changes prompt)
-rw.act_edit.trigger()
+rw.act_source.trigger()
 rw.editor.insertPlainText("dirty")
 FAKE["answer"] = S.Cancel
 ASKED.clear()
@@ -820,7 +960,7 @@ recent_entries(rw)[1].trigger()
 check(len(ASKED) == 1 and rw.loaded_path == sample, "a dirty buffer is asked about before opening a recent file")
 FAKE["answer"] = S.Discard
 recent_entries(rw)[1].trigger()
-check(rw.loaded_path == rdoc and rw.mode == "preview", "clicking an entry opens it in preview")
+check(rw.loaded_path == rdoc and rw.mode == "rendered", "clicking an entry opens it in Rendered mode")
 check(recent_paths(rw)[0] == abs_(rdoc), "the opened entry moves to the front")
 
 # a vanished file reports the error and drops its entry
@@ -832,6 +972,7 @@ check(abs_(gone) not in recent_paths(rw), "a missing recent file is removed from
 
 # Save As records the new path
 rw.on_new()
+rw.act_source.trigger()
 rw.editor.insertPlainText("fresh")
 saved_as = TMP / "recent-saved.md"
 FAKE["save_path"] = str(saved_as)
@@ -865,10 +1006,10 @@ check(not any(a.menu() for a in window.menu_view.actions()), "View no longer has
 check(window.act_preferences in window.menu_view.actions(), "Preferences is in the View menu")
 check(window.act_preferences.text() == "Pre&ferences...", "Preferences action text")
 check(window.act_preferences.shortcut().toString() == "Ctrl+,", "Preferences shortcut is Ctrl+,")
-check(window.act_preferences.isEnabled(), "Preferences enabled in preview mode")
-window.act_edit.trigger()
-check(window.act_preferences.isEnabled(), "Preferences enabled in edit mode")
-window.act_preview.trigger()
+check(window.act_preferences.isEnabled(), "Preferences enabled in Rendered mode")
+window.act_source.trigger()
+check(window.act_preferences.isEnabled(), "Preferences enabled in Source mode")
+window.act_rendered.trigger()
 
 seen: dict = {}
 
@@ -906,7 +1047,7 @@ window.act_preferences.trigger()
 check(window.editor.font().pointSize() == 15, "a cancelled font change is discarded")
 
 # a font change does not disturb theme, mode, text or dirty state
-check(window._theme_choice == "system" and window.mode == "preview" and not window.dirty, "font change keeps theme, mode and dirty state")
+check(window._theme_choice == "system" and window.mode == "rendered" and not window.dirty, "font change keeps theme, mode and dirty state")
 
 # restored at startup, and written by save_settings
 app_module.save_settings(window)

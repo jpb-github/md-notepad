@@ -2,11 +2,12 @@
 
 import os
 import sys
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QRect, QTimer
-from PySide6.QtGui import QActionGroup, QColor, QFont, QGuiApplication, QKeySequence, QPalette
+from PySide6.QtGui import QActionGroup, QColor, QFont, QGuiApplication, QKeySequence, QPalette, QTextCursor
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWidgets import (
     QApplication,
@@ -21,12 +22,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mdviewer.core import encoding, settings, themeservice
+from mdviewer.core import docmodel, encoding, frontmatter, serialize, settings, themeservice
 from mdviewer.core.filewatch import Watcher, WatchEvent
 from mdviewer.editor import MarkdownEditor
 from mdviewer.findbar import FindBar
 from mdviewer.preferences import PreferencesDialog
-from mdviewer.preview import MarkdownPreview
+from mdviewer.richview import RichView
 
 APP_NAME = "MD Viewer"
 ZOOM_MIN = 0.25
@@ -36,6 +37,12 @@ DEFAULT_SIZE = (900, 700)
 WARNING_MS = 10000
 POLL_MS = 1000
 THEME_POLL_MS = 2000
+LARGE_FILE_BYTES = 5 * 1024 * 1024  # spec: larger files open in Source mode
+LARGE_FILE_NOTE = "Large file: opened in Source mode"
+OPEN_FAILED_NOTE = "Opened in Source mode: the rendered editor could not load this file."
+SWITCH_FAILED_NOTE = "Staying in Source mode: the rendered editor could not load this document."
+EDITOR_FAILED_NOTE = "Rendered mode is unavailable: the rendered editor did not start."
+PULL_FAILED_NOTE = "The rendered editor did not answer; nothing was saved or switched."
 DARK_PALETTE_COLORS = {
     "window": "#202020",
     "window_text": "#f0f0f0",
@@ -173,33 +180,44 @@ def _local_paths(mime) -> list[str]:
 
 
 class MainWindow(QMainWindow):
-    PREVIEW = "preview"
-    EDIT = "edit"
+    RENDERED = "rendered"
+    SOURCE = "source"
 
     def __init__(self, data: dict):
         super().__init__()
-        self.mode = self.PREVIEW
+        self.mode = self.RENDERED
         self.dirty = False
         self.loaded_path: Path | None = None
         self.encoding = "utf-8"
         self.newline = "\n"
         self._size = 0
         self._watcher: Watcher | None = None
-        self._pending_reload = False  # a preview re-read failed; retry on the next tick
+        self._pending_reload = False  # a Rendered re-read failed; retry on the next tick
         self._busy = False  # a "File changed on disk" dialog is open
         self._zoom = float(data.get("preview_zoom") or 1.0)
         self._theme_choice = data.get("theme") or "system"
         self._recent: list[str] = list(data.get("recent_files") or [])
         self._editor_font = {**settings.DEFAULT_FONT, **(data.get("editor_font") or {})}
         self._effective_theme = "light"  # Task 13 makes this follow System/Light/Dark
+        # Rendered mode: the buffer is the text last loaded into the editor page or pulled
+        # from it; _block_lines are its top-level blocks' source lines (None: not parsed yet).
+        self._rendered_text = ""
+        self._block_lines: list[int] | None = []
+        self._caret_block = 0  # top-level block of the Rendered caret (RichView.caretBlock)
+        self._pending_pull = False  # a with_buffer pull is in flight; re-triggers are dropped
+        self._doc_number = 0  # counts loads; a pull started before the latest one is discarded
 
         self.editor = MarkdownEditor()
         self._apply_editor_font()
         self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
 
-        self.preview = MarkdownPreview()
-        # Dropped files must reach MainWindow, not navigate the page.
-        self.preview.setAcceptDrops(False)
+        # Start the page in the saved theme: no light flash before the first set_theme.
+        self.rich = RichView(read_system_theme() if self._theme_choice == "system" else self._theme_choice)
+        self.rich.changed.connect(self._on_rendered_changed)
+        self.rich.caretBlock.connect(self._on_caret_block)
+        self.rich.load_failed.connect(self._on_editor_failed)
+        self.rich.ready.connect(self._watch_rich_drops)
+        self._watch_rich_drops()
 
         self.find_bar = FindBar(self.editor)
         self.find_bar.hide()
@@ -211,7 +229,7 @@ class MainWindow(QMainWindow):
         page_layout.addWidget(self.find_bar)
 
         self.stack = QStackedWidget()
-        self.stack.addWidget(self.preview)  # index 0
+        self.stack.addWidget(self.rich)  # index 0
         self.stack.addWidget(editor_page)  # index 1: editor + find bar
         self.setCentralWidget(self.stack)
 
@@ -225,8 +243,8 @@ class MainWindow(QMainWindow):
         self.editor.modificationChanged.connect(self._on_modification)
         self.editor.cursorPositionChanged.connect(self._update_chrome)
         self.editor.viewport().installEventFilter(self)
-        # setHtml can reset the page zoom; re-apply ours after every load.
-        self.preview.loadFinished.connect(self._apply_zoom)
+        # A page load (restart) resets the zoom; re-apply ours after every load.
+        self.rich.loadFinished.connect(self._apply_zoom)
         self._apply_zoom()
 
         self.setAcceptDrops(True)
@@ -247,7 +265,10 @@ class MainWindow(QMainWindow):
 
     @property
     def buffer(self) -> str:
-        """Editor text with \\n breaks. toPlainText() would turn NBSP into spaces."""
+        """Source mode: editor text with \\n breaks (toPlainText() would turn NBSP into spaces).
+        Rendered mode: the text last loaded into the editor page or pulled from it."""
+        if self.mode == self.RENDERED:
+            return self._rendered_text
         return self.editor.document().toRawText().replace("\u2029", "\n")
 
     def _load(self, path: Path | None, raw: bytes) -> None:
@@ -256,7 +277,10 @@ class MainWindow(QMainWindow):
         self.newline = "\r\n" if "\r\n" in text else "\n"
         self.loaded_path = path
         self._size = len(raw)
-        self.editor.setPlainText(text.replace("\r\n", "\n"))
+        self._doc_number += 1
+        self._rendered_text = text.replace("\r\n", "\n")
+        self._block_lines = None
+        self.editor.setPlainText(self._rendered_text)
         self.editor.document().setModified(False)
         self.dirty = False
         self._watch(path)
@@ -300,14 +324,14 @@ class MainWindow(QMainWindow):
 
         m = self.menu_view = bar.addMenu("&View")
         modes = QActionGroup(self)
-        self.act_preview = self._action(
-            m, "&Preview Mode", "Ctrl+P", lambda: self.set_mode(self.PREVIEW), checkable=True
+        self.act_rendered = self._action(
+            m, "&Rendered", "Ctrl+P", lambda: self.set_mode(self.RENDERED), checkable=True
         )
-        self.act_edit = self._action(
-            m, "&Edit Mode", "Ctrl+E", lambda: self.set_mode(self.EDIT), checkable=True
+        self.act_source = self._action(
+            m, "&Source", "Ctrl+E", lambda: self.set_mode(self.SOURCE), checkable=True
         )
-        modes.addAction(self.act_preview)
-        modes.addAction(self.act_edit)
+        modes.addAction(self.act_rendered)
+        modes.addAction(self.act_source)
         m.addSeparator()
         self.act_wrap = self._action(m, "&Word Wrap", checkable=True)
         self.act_wrap.setChecked(True)
@@ -324,11 +348,12 @@ class MainWindow(QMainWindow):
 
         self._refresh_recent_menu()
 
-        self._edit_only_actions = [
+        # Task 17 routes the Edit menu to the Rendered editor; until then its keys go to the page.
+        self._source_only_actions = [
             self.act_undo, self.act_redo, self.act_cut, self.act_paste, self.act_select_all,
             self.act_find, self.act_replace,
         ]
-        self._preview_only_actions = [self.act_zoom_in, self.act_zoom_out, self.act_zoom_reset]
+        self._rendered_only_actions = [self.act_zoom_in, self.act_zoom_out, self.act_zoom_reset]
 
     # --- File operations ---------------------------------------------------
 
@@ -341,14 +366,18 @@ class MainWindow(QMainWindow):
             return False
         self._load(target, raw)
         self._remember_recent(target)
-        self._show_mode(self.PREVIEW)
+        if len(raw) > LARGE_FILE_BYTES:
+            self._show_mode(self.SOURCE)
+            self._warn(LARGE_FILE_NOTE)
+        elif not self._show_mode(self.RENDERED) and not self.rich.failed:
+            self._warn(OPEN_FAILED_NOTE)
         return True
 
     def on_new(self) -> None:
         if not self._ok_to_replace():
             return
         self._load(None, b"")
-        self._show_mode(self.EDIT)  # a preview of an empty file is meaningless
+        self._show_mode(self.RENDERED)
 
     def on_open(self) -> None:
         if not self._ok_to_replace():
@@ -358,9 +387,11 @@ class MainWindow(QMainWindow):
             self.open_file(path)
 
     def on_save(self) -> bool:
+        """True when the file was written before returning. In Rendered mode with edits not
+        yet pulled, the save finishes after the pull and this returns False."""
         if self.loaded_path is None:
             return self.on_save_as()
-        return self._save_to(self.loaded_path)
+        return self._save_when_ready(self.loaded_path)
 
     def on_save_as(self) -> bool:
         start = str(self.loaded_path) if self.loaded_path else "Untitled.md"
@@ -370,13 +401,18 @@ class MainWindow(QMainWindow):
         target = Path(path)
         if not target.suffix:
             target = target.with_suffix(".md")
-        return self._save_to(target)
+        return self._save_when_ready(target)
 
     def on_close(self) -> None:
         if not self._ok_to_replace():
             return
         self._load(None, b"")
-        self._show_mode(self.PREVIEW)
+        self._show_mode(self.RENDERED)
+
+    def _save_when_ready(self, path: Path) -> bool:
+        saved: list[bool] = []
+        self.with_buffer(lambda _text: saved.append(self._save_to(path)))
+        return saved == [True]
 
     def _save_to(self, path: Path) -> bool:
         """Write the buffer with the file's own newline style and encoding."""
@@ -439,48 +475,112 @@ class MainWindow(QMainWindow):
         """True when the buffer may be replaced: it is clean, was saved, or was discarded."""
         return not self.dirty or self._prompt_save() != "cancel"
 
-    def _reload_or_clear(self) -> None:
-        """Don't Save: put the disk content back (empty for Untitled or unreadable files)."""
-        if self.loaded_path is not None:
-            try:
-                raw = self.loaded_path.read_bytes()
-            except OSError:
-                raw = None
-            if raw is not None:
-                self._load(self.loaded_path, raw)
-                return
-        self.editor.setPlainText("")
-        self.editor.document().setModified(False)
-        self.dirty = False
-
     # --- Modes -------------------------------------------------------------
 
     def set_mode(self, mode: str) -> None:
+        """Switch without a prompt; the dirty flag carries over, each mode starts a new undo history."""
+        self._update_chrome()  # the action group already moved the radio; it follows self.mode
         if mode == self.mode:
-            self._update_chrome()
             return
-        if mode == self.PREVIEW and self.dirty:
-            answer = self._prompt_save()
-            if answer == "cancel":
-                self._update_chrome()  # the action group already moved the radio check
-                return
-            if answer == "discard":
-                self._reload_or_clear()
-        self._show_mode(mode)
-
-    def _show_mode(self, mode: str) -> None:
-        self.mode = mode
-        self.stack.setCurrentIndex(0 if mode == self.PREVIEW else 1)
-        if mode == self.PREVIEW:
-            self._render_preview()
+        if mode == self.SOURCE:
+            self.with_buffer(self._enter_source)
+            return
+        line = self.editor.textCursor().blockNumber() + 1
+        if self._show_mode(self.RENDERED):
+            self.rich.focus_block(self._block_at_line(line))
         else:
-            self.editor.setFocus()
-        self._update_chrome()
+            self._warn(SWITCH_FAILED_NOTE)
 
-    def _render_preview(self, keep_scroll: bool = False) -> None:
-        base_dir = self.loaded_path.parent if self.loaded_path else None
-        if not self.preview.show_markdown(self.buffer, self._effective_theme, base_dir, keep_scroll):
-            self._warn("Preview could not render this document; showing plain text.")
+    def with_buffer(self, fn: Callable[[str], None]) -> None:
+        """fn(text) with the current buffer: at once in Source mode or when the Rendered document
+        is unchanged since it was loaded or last pulled; otherwise after pulling it. Dropped
+        while another pull is in flight (spec 6.4)."""
+        if self._pending_pull:
+            return
+        if self.mode != self.RENDERED or not self.rich.modified:
+            fn(self.buffer)
+            return
+        self._pending_pull = True
+        number = self._doc_number
+        self.rich.request_document(lambda doc: self._pulled(doc, fn, number))
+
+    def _pulled(self, doc: dict | None, fn: Callable[[str], None], number: int) -> None:
+        self._pending_pull = False
+        if number != self._doc_number:
+            return  # another document was loaded meanwhile: this one is gone
+        if doc is None:
+            self._warn(PULL_FAILED_NOTE)  # Task 14: the stopped-responding dialog
+            return
+        try:
+            text = serialize.to_text(doc)
+        except Exception as exc:  # a serializer bug must not lose the edits
+            self.rich.modified = True
+            show_error(self, f"The document could not be converted to Markdown, so nothing was saved.\n{exc}")
+            return
+        if text != self._rendered_text:
+            self._rendered_text = text
+            self._block_lines = None
+        fn(text)
+
+    def _enter_source(self, text: str) -> None:
+        """Rendered -> Source with `text`, the Rendered buffer (unchanged text keeps the editor's)."""
+        line = self._line_of_block(self._caret_block)
+        if self.editor.document().toRawText().replace("\u2029", "\n") != text:
+            self.editor.setPlainText(text)
+        self.editor.document().clearUndoRedoStacks()
+        self.editor.document().setModified(self.dirty)
+        self._show_mode(self.SOURCE)
+        self.editor.setTextCursor(QTextCursor(self.editor.document().findBlockByNumber(line - 1)))
+        self.editor.ensureCursorVisible()
+
+    def _show_mode(self, mode: str, keep_scroll: bool = False) -> bool:
+        """Show `mode`; Rendered first loads the buffer into the editor page. False (and Source
+        shown) when the page is unavailable or the buffer cannot be parsed."""
+        shown = True
+        if mode == self.RENDERED:
+            shown = not self.rich.failed and self._render(self.buffer, keep_scroll)
+            if not shown:
+                mode = self.SOURCE
+        self.mode = mode
+        self.stack.setCurrentIndex(0 if mode == self.RENDERED else 1)
+        (self.rich if mode == self.RENDERED else self.editor).setFocus()
+        self._update_chrome()
+        return shown
+
+    def _render(self, text: str, keep_scroll: bool = False) -> bool:
+        """Load `text` into the editor page (new undo history); False when docmodel fails."""
+        try:
+            doc = self._parse(text)
+        except Exception:  # an unmappable construct must not block the file: Source still works
+            return False
+        self._doc_number += 1
+        self._rendered_text = text
+        self._block_lines = [block["attrs"].get("line") for block in doc.get("content", [])]
+        self.rich.set_document(doc, keep_scroll)
+        return True
+
+    def _parse(self, text: str) -> dict:
+        front, body = frontmatter.split(text)
+        return docmodel.from_markdown(body, front, self.loaded_path.parent if self.loaded_path else None)
+
+    def _line_of_block(self, index: int) -> int:
+        """First source line (1-based) of top-level block `index` of the Rendered buffer."""
+        if self._block_lines is None:
+            try:
+                doc = self._parse(self._rendered_text)
+            except Exception:
+                return 1
+            self._block_lines = [block["attrs"].get("line") for block in doc.get("content", [])]
+        lines = [line for line in self._block_lines[: index + 1] if line is not None]
+        return lines[-1] if lines else 1
+
+    def _block_at_line(self, line: int) -> int:
+        """Top-level block containing source line `line`: the one starting last at or before it."""
+        best, start = 0, 0
+        for index, block_line in enumerate(self._block_lines or []):
+            if block_line is not None and start < block_line <= line:
+                best, start = index, block_line
+        return best
 
     def _warn(self, text: str) -> None:
         """Transient status-bar warning (render fallback, missing file, read failure)."""
@@ -508,11 +608,11 @@ class MainWindow(QMainWindow):
         self._update_chrome()
 
     def _apply_zoom(self, _ok: bool = True) -> None:
-        self.preview.setZoomFactor(self._zoom)
+        self.rich.setZoomFactor(self._zoom)
 
     def _copy(self) -> None:
-        if self.mode == self.PREVIEW:
-            self.preview.page().triggerAction(QWebEnginePage.WebAction.Copy)
+        if self.mode == self.RENDERED:
+            self.rich.page().triggerAction(QWebEnginePage.WebAction.Copy)
         else:
             self.editor.copy()
 
@@ -524,19 +624,20 @@ class MainWindow(QMainWindow):
     # --- Chrome: title, status bar, action state ---------------------------
 
     def _update_chrome(self) -> None:
-        editing = self.mode == self.EDIT
-        (self.act_edit if editing else self.act_preview).setChecked(True)
-        for act in self._edit_only_actions:
-            act.setEnabled(editing)
-        for act in self._preview_only_actions:
-            act.setEnabled(not editing)
+        source = self.mode == self.SOURCE
+        (self.act_source if source else self.act_rendered).setChecked(True)
+        self.act_rendered.setEnabled(not self.rich.failed)
+        for act in self._source_only_actions:
+            act.setEnabled(source)
+        for act in self._rendered_only_actions:
+            act.setEnabled(not source)
 
         pct = round(self._zoom * 100)
-        if editing:
+        if source:
             cursor = self.editor.textCursor()
             left = f"Ln {cursor.blockNumber() + 1}, Col {cursor.positionInBlock() + 1}"
         else:
-            left = "Preview" if pct == 100 else f"Preview {pct}%"
+            left = "Rendered" if pct == 100 else f"Rendered {pct}%"
         self._left_label.setText(left)
         label = ENCODING_LABELS.get(self.encoding, self.encoding)
         self._right_label.setText(f"{pct}% | {label} | {_fmt_size(self._size)}")
@@ -545,8 +646,23 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{'*' if self.dirty else ''}{name} - {APP_NAME}")
 
     def _on_modification(self, modified: bool) -> None:
-        self.dirty = modified
-        self._update_chrome()
+        if self.mode == self.SOURCE:  # Rendered mode: the editor only holds text between switches
+            self.dirty = modified
+            self._update_chrome()
+
+    def _on_rendered_changed(self) -> None:
+        if self.mode == self.RENDERED:
+            self.dirty = True
+            self._update_chrome()
+
+    def _on_caret_block(self, index: int) -> None:
+        self._caret_block = index
+
+    def _on_editor_failed(self) -> None:
+        """No ready() in time: Source only for this session. Nothing was edited in the page."""
+        if self.mode == self.RENDERED:
+            self._show_mode(self.SOURCE)
+        self._warn(EDITOR_FAILED_NOTE)
 
     # --- Drag and drop -----------------------------------------------------
 
@@ -567,9 +683,21 @@ class MainWindow(QMainWindow):
     def dropEvent(self, event) -> None:
         self._defer_drop(event)
 
+    def _watch_rich_drops(self) -> None:
+        """Files dropped on the editor page open; its own drags (text, images) stay in the page.
+        Drops go to the view's focus proxy; a restart after a renderer crash replaces it, and
+        the new one exists by ready() (before loadFinished)."""
+        proxy = self.rich.focusProxy()
+        if proxy is not None:
+            proxy.installEventFilter(self)
+
     def eventFilter(self, obj, event) -> bool:
-        """Open files dropped on the editor instead of inserting their path as text."""
+        """Open files dropped on the editors instead of inserting their path as text."""
         if event.type() in _DROP_EVENTS and event.mimeData().hasUrls():
+            if obj is not self.editor.viewport() and (
+                event.source() is not None or not _local_paths(event.mimeData())
+            ):
+                return super().eventFilter(obj, event)  # a drag inside the page, or a web link
             if event.type() == QEvent.Type.Drop:
                 self._defer_drop(event)
             else:
@@ -673,18 +801,19 @@ class MainWindow(QMainWindow):
         if event == WatchEvent.MISSING:
             self._warn(f'"{self.loaded_path.name}" was not found on disk.')
         elif event == WatchEvent.CHANGED:
-            if self.mode == self.EDIT:
+            if self.mode == self.SOURCE or self.dirty:
                 self._busy = True
                 try:
                     self._ask_reload()
                 finally:
                     self._busy = False
             else:
-                self._reload_preview(warn=True)
-        elif self._pending_reload and self.mode == self.PREVIEW:
-            self._reload_preview(warn=False)
+                self._reload_rendered(warn=True)
+        elif self._pending_reload and self.mode == self.RENDERED and not self.dirty:
+            self._reload_rendered(warn=False)
 
-    def _reload_preview(self, warn: bool) -> None:
+    def _reload_rendered(self, warn: bool) -> None:
+        """Rendered and clean: reload silently, keeping the scroll position (spec section 2)."""
         raw = self._read_disk()
         if raw is None:
             self._pending_reload = True
@@ -692,8 +821,8 @@ class MainWindow(QMainWindow):
                 self._warn(f'Could not read "{self.loaded_path.name}"; showing the last version.')
             return
         self._load(self.loaded_path, raw)
-        self._render_preview(keep_scroll=True)
-        self._update_chrome()
+        if not self._show_mode(self.RENDERED, keep_scroll=True):
+            self._warn(OPEN_FAILED_NOTE)
 
     def _ask_reload(self) -> None:
         name = self.loaded_path.name
@@ -714,11 +843,20 @@ class MainWindow(QMainWindow):
         box.button(buttons.No).setText("Keep my version")
         box.setDefaultButton(buttons.Yes)
         if ask(box) != buttons.Yes:
-            self.editor.document().setModified(True)  # buffer now differs from disk
+            if self.mode == self.SOURCE:
+                self.editor.document().setModified(True)  # buffer now differs from disk
+            else:
+                self.dirty = True
+                self._update_chrome()
             return
         raw = self._read_disk()
         if raw is None:
             self._warn(f'Could not read "{name}"; your version is kept.')
+            return
+        if self.mode == self.RENDERED:
+            self._load(self.loaded_path, raw)
+            if not self._show_mode(self.RENDERED, keep_scroll=True):
+                self._warn(OPEN_FAILED_NOTE)
             return
         position = self.editor.textCursor().position()
         self._load(self.loaded_path, raw)
@@ -775,5 +913,4 @@ class MainWindow(QMainWindow):
             QApplication.setPalette(QApplication.style().standardPalette())
         _set_dark_title_bar(self, theme in CUSTOM_PALETTES)
         self.editor.set_theme(theme)
-        if self.mode == self.PREVIEW:
-            self._render_preview(keep_scroll=True)  # same buffer, new CSS variables
+        self.rich.set_theme(theme)  # no reload: same document, undo history and scroll
