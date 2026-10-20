@@ -11389,7 +11389,7 @@ committed Task 11 code. Results:
     `pump(predicate, timeout_s)`, `page_js(view, script)`,
     `pull(view, timeout_s=10)`, `record(view)` and `names(seen)`.
 
-- [ ] **Step 1: Write the failing `editor_page` test**
+- [x] **Step 1: Write the failing `editor_page` test**
 
 Append to the end of `tests/test_render.py`:
 
@@ -11404,12 +11404,12 @@ def test_editor_page_fills_the_theme_slot(theme):
     assert (render.WEB_DIR / "editor.js").is_file()
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `.venv/Scripts/python -m pytest tests/test_render.py -k editor_page -v`
 Expected: 3 FAIL with `AttributeError: module 'mdviewer.core.render' has no attribute 'WEB_DIR'`
 
-- [ ] **Step 3: Implement `editor_page` in `mdviewer/core/render.py`**
+- [x] **Step 3: Implement `editor_page` in `mdviewer/core/render.py`**
 
 Append to the end of the module:
 
@@ -11424,12 +11424,12 @@ def editor_page(theme: str) -> str:
     return shell.replace(THEME_SLOT, page_css(theme), 1)
 ```
 
-- [ ] **Step 4: Run it to verify it passes**
+- [x] **Step 4: Run it to verify it passes**
 
 Run: `.venv/Scripts/python -m pytest tests/test_render.py -v`
 Expected: all pass (31 tests, 3 of them new)
 
-- [ ] **Step 5: Write the failing epoch checks in `scripts/check_web.py`**
+- [x] **Step 5: Write the failing epoch checks in `scripts/check_web.py`**
 
 In `class Bridge`, replace:
 
@@ -11490,13 +11490,13 @@ change") now expect `[[0]]`. Directly below the second of them, add:
     run_js(app, view, "(window.mdEditor.markClean(0), 0)")
 ```
 
-- [ ] **Step 6: Run the web check to verify it fails**
+- [x] **Step 6: Run the web check to verify it fails**
 
 Run: `.venv/Scripts/python scripts/check_web.py`
 Expected: a traceback ending in `json.decoder.JSONDecodeError` (the Task 11
 bundle has no `markClean`, so `run_js` gets no JSON back)
 
-- [ ] **Step 7: Add epochs and `markClean` to `web-src/src/editor.js`**
+- [x] **Step 7: Add epochs and `markClean` to `web-src/src/editor.js`**
 
 Replace:
 
@@ -11541,7 +11541,7 @@ In `window.mdEditor`, directly below the `getDocument` line, add:
   },
 ```
 
-- [ ] **Step 8: Rebuild the bundle and run the web check**
+- [x] **Step 8: Rebuild the bundle and run the web check**
 
 Run:
 
@@ -11553,7 +11553,7 @@ Run:
 Expected: the build ends with `Built ...mdviewer\web`; then `WEB OK`.
 `git status --short mdviewer/web` lists only `editor.js`.
 
-- [ ] **Step 9: Add the RichView checks to the smoke**
+- [x] **Step 9: Add the RichView checks to the smoke**
 
 In `scripts/smoke_ui.py`:
 - Add `import json`, `import re`, `import signal` and `import time` to the
@@ -11828,12 +11828,12 @@ richview.READY_TIMEOUT_MS = saved_ready
 
 ```
 
-- [ ] **Step 10: Run the smoke to verify it fails**
+- [x] **Step 10: Run the smoke to verify it fails**
 
 Run: `.venv/Scripts/python scripts/smoke_ui.py`
-Expected: traceback ending in `ModuleNotFoundError: No module named 'mdviewer.richview'`
+Expected: traceback ending in `ImportError: cannot import name 'richview' from 'mdviewer'`
 
-- [ ] **Step 11: Create `mdviewer/richview.py`**
+- [x] **Step 11: Create `mdviewer/richview.py`**
 
 ```python
 """Rendered editor host: the ProseMirror page (mdviewer/web) in a QWebEngineView.
@@ -12133,13 +12133,13 @@ class RichView(QWebEngineView):
         self._call(f"window.mdEditor.focusBlock({int(index)}), 0")
 ```
 
-- [ ] **Step 12: Run the smoke to verify it passes**
+- [x] **Step 12: Run the smoke to verify it passes**
 
 Run: `.venv/Scripts/python scripts/smoke_ui.py`
 Expected: `SMOKE OK` (Chromium may print a few `GLES3 ... fallback`
 lines to stderr; they are harmless)
 
-- [ ] **Step 13: Align the spec with the Bridge, epoch and pull-timeout decisions**
+- [x] **Step 13: Align the spec with the Bridge, epoch and pull-timeout decisions**
 
 In `docs/superpowers/specs/2026-10-20-wysiwyg-editing-design.md`:
 - Section 6.2, Python -> JS table:
@@ -12160,7 +12160,7 @@ In `docs/superpowers/specs/2026-10-20-wysiwyg-editing-design.md`:
   `Pull callback missing after 3 s (renderer crash)` with
   `Pull callback missing after 3 s plus 0.1 s per MB of document JSON, counted once earlier document loads have finished (renderer hang)`
 
-- [ ] **Step 14: Run the full verification**
+- [x] **Step 14: Run the full verification**
 
 Run:
 
@@ -12175,7 +12175,7 @@ sha256sum mdviewer/web/* > /tmp/web1.txt && .venv/Scripts/python scripts/build_w
 Expected: all tests pass (730 at the time of writing); `SMOKE OK`;
 `WEB OK`; the `rg` line prints nothing; `REPRODUCIBLE`.
 
-- [ ] **Step 15: Commit**
+- [x] **Step 15: Commit**
 
 ```bash
 git add mdviewer/richview.py mdviewer/core/render.py tests/test_render.py web-src/src/editor.js mdviewer/web scripts/smoke_ui.py scripts/check_web.py docs/superpowers/specs/2026-10-20-wysiwyg-editing-design.md
