@@ -48,7 +48,8 @@ selected text from the preview.
 
 ## Settings
 
-View > Preferences... holds the theme (System (auto) / Light / Dark) and the
+View > Preferences... holds the theme (System (auto) / Light / Dark / Gray; Gray is a
+mid-gray theme that is never picked automatically) and the
 editor font (fixed-pitch fonts only, default Consolas 11). The theme, editor
 font, window position and size, preview zoom and the recent-files list are
 stored in `%APPDATA%\MDViewer\settings.json`. Delete that file to reset them.
@@ -64,8 +65,8 @@ stored in `%APPDATA%\MDViewer\settings.json`. Delete that file to reset them.
   `<img src="relative.png">` tags are not resolved.
 - JavaScript in raw HTML never runs in the preview.
 - Files above roughly 10 MB render slowly.
-- Dark mode uses Qt's Fusion style, because the native `windowsvista` style
-  cannot be darkened; light mode uses the native style.
+- Dark and Gray modes use Qt's Fusion style, because the native `windowsvista`
+  style cannot be darkened; light mode uses the native style.
 
 ## Development
 

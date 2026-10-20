@@ -67,6 +67,7 @@ FAKE["system_theme"] = "light"
 main_window.read_system_theme = lambda: FAKE["system_theme"]  # never read the real registry
 
 qt_app, window = app_module.build([])
+check(app_module.icon_path().is_file() and not qt_app.windowIcon().isNull(), "application window icon is set")
 END = QTextCursor.MoveOperation.End
 START = QTextCursor.MoveOperation.Start
 
@@ -705,6 +706,18 @@ FAKE["system_theme"] = "light"
 window._poll_theme()
 check(window._effective_theme == "dark", "forced Dark ignores the system theme")
 
+GRAY_WINDOW = main_window.GRAY_PALETTE_COLORS["window"]
+choose_theme("gray")
+check(window._effective_theme == "gray" and not window._theme_timer.isActive(), "forced Gray applies without polling")
+check(qt_app.style().name().lower() == "fusion" and window_color() == GRAY_WINDOW, "gray palette on the Fusion style")
+check("#3a3d41" in window.preview.last_html, "preview re-rendered with gray CSS")
+check(heading_color(window) == editor_module.COLORS["gray"]["heading"], "editor recolored for gray")
+FAKE["system_theme"] = "dark"
+window._poll_theme()
+check(window._effective_theme == "gray", "forced Gray ignores the system theme")
+check(window.settings_snapshot()["theme"] == "gray", "forced Gray is saved")
+FAKE["system_theme"] = "light"
+
 choose_theme("system")
 check(window._effective_theme == "light", "System (auto) applies the current system theme immediately")
 check(window._theme_timer.isActive(), "System (auto) restarts the poll")
@@ -831,7 +844,7 @@ FAKE["prefs"] = inspect
 before_font = window.editor.font()
 window.act_preferences.trigger()
 check(seen["theme"] == "system" and window._theme_choice == "system", "dialog opens on the current theme")
-check(seen["labels"] == ["&System (auto)", "&Light", "&Dark"], "dialog offers System (auto) / Light / Dark")
+check(seen["labels"] == ["&System (auto)", "&Light", "&Dark", "&Gray"], "dialog offers System (auto) / Light / Dark / Gray")
 check(seen["family"] == "Consolas" and seen["size"] == 11, "dialog opens on the current editor font")
 proportional = [f for f in QFontDatabase.families() if not QFontDatabase.isFixedPitch(f)]
 check(seen["entries"] and all(QFontDatabase.isFixedPitch(f) for f in seen["entries"]), "font list has only fixed-pitch fonts")

@@ -1,7 +1,7 @@
 """Markdown -> themed HTML page for the preview (pure, Qt-free).
 
-GitHub-like styling: one shared stylesheet driven by CSS variables; light and
-dark differ only in the variable set and the Pygments style, so the same body
+GitHub-like styling: one shared stylesheet driven by CSS variables; light,
+dark and gray differ only in the variable set and the Pygments style, so the same body
 HTML is reused for both themes.
 """
 
@@ -16,7 +16,7 @@ from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
-THEMES = ("light", "dark")
+THEMES = ("light", "dark", "gray")
 PLUGINS = ["table", "strikethrough", "footnotes", "task_lists", "url"]
 # file: is needed for resolved relative URLs; javascript:/vbscript: stay blocked.
 _ALLOWED_PROTOCOLS = ("file:", "data:image/")
@@ -40,9 +40,18 @@ _VARIABLES = {
         "--code-bg": "#151b23",
         "--row-alt": "#151b23",
     },
+    "gray": {
+        "--bg": "#3a3d41",
+        "--fg": "#e6e8eb",
+        "--muted": "#a6adb5",
+        "--border": "#565b61",
+        "--link": "#6cb2ff",
+        "--code-bg": "#2f3236",
+        "--row-alt": "#2f3236",
+    },
 }
 PAGE_BACKGROUND = {theme: values["--bg"] for theme, values in _VARIABLES.items()}
-_PYGMENTS_STYLES = {"light": "default", "dark": "native"}
+_PYGMENTS_STYLES = {"light": "default", "dark": "native", "gray": "native"}
 
 _SHARED_CSS = """
 html, body { margin: 0; background: var(--bg); color: var(--fg); }

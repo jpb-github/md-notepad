@@ -5,7 +5,7 @@ import math
 import os
 from pathlib import Path
 
-_VALID_THEMES = ("system", "light", "dark")
+_VALID_THEMES = ("system", "light", "dark", "gray")
 _ZOOM_MIN = 0.25
 _ZOOM_MAX = 3.0
 _WINDOW_KEYS = ("x", "y", "width", "height")

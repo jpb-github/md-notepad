@@ -52,6 +52,24 @@ DARK_PALETTE_COLORS = {
     "placeholder": "#9a9a9a",
     "disabled_text": "#7a7a7a",
 }
+GRAY_PALETTE_COLORS = {
+    "window": "#3a3d41",
+    "window_text": "#e6e8eb",
+    "base": "#2f3236",
+    "alternate_base": "#35383c",
+    "text": "#e6e8eb",
+    "button": "#4a4e53",
+    "button_text": "#e6e8eb",
+    "highlight": "#2f6fd6",
+    "highlighted_text": "#ffffff",
+    "link": "#6cb2ff",
+    "tooltip_base": "#4a4e53",
+    "tooltip_text": "#e6e8eb",
+    "placeholder": "#a0a6ad",
+    "disabled_text": "#85898e",
+}
+# Themes drawn on Fusion with a custom palette (and a dark Windows title bar).
+CUSTOM_PALETTES = {"dark": DARK_PALETTE_COLORS, "gray": GRAY_PALETTE_COLORS}
 OPEN_FILTER = "Markdown (*.md *.markdown *.mdown *.txt);;All files (*)"
 SAVE_FILTER = "Markdown (*.md);;Text (*.txt);;All files (*)"
 ENCODING_LABELS = {
@@ -100,8 +118,8 @@ def read_system_theme() -> str:
     return themeservice.read_system_theme(reader)
 
 
-def _dark_palette() -> QPalette:
-    c = {key: QColor(value) for key, value in DARK_PALETTE_COLORS.items()}
+def _custom_palette(theme: str) -> QPalette:
+    c = {key: QColor(value) for key, value in CUSTOM_PALETTES[theme].items()}
     role = QPalette.ColorRole
     palette = QPalette()
     for r, key in (
@@ -736,7 +754,7 @@ class MainWindow(QMainWindow):
         if choice == "system":
             self._theme_timer.start()
         else:
-            self._theme_timer.stop()  # forced Light/Dark ignore the system theme
+            self._theme_timer.stop()  # forced Light/Dark/Gray ignore the system theme
         self._apply_theme(force=True)
 
     def _poll_theme(self) -> None:
@@ -748,14 +766,14 @@ class MainWindow(QMainWindow):
         if theme == self._effective_theme and not force:
             return
         self._effective_theme = theme
-        if theme == "dark":
+        if theme in CUSTOM_PALETTES:
             # windowsvista paints native light controls whatever the palette says.
             QApplication.setStyle("Fusion")
-            QApplication.setPalette(_dark_palette())
+            QApplication.setPalette(_custom_palette(theme))
         else:
             QApplication.setStyle("windowsvista")
             QApplication.setPalette(QApplication.style().standardPalette())
-        _set_dark_title_bar(self, theme == "dark")
+        _set_dark_title_bar(self, theme in CUSTOM_PALETTES)
         self.editor.set_theme(theme)
         if self.mode == self.PREVIEW:
             self._render_preview(keep_scroll=True)  # same buffer, new CSS variables

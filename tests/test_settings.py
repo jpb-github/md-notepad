@@ -65,6 +65,12 @@ def test_load_non_dict_json_returns_defaults(tmp_path):
     assert settings.load(path) == settings.default_settings()
 
 
+def test_load_gray_theme(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text('{"theme": "gray"}', encoding="utf-8")
+    assert settings.load(path)["theme"] == "gray"
+
+
 def test_load_invalid_theme_falls_back(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text('{"theme": "neon"}', encoding="utf-8")

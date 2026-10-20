@@ -31,6 +31,11 @@ COLORS = {
         "quote": "#9198a1", "table": "#d2a8ff", "fence": "#7ee787", "comment": "#8b949e",
         "error": "#f85149", "warning": "#f0883e",
     },
+    "gray": {
+        "heading": "#79c0ff", "code": "#ffa657", "link": "#6cb2ff", "marker": "#ff8f87",
+        "quote": "#a6adb5", "table": "#d2a8ff", "fence": "#7ee787", "comment": "#9aa1a9",
+        "error": "#ff6b63", "warning": "#f0883e",
+    },
 }
 
 # Block states: 0 normal, 1 inside an HTML comment, >= 1000 inside a fence

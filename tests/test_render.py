@@ -91,7 +91,16 @@ def test_pygments_css_follows_theme():
 
 
 def test_page_background_per_theme():
-    assert render.PAGE_BACKGROUND == {"light": "#ffffff", "dark": "#0d1117"}
+    assert render.PAGE_BACKGROUND == {"light": "#ffffff", "dark": "#0d1117", "gray": "#3a3d41"}
+
+
+def test_gray_theme_renders_with_its_own_variables():
+    gray, ok = build_page("# Hi\n\n*there*", "gray")
+    light, _ = build_page("# Hi\n\n*there*", "light")
+    assert ok
+    assert "#3a3d41" in gray
+    assert gray.split("<body>", 1)[1] == light.split("<body>", 1)[1]
+    assert set(render.THEMES) == {"light", "dark", "gray"}
 
 
 def test_render_failure_falls_back_to_escaped_pre(monkeypatch):
