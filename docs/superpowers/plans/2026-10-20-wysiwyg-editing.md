@@ -8310,7 +8310,7 @@ prosemirror-history 1.5.1), on top of the committed Task 8 code. Results:
     - Tasks 10-11 append their checks after `check_bridge`, using
       `Bridge.args` to watch calls.
 
-- [ ] **Step 1: Write the failing bridge-contract test**
+- [x] **Step 1: Write the failing bridge-contract test**
 
 Append to the end of `tests/test_web_assets.py`:
 
@@ -8327,13 +8327,13 @@ def test_bridge_calls_match_the_spec():
     ]
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `.venv/Scripts/python -m pytest tests/test_web_assets.py -v`
 Expected: `test_bridge_calls_match_the_spec` FAILS with `FileNotFoundError`
 (`web-src/src/bridge.js`); the other 10 pass.
 
-- [ ] **Step 3: Write the failing page checks**
+- [x] **Step 3: Write the failing page checks**
 
 All edits are in `scripts/check_web.py`.
 
@@ -8736,7 +8736,7 @@ with
     check_bridge(app, view, page, bridge)
 ```
 
-- [ ] **Step 4: Run the page check to verify it fails**
+- [x] **Step 4: Run the page check to verify it fails**
 
 Run: `.venv/Scripts/python scripts/check_web.py`
 Expected: exit code 1, and the committed Task 8 bundle fails with exactly
@@ -8755,7 +8755,7 @@ WEB CHECK FAILED:
 The first, third and fourth fail because the Task 8 bundle still returns
 the cell attrs `colspan` / `rowspan` / `colwidth`.
 
-- [ ] **Step 5: Write the bridge module**
+- [x] **Step 5: Write the bridge module**
 
 Create `web-src/src/bridge.js`:
 
@@ -8797,7 +8797,7 @@ export function connectBridge() {
 }
 ```
 
-- [ ] **Step 6: Replace the editor entry point**
+- [x] **Step 6: Replace the editor entry point**
 
 Replace the whole of `web-src/src/editor.js` with:
 
@@ -8994,7 +8994,7 @@ window.mdEditor = {
 connectBridge();
 ```
 
-- [ ] **Step 7: Rebuild the bundle**
+- [x] **Step 7: Rebuild the bundle**
 
 Run: `.venv/Scripts/python scripts/build_web.py`
 Expected: exit code 0. esbuild reports `editor.js` at about 221 KB and
@@ -9002,7 +9002,7 @@ Expected: exit code 0. esbuild reports `editor.js` at about 221 KB and
 `THIRD_PARTY.txt: 10 packages`: Task 8's 8 plus `prosemirror-history` and
 its dependency `rope-sequence`.
 
-- [ ] **Step 8: Run the tests and the page check to verify they pass**
+- [x] **Step 8: Run the tests and the page check to verify they pass**
 
 Run:
 
@@ -9020,7 +9020,7 @@ first confirm that the view is shown (`view.show()`) and that the page is
 not throttled. Raise the 0.2 s pumps only after that. Do **not** drop the
 throttle.
 
-- [ ] **Step 9: Align the spec with `setTheme(css)`**
+- [x] **Step 9: Align the spec with `setTheme(css)`**
 
 In `docs/superpowers/specs/2026-10-20-wysiwyg-editing-design.md`, section
 6.2, replace
@@ -9038,7 +9038,7 @@ with
 and in section 6.7 replace `calls \`setTheme(theme)\`:` with
 `calls \`setTheme(render.page_css(theme))\`:`.
 
-- [ ] **Step 10: Run the full verification**
+- [x] **Step 10: Run the full verification**
 
 Run:
 
@@ -9054,7 +9054,7 @@ Expected: all tests pass (725 at the time of writing); `SMOKE OK`
 (nothing in `mdviewer/` loads the web editor yet); `WEB OK`; the `rg` line
 prints nothing; `REPRODUCIBLE`.
 
-- [ ] **Step 11: Commit**
+- [x] **Step 11: Commit**
 
 ```bash
 git add web-src/src/bridge.js web-src/src/editor.js mdviewer/web tests/test_web_assets.py scripts/check_web.py docs/superpowers/specs/2026-10-20-wysiwyg-editing-design.md
