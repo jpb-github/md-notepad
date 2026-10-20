@@ -3,6 +3,7 @@
 No Qt here (tests/ must stay Qt-free); scripts/check_web.py loads the page for real.
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -66,3 +67,12 @@ def test_third_party_notices_cover_the_bundled_packages():
 def test_node_modules_is_git_ignored():
     lines = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert "web-src/node_modules/" in lines
+
+
+def test_code_block_languages_match_the_source_editor():
+    from mdviewer.core.completion import FENCE_LANGUAGES
+
+    source = (ROOT / "web-src" / "src" / "nodeviews.js").read_text(encoding="utf-8")
+    match = re.search(r"^export const FENCE_LANGUAGES = (\[.*?^\]);$", source, flags=re.S | re.M)
+    assert match, "nodeviews.js has no 'export const FENCE_LANGUAGES = [...];' block"
+    assert json.loads(match.group(1)) == list(FENCE_LANGUAGES)

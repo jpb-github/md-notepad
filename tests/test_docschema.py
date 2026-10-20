@@ -1,3 +1,7 @@
+import json
+import re
+from pathlib import Path
+
 import pytest
 
 from mdviewer.core.docschema import (
@@ -361,3 +365,29 @@ def test_reports_every_problem_in_document_order():
         "$.content[0].content[0].marks[0]: unknown mark type 'bold'",
         "$.content[1]: unknown node type 'x'",
     ]
+
+
+# --- web-src/src/schema.js mirrors this module ------------------------------------------------
+
+def js_contract():
+    """The CONTRACT block of web-src/src/schema.js, parsed as JSON."""
+    source = (Path(__file__).resolve().parent.parent / "web-src" / "src" / "schema.js").read_text(encoding="utf-8")
+    match = re.search(r"^export const CONTRACT = (\{.*?^\});$", source, flags=re.S | re.M)
+    assert match, "schema.js has no 'export const CONTRACT = {...};' block"
+    return json.loads(match.group(1))
+
+
+def test_js_schema_nodes_match_docschema_in_order():
+    contract = js_contract()
+    assert list(contract["blockNodes"].items()) == [(name, list(attrs)) for name, attrs in BLOCK_NODES.items()]
+    assert list(contract["inlineNodes"].items()) == [(name, list(attrs)) for name, attrs in INLINE_NODES.items()]
+
+
+def test_js_schema_marks_match_docschema_in_rank_order():
+    assert list(js_contract()["marks"].items()) == [(name, list(attrs)) for name, attrs in MARKS.items()]
+
+
+def test_js_schema_node_sets_match_docschema():
+    contract = js_contract()
+    assert contract["protectedNodes"] == sorted(PROTECTED_NODES)
+    assert contract["topLevelNodes"] == sorted(TOP_LEVEL_NODES)

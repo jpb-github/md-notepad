@@ -193,9 +193,12 @@ v1 disabled JavaScript for the whole page. v2 must enable it for the editor,
 so script safety becomes layered:
 
 1. **No untrusted HTML in the editor DOM.** ProseMirror renders schema nodes
-   only. `html_block` content is shown in `<iframe sandbox srcdoc="...">`
-   without `allow-scripts` or `allow-same-origin`. `html_inline` is shown as
-   an escaped source chip, never rendered.
+   only. `html_block` content is shown in
+   `<iframe sandbox="allow-same-origin" srcdoc="...">` without
+   `allow-scripts`: nothing in it runs, while the editor can read its content
+   height to fit the frame and local images load (decided 2026-10-20; with an
+   empty sandbox the frame can be neither measured nor show `file:` images).
+   `html_inline` is shown as an escaped source chip, never rendered.
 2. **Content Security Policy** in the page shell:
    `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline';
    img-src file: data: https: http:; frame-src 'self' about:; child-src 'self'`.
