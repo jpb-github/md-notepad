@@ -4904,7 +4904,7 @@ from this plan. Results:
   - `tests/corpus/*.md`: Markdown samples that cover every node type and mark;
     later tasks may add files (the round-trip tests pick them up)
 
-- [ ] **Step 1: Create the corpus**
+- [x] **Step 1: Create the corpus**
 
 Create `tests/corpus/lists.md`:
 
@@ -5099,7 +5099,7 @@ A paragraph after HTML.
 The last paragraph.
 ```
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 In `tests/test_serialize.py`, replace
 
@@ -5921,7 +5921,7 @@ def test_random_block_trees_round_trip():
         assert to_text(back) == markdown, markdown
 ````
 
-- [ ] **Step 3: Run the tests to verify they fail**
+- [x] **Step 3: Run the tests to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_serialize.py tests/test_roundtrip.py -q`
 Expected: 160 failed, 196 passed. The failures are `ValueError: cannot
@@ -5930,7 +5930,7 @@ output for the table, list and footnote rules. The counts assume the current
 `docs/` tree (two specs, two plans); each Markdown file there adds four
 round-trip tests.
 
-- [ ] **Step 4: Replace `mdviewer/core/serialize.py`**
+- [x] **Step 4: Replace `mdviewer/core/serialize.py`**
 
 Replace the whole file with:
 
@@ -6593,12 +6593,12 @@ def _line_start_escapes(text: str, line_end: bool) -> set[int]:
     return set()
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_serialize.py tests/test_roundtrip.py -q`
 Expected: 356 passed.
 
-- [ ] **Step 6: Run the full suite and the Qt-import check**
+- [x] **Step 6: Run the full suite and the Qt-import check**
 
 Run:
 
@@ -6609,7 +6609,7 @@ rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests
 
 Expected: all tests pass (711); the `rg` line prints nothing.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add mdviewer/core/serialize.py tests/test_serialize.py tests/test_roundtrip.py tests/corpus
