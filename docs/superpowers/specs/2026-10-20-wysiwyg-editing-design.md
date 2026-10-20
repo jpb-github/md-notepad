@@ -281,19 +281,21 @@ ProseMirror JSON: `{"type", "attrs", "content", "marks", "text"}`.
 
 | Kind | Names and attrs |
 |---|---|
-| Block nodes | `doc`, `paragraph`, `heading{level}`, `blockquote`, `bullet_list{tight}`, `ordered_list{start, tight}`, `list_item{checked: null\|true\|false}`, `code_block{language, highlight_light, highlight_dark}`, `horizontal_rule`, `table`, `table_row`, `table_header{align}`, `table_cell{align}` |
+| Block nodes | `doc`, `paragraph`, `heading{level}`, `blockquote`, `bullet_list{tight}`, `ordered_list{start, tight}`, `list_item{checked: null\|true\|false}`, `code_block{language, highlight}`, `horizontal_rule`, `table`, `table_row`, `table_header{align}`, `table_cell{align}` |
 | Inline nodes | `text`, `hard_break`, `image{src, display_src, alt, title}` |
 | Protected | `front_matter{source}`, `html_block{source}`, `footnote_def{label, source}`, `footnote_ref{label}`, `html_inline{source}` |
 | Marks | `strong`, `em`, `strike`, `code`, `link{href, title}` |
 
 - `core/docschema.py` is the single source of these names and attrs and
   provides `validate(doc) -> list[str]` (problems; empty when valid).
-- `highlight_light` / `highlight_dark` hold Pygments HTML from
-  `render.highlight_code(code, language, theme)`; empty when the language is
-  unknown. They are display-only and ignored by the serializer. When a code
-  block's text or language changes, JS clears both attrs; the block then
-  displays without highlighting until the next `setDocument` (mode switch,
-  reload or save), which recomputes them in Python.
+- `highlight` holds Pygments HTML from `render.highlight_code(code,
+  language)`; empty when the language is unknown. The markup is class-based
+  and theme-independent: colors come from the page CSS, which carries the
+  Pygments style of the current theme (`light`, `dark`, `gray`). It is
+  display-only and ignored by the serializer. When a code block's text or
+  language changes, JS clears the attr; the block then displays without
+  highlighting until the next `setDocument` (mode switch, reload or save),
+  which recomputes it in Python.
 - `display_src` is the resolved `file:` URI (v1 `_Renderer._resolve` logic);
   `src` is kept as written and is what the serializer emits.
 - Every top-level node carries a transient `line` attr (source start line)
@@ -364,8 +366,10 @@ kept byte-exact as
 
 ### 6.7 Theming and zoom
 
-A theme change calls `setTheme(theme)`: CSS variables swap in place and code
-blocks switch between `highlight_light` / `highlight_dark`. No reload. Zoom
+A theme change (`light`, `dark` or `gray`, v1.1) calls `setTheme(theme)`:
+the page's theme stylesheet (CSS variables plus the theme's Pygments style
+from `render.page_css`) is swapped in place. No reload, and code-block
+markup is unchanged. Zoom
 uses `setZoomFactor` as in v1 and persists as before.
 
 ## 7. Error handling
