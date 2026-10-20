@@ -199,9 +199,9 @@ so script safety becomes layered:
 2. **Content Security Policy** in the page shell:
    `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline';
    img-src file: data: https: http:; frame-src 'self' about:; child-src 'self'`.
-   No inline scripts, no `eval`. (Risk R1: verify `'self'` matches the
-   bundle's `file:` URL; fallback is serving page and bundle from a custom
-   `mdviewer:` scheme via `QWebEngineUrlSchemeHandler`.)
+   No inline scripts, no `eval`. `'self'` matches the bundle and
+   `qwebchannel.js` loaded from the page's own `file:` folder (R1, retired;
+   re-checked by `scripts/check_web.py`).
 3. **Paste** goes through ProseMirror's schema `DOMParser`; anything outside
    the schema (scripts, styles, event attributes) is dropped.
 4. **Link and image URLs:** `javascript:` and `vbscript:` are stripped in
@@ -232,15 +232,18 @@ mdviewer/
     render.py        CHG  keeps CSS + Pygments; adds highlight_code(); editor page shell
   web/               NEW  shipped runtime files (committed build output)
     editor.js            esbuild bundle: ProseMirror + our code (~200 KB)
-    editor.html          page shell template (CSP, CSS slot, bundle reference)
-    THIRD_PARTY.txt      ProseMirror MIT license notices
+    editor.css           ProseMirror's required stylesheet (esbuild output)
+    qwebchannel.js       Qt WebChannel client, copied unmodified from PySide6
+    editor.html          page shell template (CSP, CSS slot, script references)
+    THIRD_PARTY.txt      license notices of the bundled npm packages
 web-src/             NEW  JS sources, only needed to rebuild web/editor.js
   package.json, package-lock.json   pinned prosemirror-* packages and esbuild
   src/schema.js      nodes/marks mirroring core/docschema.py
   src/editor.js      EditorView setup, keymaps, input rules, commands
   src/nodeviews.js   code block, image, protected block, footnote chip
   src/bridge.js      QWebChannel glue
-scripts/build_web.py NEW  npm ci + esbuild -> mdviewer/web/editor.js
+scripts/build_web.py NEW  npm ci + esbuild -> mdviewer/web/*, copies qwebchannel.js
+scripts/check_web.py NEW  offscreen load of the shell: ready(), CSP blocks inline scripts
 ```
 
 ProseMirror packages: `prosemirror-model`, `-state`, `-view`, `-transform`,
@@ -445,8 +448,10 @@ persistence.
 
 ## 10. Risks
 
-1. **CSP `'self'` on `file:` pages** - day-1 spike; fallback custom
-   `mdviewer:` scheme handler.
+1. **CSP `'self'` on `file:` pages** - retired 2026-10-20 (PySide6 6.12.0,
+   offscreen): scripts loaded from the page's own folder run, inline scripts
+   and `eval` are refused, QWebChannel connects. No custom scheme is needed;
+   `scripts/check_web.py` re-verifies this after every bundle rebuild.
 2. **Async pulls complicate Save/Close/Exit/Open flows** - single
    `with_buffer` continuation helper, `_pending_pull` guard, a smoke check per
    flow.
