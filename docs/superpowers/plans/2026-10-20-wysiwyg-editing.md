@@ -5,7 +5,7 @@
 > **Status: high-level outline.** Phases and tasks are fixed; each task's
 > bite-sized steps (tests, code, commands) are written out on request, task
 > by task, below its heading. Do not execute a task whose steps are not yet
-> detailed. Detailed so far: Tasks 1-11.
+> detailed. Detailed so far: Tasks 1-13.
 
 **Goal:** Make the rendered view an editable WYSIWYG Markdown editor with a
 format toolbar, keeping the plain-text editor as Source mode.
@@ -39,7 +39,7 @@ mistune 3 (AST renderer), Pygments, pytest; ProseMirror packages + esbuild
 - `mdviewer/web/editor.js`, `editor.css`, `qwebchannel.js` and `THIRD_PARTY.txt` are committed build output (`scripts/build_web.py`); `web-src/node_modules/` is git-ignored; Node is not needed for tests or packaging. After every bundle rebuild, `scripts/check_web.py` must print `WEB OK`.
 - The page loads its scripts from its own `file:` folder under CSP `script-src 'self'` (R1 retired in Task 1); there is no custom URL scheme.
 - Files larger than 5 MB open in Source mode with status note `Large file: opened in Source mode`.
-- Timeouts: page `ready()` 5 s, document pull 3 s.
+- Timeouts: page `ready()` 5 s, document pull 3 s plus 0.1 s per MB of document JSON, counted once earlier document loads have finished (Task 12).
 - UI checks go in `scripts/smoke_ui.py` above `# --- Later tasks insert their checks directly above this line. ---`, using `check()` and `FAKE`.
 - Commits: small, one per task, conventional prefixes (`feat:`, `fix:`, `docs:`, `chore:`).
 
@@ -52,7 +52,7 @@ mistune 3 (AST renderer), Pygments, pytest; ProseMirror packages + esbuild
 | `scripts/check_web.py` | new | offscreen load of the shell: `ready()`, CSP blocks inline scripts, prints `WEB OK` | 1, extended in 8-11 if useful |
 | `tests/test_web_assets.py` | new | Qt-free static checks: CSP string, no inline scripts, outputs present | 1 |
 | `mdviewer/web/editor.html` | new | page shell: CSP, `editor.css` link, theme slot `/*@THEME_CSS@*/`, `qwebchannel.js` + `editor.js` `<script src>` | 1 |
-| `mdviewer/web/editor.js`, `editor.css`, `qwebchannel.js`, `THIRD_PARTY.txt` | new | committed bundle, ProseMirror CSS, unmodified Qt client, license notices | 1, rebuilt in 8-11 |
+| `mdviewer/web/editor.js`, `editor.css`, `qwebchannel.js`, `THIRD_PARTY.txt` | new | committed bundle, ProseMirror CSS, unmodified Qt client, license notices | 1, rebuilt in 8-12 |
 | `mdviewer/core/docschema.py` | new | node/mark names and attrs, `validate(doc)` | 2 |
 | `mdviewer/core/frontmatter.py` | new | `split(text)` / `join(front, body)` | 3 |
 | `mdviewer/core/urls.py` | new | URL resolution + scheme stripping (extracted from `render.py`) | 4 |
@@ -63,7 +63,7 @@ mistune 3 (AST renderer), Pygments, pytest; ProseMirror packages + esbuild
 | `web-src/src/nodeviews.js` | new | code block, image, raw HTML frame, double-click on protected nodes | 8 |
 | `web-src/src/editor.css` | new | editor styles: lists, code overlay, protected blocks, chips | 8 |
 | `web-src/src/bridge.js` | new | QWebChannel glue, Python-facing API | 9 |
-| `web-src/src/editor.js` | new | EditorView, document lifecycle, `window.mdEditor`, right-click caret | 9, 10, 11 |
+| `web-src/src/editor.js` | new | EditorView, document lifecycle, `window.mdEditor`, right-click caret, epochs | 9, 10, 11, 12 |
 | `web-src/src/tables.js` | new | table keys, cell commands, Markdown table shape | 11 |
 | `web-src/src/commands.js` | new | formatting commands (`FORMATTING_COMMANDS`) | 10 |
 | `web-src/src/input.js` | new | keymaps, input rules, list/code keys, task checkbox, gap and drop cursor | 10 |
@@ -102,6 +102,8 @@ def is_safe(url: str) -> bool                          # False for javascript:, 
 
 # core/render.py (additions)
 def highlight_code(code: str, language: str) -> str    # "" when the language is unknown
+WEB_DIR: Path                                          # the mdviewer/web folder
+THEME_SLOT = "/*@THEME_CSS@*/"
 def editor_page(theme: str) -> str                     # editor.html with theme CSS filled in
 
 # core/docmodel.py
@@ -113,27 +115,35 @@ def front_matter(doc: dict) -> str | None             # the front_matter node's 
 def to_text(doc: dict) -> str                         # frontmatter.join(front, body): the pulled buffer
 
 # mdviewer/richview.py
-class Bridge(QObject):   # JS -> Python signals
+class Bridge(QObject):   # the QWebChannel object "bridge": one slot per bridge.js CALLS name, nothing else
+class RichView(QWebEngineView):
+    # page -> Python, re-emitted from the Bridge slots (the page sends changed(epoch)):
     ready, changed, selectionState(dict), openLink(str), hoverLink(str),
     requestLinkDialog(str, str), requestImageDialog(), editProtected(int), caretBlock(int)
-class RichView(QWebEngineView):
+    load_failed, crashed       # no ready() in 5 s or page files missing; render process died
+    is_ready: bool; failed: bool; page_file: Path
+    modified: bool             # changed since the last set_document or pull (a pull marks it clean)
+    def __init__(self, theme: str = "light", parent=None)
     def set_document(self, doc: dict, keep_scroll: bool = False) -> None
-    def request_document(self, callback: Callable[[dict | None], None]) -> None  # None on timeout
+    def request_document(self, callback: Callable[[dict | None], None]) -> None  # None on timeout/crash/failure
     def command(self, name: str, args=None) -> None
     def set_theme(self, theme: str) -> None
     def focus_block(self, index: int) -> None
+    def restart(self) -> None  # fresh page with an empty document (after crashed)
 
 # mdviewer/main_window.py (additions)
 MainWindow.RENDERED = "rendered"; MainWindow.SOURCE = "source"
-def with_buffer(self, fn: Callable[[str], None]) -> None
+MainWindow.rich: RichView; act_rendered, act_source  # replace preview, act_preview, act_edit
+def with_buffer(self, fn: Callable[[str], None]) -> None   # pulls only when rich.modified; one at a time
+def _show_mode(self, mode: str, keep_scroll: bool = False) -> bool   # False: Source shown instead
 def run_link_dialog(parent, text: str, url: str) -> tuple[str, str] | str | None   # "remove"
 def run_image_dialog(parent, base_dir: Path | None) -> tuple[str, str] | None
 ```
 
 ```js
 // JS editor API (window.mdEditor), called from Python via runJavaScript
-setDocument(json, keepScroll); getDocument() -> json; command(name, args);
-setTheme(css); focusBlock(index)
+setDocument(json, keepScroll, epoch); getDocument() -> json; markClean(epoch);
+command(name, args); setTheme(css); focusBlock(index); selectionState()
 ```
 
 ---
@@ -11128,23 +11138,2845 @@ git commit -m "feat: add table editing, safe paste and plain-text paste"
 
 ### Task 12: RichView and Bridge
 
-- **Files:** `mdviewer/richview.py`, `mdviewer/core/render.py` (`editor_page`), `scripts/smoke_ui.py`.
-- **Produces:** `RichView` per Key Interfaces: writes `editor_page(theme)` and copies `editor.js`, `editor.css`, `qwebchannel.js` to its temp dir, registers the `Bridge` under the channel name `"bridge"`, navigation guard (from `preview._Page`, but refusing link-click navigations instead of opening them: `openLink` is the only way out, Task 9), Bridge slots as `check_web.Bridge` declares them (Task 9), JS enabled with CSP, `ready` 5 s timeout -> `load_failed` signal, `request_document` with 3 s timeout -> `callback(None)`, `renderProcessTerminated` -> `crashed` signal, zoom passthrough.
-- **Test:** smoke (the view shown: hidden pages throttle timers, Task 9): standalone `RichView` loads, `set_document(from_markdown(...))` then `request_document` returns an equal document; a sandboxed `<script>` marker is never set.
-- **Commit:** `feat: add RichView web editor host with QWebChannel bridge`
+**Status: steps detailed.** All code below was run before being written into
+this plan (2026-10-20, PySide6 6.12.0 offscreen, Node 26), on top of the
+committed Task 11 code. Results:
+- The full suite passes (730 tests: Task 11's 727 + 3), `SMOKE OK`,
+  `WEB OK`, the Qt-import `rg` prints nothing, and a second `build_web.py`
+  changes no bytes.
+- The smoke takes ~13 s, up from ~8 s.
+- Run before Step 3, the new pytest fails with `AttributeError` (Step 2).
+  Run against the Task 11 bundle, `check_web.py` stops with a traceback at
+  the first `markClean` call (Step 6). Run before Step 11, the smoke stops
+  at `import richview` (Step 10).
+- Nineteen deliberate breaks of `richview.py` each make the smoke fail:
+  - the guard allows every navigation
+  - no queue before `ready()`
+  - `changed(epoch)` accepted from any epoch
+  - `changed` emitted for every message instead of once per epoch
+  - a pull that does not mark the page clean
+  - a pull that leaves `modified` set
+  - a failed pull that drops `modified`
+  - `restart()` without `markClean`
+  - no pull timeout
+  - a crash leaves the pending pull unanswered
+  - `set_theme` leaves the page background
+  - `restart()` writes the page with the startup theme
+  - a late `ready()` accepted after `load_failed`
+  - a pull on a failed view not answered at once
+  - missing page files raise instead of `load_failed`
+  - JavaScript left disabled
+  - Chromium's context menu kept
+  - the Bridge exposing a signal
+  - `selectionState` not forwarded
+
+**Findings that shape this task:**
+
+- **Save in Rendered mode needs `changed()` re-armed** (found while
+  planning Task 13; decided with the user on 2026-10-20).
+  - Task 9's page sends `changed()` once per `setDocument`. After a Save
+    clears the dirty flag, the next edit would never be reported: Close
+    would then not prompt, and the edit would be lost.
+  - Spec 6.3 implied a `setDocument` after every save. That clears the undo
+    history and puts the caret at the start of its block on every Ctrl+S.
+  - Instead, the page counts *epochs*. `setDocument(json, keepScroll,
+    epoch)` and the new `markClean(epoch)` set the current epoch, and
+    `markClean` re-arms `changed`. `changed(epoch)` names the epoch it
+    follows.
+  - Every pull reads the document and calls `markClean` in one script
+    (atomic: no edit can fall in between). Python ignores a
+    `changed(epoch)` for an older epoch. So a change made before a load or
+    pull is never taken for one made after it, whichever message reaches
+    Python first.
+  - Edited code blocks then get their highlight back only on the next
+    `setDocument` (mode switch or reload), not on save.
+- **`ready()` reaches Python with the view hidden** (~0.6 s after the
+  load starts). The smoke still shows the view: hidden pages throttle
+  timers, so `selectionState` would arrive late (Task 9). Shown
+  offscreen, Chromium logs GPU context errors; the smoke sets
+  `QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu` the way `check_web.py` does.
+- **Keys go to the active window.** The smoke's `MainWindow` is shown too
+  (Task 13 shows it at startup), so the standalone `RichView` needs
+  `activateWindow()` before `QTest` keys. Real keys and mouse clicks are
+  asynchronous: a check waits for their effect before issuing the next
+  `runJavaScript` call.
+- **`runJavaScript` calls run in order.** A `request_document` right after
+  `set_document` returns the new document. Calls made before `ready()`
+  must wait in a queue: before the channel connects, `window.mdEditor`
+  may not exist yet.
+- **Nothing guarantees an order between channel messages and
+  `runJavaScript` results** (two separate paths from the page; not
+  observed out of order, not relied on). The epochs make the order
+  irrelevant.
+- **Subframe navigations did not reach `acceptNavigationRequest`** in
+  Qt 6.12: a script `click()` on a link inside a raw HTML frame navigated
+  the frame without asking the page object. Users cannot click there:
+  Task 8's transparent shield takes the clicks (a real mouse click on the
+  frame link navigated nothing). The frame's sandbox (no scripts) and the
+  CSP (`frame-src 'self' about:`) still apply to anything it loads.
+- **Main-frame link clicks:** Chromium follows no link in editable
+  content (Task 9). A real Ctrl+click on a link emits `openLink(href)`, and
+  the page URL stays the same. A dropped file would be a typed main-frame
+  navigation to the file; the guard refuses it.
+- **Chromium's default context menu** offers Back, Reload and View page
+  source. Reload would wipe the document and send a second `ready()`.
+- **Render process crash:** `os.kill(page.renderProcessPid(), SIGTERM)`
+  gives `renderProcessTerminated(CrashedTerminationStatus, 15)`.
+  - `runJavaScript` callbacks pending at the crash never arrive, not even
+    after a reload.
+  - A reload of the same file brings a working page back (new render
+    process, `ready()` again).
+  - The view's `focusProxy()` is destroyed with the crash; the reloaded
+    page gets a new one, present by `ready()` (before `loadFinished`).
+    The zoom factor is back at 100%.
+- **Big documents** (paragraphs with marks and links; Python times on the
+  UI thread, page times until the callback):
+
+  | Markdown | doc JSON | `from_markdown` | `json.dumps` | `setDocument` | `getDocument` | `json.loads` |
+  |---|---|---|---|---|---|---|
+  | 0.47 MB | 2.8 MB | - | 0.03 s | 0.73 s | 0.29 s | 0.04 s |
+  | 1.58 MB | 9.3 MB | - | 0.10 s | 1.79 s | 0.72 s | 0.15 s |
+  | 4.78 MB | 27.9 MB | 6.0 s | 0.29 s | 5.64 s | 2.10 s | 0.46 s |
+
+  With a fixed 3 s pull timeout counted from the request, a pull queued
+  behind that `setDocument` timed out (the page was busy, not dead), and a
+  slower machine would time out on `getDocument` alone.
+- **`QWebChannel` publishes every signal, slot and property** of a
+  registered object. Signals declared on the Bridge would be visible to
+  the page; QObject's own `destroyed`, `objectNameChanged`, `deleteLater`
+  and `objectName` are published anyway.
+
+**Design decisions:**
+
+- **The epoch contract** (bundle change, `web-src/src/editor.js` only):
+  - `let epoch = 0`, set by `setDocument(json, keepScroll = false,
+    docEpoch = epoch)` once the new state is built, and by
+    `markClean(cleanEpoch = epoch)`.
+  - `markClean` also resets `sent.changed`. `dispatchTransaction` sends
+    `changed(epoch)`.
+  - Without the argument, both keep the current epoch, so `check_web.py`'s
+    direct calls keep working.
+  - `bridge.js` and `CALLS` do not change.
+- **Signals live on `RichView`; `Bridge` has only the nine slots.** The
+  page's surface stays exactly `bridge.js` `CALLS` (the smoke compares the
+  Bridge's own meta-methods with that list). Each slot re-emits a
+  `RichView` signal of the same name and arguments. `ready` and `changed`
+  first go through `RichView`'s bookkeeping. Task 13 connects
+  `rich.changed`, `rich.caretBlock` and so on; Key Interfaces is updated
+  to match. `selectionState` stays `@Slot("QVariantMap")` and arrives as a
+  `dict`; `changed` is `@Slot(int)`.
+- **`modified` and `changed`:**
+  - `RichView.modified` is True once the page has changed since the last
+    `set_document` or pull. Task 13 pulls only when it is set.
+  - `set_document`, `request_document` and `restart` each start a new
+    epoch and clear `modified` when they are called.
+  - The page's `changed(epoch)` counts only for the current epoch, and only
+    once: it sets `modified` and emits `changed`.
+  - `restart()` queues `markClean(epoch)` for the fresh page, so its first
+    edit is reported too.
+  - A failed pull puts `modified` back as it was before the pull: the
+    caller did not get the text.
+- **The page:** a `TemporaryDirectory` per view (`prefix="mdviewer-"`, as
+  v1's preview), holding `editor.html = render.editor_page(theme)` and
+  copies of `RUNTIME_FILES` from `render.WEB_DIR`. `restart()` rewrites
+  all of them, with the current theme, before every load. An `OSError`
+  there (a broken install without `mdviewer/web`) becomes `load_failed`
+  on the next event-loop turn, so the constructor never raises and
+  `MainWindow` can connect the signal first.
+- **Settings:** `JavascriptEnabled` set to `True` explicitly (v1 set it
+  `False` on its view). Context menu policy `NoContextMenu` until Task 17
+  builds ours.
+- **Before `ready()`**, `set_document`, `request_document`, `command`,
+  `set_theme` and `focus_block` queue their scripts. `ready()` runs them in
+  call order, then emits `ready`.
+- **`load_failed`:** no `ready()` within `READY_TIMEOUT_MS` (5000), or the
+  page files could not be written.
+  - The view is then `failed`: the queue is dropped, pending pulls get
+    `None`, later calls do nothing, `request_document` answers `None` at
+    once, and a late `ready()` is ignored.
+  - `restart()` clears it. Spec section 7 disables Rendered mode for the
+    session; that is `MainWindow`'s decision (Task 13).
+- **`crashed`:** `renderProcessTerminated`. Pending pulls get `None` first,
+  then the signal is emitted.
+  - `restart()` loads a fresh page with an empty document. It does not
+    restore the document: Task 14 calls `restart()` then `set_document`
+    from the buffer, as spec section 7 says.
+  - `_forget_page()` is the one reset shared by `restart`, crash and
+    failure. It drops the queue, settles the load counters (a dead page's
+    callbacks never arrive) and answers pending pulls with `None`.
+- **`request_document(callback)`** calls back exactly once:
+  - with the document, or with `None` on timeout, crash, failure, or a
+    result that is not a JSON object;
+  - never synchronously, except on an already-failed view.
+  - Its timeout starts once the page is ready and has finished every
+    earlier `set_document`. It lasts `PULL_TIMEOUT_MS + PULL_MS_PER_MB` x
+    (MB of the last document JSON sent or pulled), that is 3000 ms + 100 ms
+    per MB: 3.3 s for 2.8 MB, 5.8 s for 27.9 MB.
+  - A late answer is ignored. Step 13 records this in spec section 7.
+- **Navigation guard** (`_Page.acceptNavigationRequest`):
+  - main frame: allowed only when the URL without its fragment is the page
+    file (our loads, reloads, in-page anchors);
+  - subframes: `about:` only (raw HTML `about:srcdoc`, in case a Qt version
+    asks);
+  - everything else is refused, never opened: `openLink` is the only way
+    out (Task 9). Task 16 adds `open_external` for `openLink` (Task 13
+    deletes `preview.py`, v1's home of it).
+- **Theme:** `set_theme(theme)` sets the page background color
+  (`render.PAGE_BACKGROUND`) and calls `mdEditor.setTheme(page_css(theme))`.
+  No reload: the document and its history stay (spec 6.7).
+- **Zoom passthrough:** `RichView` adds nothing; `setZoomFactor` is
+  `QWebEngineView`'s own and survives `set_document` and `set_theme`.
+  `restart()` resets it to 100%, which `MainWindow`'s
+  `loadFinished -> _apply_zoom` (v1) already re-applies.
+- **`render.editor_page(theme)`** lives in `core` (Qt-free): it reads
+  `WEB_DIR / "editor.html"` and fills `THEME_SLOT` with `page_css(theme)`.
+  `check_web.build_page` now uses it, so the web check loads the same page
+  `RichView` writes.
+- **Smoke helpers** (`pump`, `page_js`, `pull`, `record`, `names`) go right
+  below `check()`, so the checks Task 13 rewrites near the top of the smoke
+  can use them.
+
+**Files:**
+- Modify: `mdviewer/core/render.py` (append `WEB_DIR`, `THEME_SLOT`, `editor_page`)
+- Modify: `tests/test_render.py`
+- Modify: `web-src/src/editor.js` (epochs, `markClean`)
+- Regenerate and commit: `mdviewer/web/editor.js` (`editor.css`, `qwebchannel.js` and `THIRD_PARTY.txt` come out unchanged)
+- Modify: `scripts/check_web.py` (`Bridge.changed`, epoch checks, `build_page`)
+- Create: `mdviewer/richview.py`
+- Modify: `scripts/smoke_ui.py` (header, helpers, one block above the marker)
+- Modify: `docs/superpowers/specs/2026-10-20-wysiwyg-editing-design.md` (sections 6.2, 6.3 and 7)
+
+**Interfaces:**
+- Consumes:
+  - Task 1: `mdviewer/web/editor.html` with `/*@THEME_CSS@*/` in
+    `<style id="theme">`; the runtime files `editor.js`, `editor.css`,
+    `qwebchannel.js`; channel object name `"bridge"`; `build_web.py`.
+  - Task 9: `window.mdEditor.setDocument(json, keepScroll)`,
+    `getDocument()`, `command(name, args)`, `setTheme(css)`,
+    `focusBlock(index)`, `selectionState()`; `bridge.js` `CALLS` and the
+    slot signatures in Task 9's Produces; `check_web.py`'s `PLAIN`,
+    `set_doc`, `run_js` and `Bridge.args`.
+  - Tasks 4-5: `docmodel.from_markdown(body, front, base_dir)` (the smoke's
+    documents); `frontmatter.split(text)`.
+  - `render.page_css(theme)`, `render.PAGE_BACKGROUND`, `render.THEMES`.
+- Produces (later tasks rely on these exact names):
+  - `window.mdEditor` (changed): `setDocument(json, keepScroll = false,
+    epoch)`, `markClean(epoch)`; the page calls `bridge.changed(epoch)`.
+  - `mdviewer/core/render.py`: `WEB_DIR: Path` (the `mdviewer/web`
+    folder), `THEME_SLOT = "/*@THEME_CSS@*/"`,
+    `editor_page(theme: str) -> str`.
+  - `mdviewer/richview.py`:
+    - `RUNTIME_FILES`, `READY_TIMEOUT_MS = 5000`, `PULL_TIMEOUT_MS = 3000`,
+      `PULL_MS_PER_MB = 100` (module constants; the smoke patches them)
+    - `Bridge(QObject)`: the channel object; private to `richview`
+    - `RichView(QWebEngineView)`:
+      - `RichView(theme: str = "light", parent=None)`
+      - Signals: `ready()`, `changed()`, `selectionState(dict)`,
+        `requestLinkDialog(str, str)`, `requestImageDialog()`,
+        `openLink(str)`, `hoverLink(str)`, `editProtected(int)`,
+        `caretBlock(int)`, `load_failed()`, `crashed()`
+      - Attributes: `is_ready: bool`, `failed: bool`, `modified: bool`
+        (writable: a caller that cannot use a pulled document sets it
+        back), `page_file: Path` (the page in the temp folder)
+      - Methods:
+        - `set_document(doc: dict, keep_scroll: bool = False) -> None`
+        - `request_document(callback: Callable[[dict | None], None]) -> None`
+        - `command(name: str, args=None) -> None`
+        - `set_theme(theme: str) -> None`
+        - `focus_block(index: int) -> None`
+        - `restart() -> None`
+  - `scripts/smoke_ui.py` helpers, defined below `check()`:
+    `pump(predicate, timeout_s)`, `page_js(view, script)`,
+    `pull(view, timeout_s=10)`, `record(view)` and `names(seen)`.
+
+- [ ] **Step 1: Write the failing `editor_page` test**
+
+Append to the end of `tests/test_render.py`:
+
+```python
+@pytest.mark.parametrize("theme", render.THEMES)
+def test_editor_page_fills_the_theme_slot(theme):
+    shell = (render.WEB_DIR / "editor.html").read_text(encoding="utf-8")
+    page = render.editor_page(theme)
+    assert render.THEME_SLOT not in page
+    assert f'<style id="theme">{render.page_css(theme)}</style>' in page
+    assert page.replace(render.page_css(theme), render.THEME_SLOT) == shell  # nothing else changes
+    assert (render.WEB_DIR / "editor.js").is_file()
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `.venv/Scripts/python -m pytest tests/test_render.py -k editor_page -v`
+Expected: 3 FAIL with `AttributeError: module 'mdviewer.core.render' has no attribute 'WEB_DIR'`
+
+- [ ] **Step 3: Implement `editor_page` in `mdviewer/core/render.py`**
+
+Append to the end of the module:
+
+```python
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+THEME_SLOT = "/*@THEME_CSS@*/"
+
+
+def editor_page(theme: str) -> str:
+    """The Rendered editor's page: web/editor.html with page_css(theme) in its theme slot."""
+    shell = (WEB_DIR / "editor.html").read_text(encoding="utf-8")
+    return shell.replace(THEME_SLOT, page_css(theme), 1)
+```
+
+- [ ] **Step 4: Run it to verify it passes**
+
+Run: `.venv/Scripts/python -m pytest tests/test_render.py -v`
+Expected: all pass (31 tests, 3 of them new)
+
+- [ ] **Step 5: Write the failing epoch checks in `scripts/check_web.py`**
+
+In `class Bridge`, replace:
+
+```python
+    @Slot()
+    def changed(self) -> None:
+        self.calls.append(["changed"])
+```
+
+with:
+
+```python
+    @Slot(int)
+    def changed(self, epoch: int) -> None:
+        self.calls.append(["changed", epoch])
+```
+
+In `build_page`, replace:
+
+```python
+    shell = (WEB / "editor.html").read_text(encoding="utf-8")
+    check(shell.count(THEME_SLOT) == 1 and shell.count(FIRST_SCRIPT) == 1, "editor.html has the expected slots")
+    shell = shell.replace(THEME_SLOT, render.page_css("light"))
+```
+
+with (`tests/test_web_assets.py` still pins one slot in the template):
+
+```python
+    shell = render.editor_page("light")  # the page RichView loads
+    check(THEME_SLOT not in shell and shell.count(FIRST_SCRIPT) == 1, "editor_page fills the theme slot")
+```
+
+The three checks that expect `bridge.args("changed", mark) == [[]]`
+("two edits after a load report changed once", "the first edit after
+another load reports changed again", "toggling a task checkbox reports a
+change") now expect `[[0]]`. Directly below the second of them, add:
+
+```python
+    # Epochs: changed() names the latest setDocument or markClean, which also re-arms it.
+    mark = len(bridge.calls)
+    check(run_js(app, view, "window.mdEditor.markClean(4)") is None, "markClean returns nothing")
+    run_js(app, view, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('D', {PLAIN})), 0)")
+    run_js(app, view, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('E', {PLAIN})), 0)")
+    pump(app, lambda: bridge.args("changed", mark), 3)
+    pump(app, lambda: False, 0.2)
+    check(bridge.args("changed", mark) == [[4]], "after markClean(4) the next edits report changed(4) once")
+    check(run_js(app, view, "window.mdEditor.command('undo')") is True, "markClean keeps the undo history")
+    mark = len(bridge.calls)
+    run_js(app, view, f"(window.mdEditor.setDocument({json.dumps(doc)}, false, 9), 0)")
+    run_js(app, view, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('F', {PLAIN})), 0)")
+    pump(app, lambda: bridge.args("changed", mark), 3)
+    check(bridge.args("changed", mark) == [[9]], "setDocument(json, keepScroll, 9) makes the next edit changed(9)")
+    mark = len(bridge.calls)
+    set_doc(app, view, doc)
+    run_js(app, view, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('G', {PLAIN})), 0)")
+    pump(app, lambda: bridge.args("changed", mark), 3)
+    check(bridge.args("changed", mark) == [[9]], "setDocument without an epoch keeps the current one")
+    run_js(app, view, "(window.mdEditor.markClean(0), 0)")
+```
+
+- [ ] **Step 6: Run the web check to verify it fails**
+
+Run: `.venv/Scripts/python scripts/check_web.py`
+Expected: a traceback ending in `json.decoder.JSONDecodeError` (the Task 11
+bundle has no `markClean`, so `run_js` gets no JSON back)
+
+- [ ] **Step 7: Add epochs and `markClean` to `web-src/src/editor.js`**
+
+Replace:
+
+```js
+// What has been reported to Python since the last setDocument.
+const sent = { changed: false, caretBlock: null, selectionState: null, hoverLink: "" };
+```
+
+with:
+
+```js
+// What has been reported to Python since the last setDocument or, for changed, markClean.
+const sent = { changed: false, caretBlock: null, selectionState: null, hoverLink: "" };
+// Python numbers every setDocument and markClean; changed(epoch) names the latest one, so
+// Python can tell an edit made after a save's pull from one made before it.
+let epoch = 0;
+```
+
+In `dispatchTransaction`, `send("changed");` becomes
+`send("changed", epoch);`. Replace the start of `setDocument`:
+
+```js
+function setDocument(json, keepScroll = false) {
+  const state = createState(json);
+```
+
+with:
+
+```js
+function setDocument(json, keepScroll = false, docEpoch = epoch) {
+  const state = createState(json);
+  epoch = docEpoch;
+```
+
+In `window.mdEditor`, directly below the `getDocument` line, add:
+
+```js
+  // Python has the current document (a pull): the next edit reports changed(cleanEpoch).
+  markClean(cleanEpoch = epoch) {
+    epoch = cleanEpoch;
+    sent.changed = false;
+  },
+```
+
+- [ ] **Step 8: Rebuild the bundle and run the web check**
+
+Run:
+
+```bash
+.venv/Scripts/python scripts/build_web.py
+.venv/Scripts/python scripts/check_web.py
+```
+
+Expected: the build ends with `Built ...mdviewer\web`; then `WEB OK`.
+`git status --short mdviewer/web` lists only `editor.js`.
+
+- [ ] **Step 9: Add the RichView checks to the smoke**
+
+In `scripts/smoke_ui.py`:
+- Add `import json`, `import re`, `import signal` and `import time` to the
+  standard-library imports at the top, in alphabetical order.
+- Directly below the line `os.environ["QT_QPA_PLATFORM"] = "offscreen"`,
+  add:
+
+  ```python
+  os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")  # shown web views: no GPU log noise
+  ```
+
+- Directly above `from PySide6.QtGui import QCloseEvent, QTextCursor  # noqa: E402`,
+  add:
+
+  ```python
+  from PySide6.QtCore import QEventLoop  # noqa: E402
+  ```
+
+- Directly below `def check(...)` (before `def fake_ask`), add the
+  helpers:
+
+```python
+def pump(predicate, timeout_s: float) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while not predicate() and time.monotonic() < deadline:
+        qt_app.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 50)
+    return bool(predicate())
+
+
+def page_js(view, script: str):
+    """Evaluates `script` in the page's main world; JSON-serializable result (undefined -> None)."""
+    box: list = []
+    view.page().runJavaScript(f"JSON.stringify(({script}) ?? null)", 0, box.append)
+    pump(lambda: box, 3)
+    return json.loads(box[0]) if box and box[0] else None  # "" when JavaScript is off
+
+
+def pull(view, timeout_s: float = 10) -> list:
+    """request_document's callback arguments, after waiting for the first one."""
+    got: list = []
+    view.request_document(got.append)
+    pump(lambda: got, timeout_s)
+    return got
+
+
+def record(view) -> list:
+    """Every RichView signal as [name, *args], in arrival order."""
+    seen: list = []
+    for name in ("ready", "changed", "selectionState", "requestLinkDialog", "requestImageDialog", "openLink",
+                 "hoverLink", "editProtected", "caretBlock", "load_failed", "crashed"):
+        getattr(view, name).connect(lambda *args, name=name: seen.append([name, *args]))
+    return seen
+
+
+def names(seen: list) -> list[str]:
+    return [entry[0] for entry in seen]
+```
+
+Then insert directly above
+`# --- Later tasks insert their checks directly above this line. ---`:
+
+```python
+# --- WYSIWYG Task 12: RichView and Bridge ---------------------------------------
+from PySide6.QtCore import QPoint, Qt, QUrl  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings  # noqa: E402
+
+from mdviewer import richview  # noqa: E402
+from mdviewer.core import docmodel, frontmatter, render  # noqa: E402
+
+# The Bridge has exactly one slot per call bridge.js makes, and nothing else of its own.
+bridge_js = (Path(__file__).resolve().parent.parent / "web-src" / "src" / "bridge.js").read_text(encoding="utf-8")
+CALLS = json.loads(re.search(r"^export const CALLS = (\[.*?^\]);$", bridge_js, flags=re.S | re.M).group(1))
+meta = richview.Bridge.staticMetaObject
+own = [meta.method(i) for i in range(meta.methodOffset(), meta.methodCount())]
+check([bytes(m.name()).decode() for m in own] == CALLS, "Bridge declares one slot per bridge.js call, in order")
+check(all(m.methodType() == m.MethodType.Slot for m in own), "Bridge declares only slots (no signals for the page)")
+check(meta.propertyCount() == meta.propertyOffset(), "Bridge declares no properties")
+
+# Load: ready() arrives, the page sits in a temp folder with its runtime files and theme CSS.
+rich = richview.RichView("light")
+seen = record(rich)
+rich.resize(800, 600)
+rich.show()  # hidden pages throttle timers: selectionState would arrive late (plan Task 9)
+check(rich.settings().testAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled), "JavaScript is enabled in the editor")
+check(rich.contextMenuPolicy() == Qt.ContextMenuPolicy.NoContextMenu, "no Chromium context menu (Reload, View Source)")
+before_ready = docmodel.from_markdown("# Early\n")
+rich.set_document(before_ready)
+early = []
+rich.request_document(early.append)
+check(pump(lambda: rich.is_ready, richview.READY_TIMEOUT_MS / 1000), "RichView becomes ready within 5 s")
+check(names(seen)[:1] == ["ready"], f"ready is the first signal ({names(seen)})")
+check(pump(lambda: early, 5) and early == [before_ready], "calls made before ready() run after it, in order")
+folder = rich.page_file.parent
+check(sorted(p.name for p in folder.iterdir()) == sorted(["editor.html", *richview.RUNTIME_FILES]),
+      "temp folder holds the page and its runtime files")
+check(rich.page_file.read_text(encoding="utf-8") == render.editor_page("light"), "page file is editor_page(theme)")
+check(rich.url() == QUrl.fromLocalFile(str(rich.page_file)), "the view shows the page file")
+
+# Round trip: what set_document puts in comes back from request_document.
+WYSIWYG_MD = (
+    "---\ntitle: x\n---\n\n# Café 😀\n\nText with **bold**, *em*, `code`, ~~gone~~ and\u00a0NBSP.\n\n"
+    "- [x] done\n- [ ] todo\n\n1. one\n2. two\n\n> quote\n\n```python\nprint('hi')\n```\n\n"
+    "| a | b |\n| :-- | --: |\n| 1 | 2 |\n\n![pic](pic.png) [bad](javascript:alert(1)) [web](https://example.com)\n\n"
+    "<div>raw <script>parent.scriptRan = true</script><img src=\"nope.png\" onerror=\"parent.handlerRan = true\"></div>\n\n"
+    "Note[^1].\n\n[^1]: The note.\n"
+)
+front, body = frontmatter.split(WYSIWYG_MD)
+doc = docmodel.from_markdown(body, front, TMP)
+rich.set_document(doc)
+check(pull(rich) == [doc], "request_document returns the document set_document loaded")
+pump(lambda: False, 0.5)  # frames load; a script would have run by now
+check(page_js(rich, "window.scriptRan === undefined && window.handlerRan === undefined") is True,
+      "raw HTML <script> and event handlers never run")
+hrefs = page_js(rich, "[...document.querySelectorAll('#editor a[href]')].map((a) => a.getAttribute('href'))")
+check(hrefs == ["https://example.com"], f"javascript: link stripped, web link kept ({hrefs})")
+check("changed" not in names(seen), "loading documents does not report a change")
+
+# Bridge slots re-emit as RichView signals with their arguments.
+seen.clear()
+bridge = rich._bridge
+bridge.selectionState({"marks": ["strong"], "block": {"type": "paragraph"}, "can": {"undo": True}})
+bridge.requestLinkDialog("text", "https://x.test")
+bridge.requestImageDialog()
+bridge.openLink("https://x.test")
+bridge.hoverLink("")
+bridge.editProtected(3)
+bridge.caretBlock(2)
+check(seen == [
+    ["selectionState", {"marks": ["strong"], "block": {"type": "paragraph"}, "can": {"undo": True}}],
+    ["requestLinkDialog", "text", "https://x.test"], ["requestImageDialog"], ["openLink", "https://x.test"],
+    ["hoverLink", ""], ["editProtected", 3], ["caretBlock", 2],
+], f"Bridge slots re-emit as RichView signals ({seen})")
+
+# Commands and focus go through the channel both ways: one changed() per load, state follows.
+seen.clear()
+rich.set_document(docmodel.from_markdown("plain words\n\nsecond\n"))
+pump(lambda: "caretBlock" in names(seen), 3)
+rich.focus_block(1)
+check(pump(lambda: ["caretBlock", 1] in seen, 3), "focus_block moves the caret (caretBlock 1)")
+seen.clear()
+rich.focus_block(0)
+pump(lambda: ["caretBlock", 0] in seen, 3)
+rich.activateWindow()  # the main window is shown too; keys go to the active window
+QTest.keyClick(rich.focusProxy(), Qt.Key.Key_End, Qt.KeyboardModifier.ShiftModifier)
+check(pump(lambda: page_js(rich, "window.mdEditor.view.state.selection.empty") is False, 3), "Shift+End selects the line")
+rich.command("toggleMark", "strong")
+rich.command("toggleMark", "em")
+check(pump(lambda: names(seen).count("changed") == 1 and any(
+    e[0] == "selectionState" and e[1]["marks"] == ["strong", "em"] for e in seen), 3),
+    f"command edits report changed once and the new marks ({seen[-3:]})")
+check(pull(rich)[0]["content"][0]["content"][0]["marks"] == [{"type": "strong"}, {"type": "em"}],
+      "commands change the pulled document")
+
+# changed(epoch): a change from before the latest load or pull is not a new edit.
+seen.clear()
+rich.set_document(docmodel.from_markdown("fresh\n"))
+check(not rich.modified, "set_document leaves the view unmodified")
+bridge.changed(rich._epoch - 1)  # in flight from the document this load replaced
+pump(lambda: False, 0.3)
+check("changed" not in names(seen) and not rich.modified, "a changed() from the replaced document is dropped")
+rich.command("insertRule")
+rich.command("insertRule")
+check(pump(lambda: "changed" in names(seen), 3) and rich.modified, "an edit after set_document reports changed")
+pump(lambda: False, 0.3)
+check(names(seen).count("changed") == 1, "and only once per load")
+bridge.changed(rich._epoch)  # a repeated message for the same load
+check(names(seen).count("changed") == 1, "a repeated changed() is emitted once")
+# A pull marks the page clean and re-arms changed: the next edit is reported again.
+check(pull(rich)[0] is not None and not rich.modified, "a pull leaves the view unmodified")
+bridge.changed(rich._epoch - 1)  # an edit the pull already read
+pump(lambda: False, 0.3)
+check(names(seen).count("changed") == 1, "a changed() from before the pull is dropped")
+rich.command("insertRule")
+check(pump(lambda: names(seen).count("changed") == 2, 3) and rich.modified, "the first edit after a pull reports changed")
+check(page_js(rich, "window.mdEditor.command('undo')") is True, "a pull keeps the undo history")
+
+# Theme and zoom: no reload, document and history kept.
+loads: list = []
+rich.loadStarted.connect(lambda: loads.append(1))
+rich.set_document(docmodel.from_markdown("theme\n"))
+rich.setZoomFactor(1.5)
+rich.set_theme("dark")
+pump(lambda: False, 0.3)
+background = page_js(rich, "getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()")
+check(background == render.PAGE_BACKGROUND["dark"], f"set_theme swaps the theme CSS ({background})")
+check(rich.page().backgroundColor().name() == render.PAGE_BACKGROUND["dark"], "set_theme sets the page background")
+check(loads == [] and rich.zoomFactor() == 1.5, "theme change and set_document keep the page and the zoom")
+check(pull(rich)[0] == docmodel.from_markdown("theme\n"), "theme change keeps the document")
+rich.setZoomFactor(1.0)  # the click below uses page coordinates
+
+# Navigation guard: only the page itself; links leave through openLink (Ctrl+click).
+LINK = QWebEnginePage.NavigationType.NavigationTypeLinkClicked
+TYPED = QWebEnginePage.NavigationType.NavigationTypeTyped
+OTHER = QWebEnginePage.NavigationType.NavigationTypeOther
+own_url = QUrl.fromLocalFile(str(rich.page_file))
+anchor = QUrl(own_url)
+anchor.setFragment("fn-1")
+guard = rich.page().acceptNavigationRequest
+check(guard(own_url, TYPED, True) and guard(anchor, LINK, True), "own page and in-page anchors are allowed")
+check(not guard(QUrl("https://example.com"), LINK, True), "a clicked web link does not navigate the page")
+check(not guard(QUrl.fromLocalFile(str(TMP / "dropped.md")), TYPED, True), "a dropped file does not replace the page")
+check(guard(QUrl("about:srcdoc"), OTHER, False) and not guard(QUrl("https://example.com"), LINK, False),
+      "raw HTML frames load their srcdoc and nothing else")
+seen.clear()
+rich.set_document(docmodel.from_markdown("[web](https://example.com/page)\n"))
+pump(lambda: False, 0.3)
+point = page_js(rich, "(() => { const b = document.querySelector('#editor a').getBoundingClientRect();"
+                      " return [Math.round(b.left + b.width / 2), Math.round(b.top + b.height / 2)]; })()")
+QTest.mouseClick(rich.focusProxy(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, QPoint(*point))
+check(pump(lambda: ["openLink", "https://example.com/page"] in seen, 3), "Ctrl+click on a link emits openLink(href)")
+pump(lambda: False, 0.3)
+check(rich.url() == own_url, "Ctrl+click does not navigate the page")
+
+# Pull timeout: a busy page answers None once; the late answer is ignored.
+rich.command("insertRule")
+pump(lambda: rich.modified, 3)
+saved_timeout = richview.PULL_TIMEOUT_MS
+richview.PULL_TIMEOUT_MS = 300
+rich.page().runJavaScript("(() => { const t = Date.now(); while (Date.now() - t < 1200); })()", 0)
+started = time.monotonic()
+busy = pull(rich, 3)
+waited = time.monotonic() - started
+check(busy == [None] and waited < 1.1, f"a pull with no answer in time gives None ({busy}, {waited:.2f} s)")
+check(rich.modified, "a failed pull leaves the view modified")
+pump(lambda: False, 1.5)
+check(busy == [None], "the late answer does not call back again")
+richview.PULL_TIMEOUT_MS = saved_timeout
+check(pull(rich)[0]["content"][0] == docmodel.from_markdown("[web](https://example.com/page)\n")["content"][0],
+      "pulls work again afterwards")
+
+# Renderer crash: crashed(), the pending pull gets None, restart() brings a working page back.
+rich.command("insertRule")  # this document's change is reported before the crash
+check(pump(lambda: "changed" in names(seen), 3), "an edit reports changed")
+seen.clear()
+rich.page().runJavaScript("(() => { const t = Date.now(); while (Date.now() - t < 3000); })()", 0)
+crash_pull: list = []
+rich.request_document(crash_pull.append)
+os.kill(rich.page().renderProcessPid(), signal.SIGTERM)
+check(pump(lambda: "crashed" in names(seen), 5), "a killed renderer emits crashed")
+check(crash_pull == [None] and not rich.is_ready, "the pull in flight gets None and the view is not ready")
+rich.restart()
+check(pump(lambda: rich.is_ready, 5), "restart() loads a fresh page")
+rich.command("insertRule")
+check(pump(lambda: "changed" in names(seen), 3), "the first edit on the restarted page reports changed")
+again = docmodel.from_markdown("# Back\n")
+rich.set_document(again)
+check(pull(rich) == [again], "set_document and request_document work after a restart")
+check(page_js(rich, "getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()")
+      == render.PAGE_BACKGROUND["dark"], "the restarted page keeps the current theme")
+rich.close()
+
+# Load failures: missing page files, or no ready() in time -> load_failed; then calls are no-ops.
+saved_web, saved_ready = render.WEB_DIR, richview.READY_TIMEOUT_MS
+render.WEB_DIR = TMP / "no-web"
+missing = richview.RichView()
+missing_seen = record(missing)
+check(pump(lambda: "load_failed" in names(missing_seen), 1) and missing.failed, "missing page files -> load_failed")
+render.WEB_DIR = saved_web
+richview.READY_TIMEOUT_MS = 50  # the real page needs ~0.5 s: its ready() comes too late
+late = richview.RichView()
+late_seen = record(late)
+check(pump(lambda: "load_failed" in names(late_seen), 3), "no ready() in time -> load_failed")
+pump(lambda: False, 1.5)  # the page's own ready() arrives meanwhile
+check(names(late_seen) == ["load_failed"] and not late.is_ready, f"a late ready() is ignored ({names(late_seen)})")
+nothing: list = []
+late.request_document(nothing.append)
+late.set_document(docmodel.from_markdown("x\n"))
+late.command("toggleMark", "strong")
+check(nothing == [None], "after load_failed, request_document answers None at once")
+richview.READY_TIMEOUT_MS = saved_ready
+
+```
+
+- [ ] **Step 10: Run the smoke to verify it fails**
+
+Run: `.venv/Scripts/python scripts/smoke_ui.py`
+Expected: traceback ending in `ModuleNotFoundError: No module named 'mdviewer.richview'`
+
+- [ ] **Step 11: Create `mdviewer/richview.py`**
+
+```python
+"""Rendered editor host: the ProseMirror page (mdviewer/web) in a QWebEngineView.
+
+Python calls the page through window.mdEditor (runJavaScript); the page calls Python
+through the one QWebChannel object, Bridge, whose slots re-emit as RichView signals.
+"""
+
+import json
+import shutil
+import tempfile
+from collections.abc import Callable
+from pathlib import Path
+
+from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QColor
+from PySide6.QtWebChannel import QWebChannel
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
+from PySide6.QtWebEngineWidgets import QWebEngineView
+
+from mdviewer.core import render
+
+# Files the page loads from its own folder (CSP script-src 'self').
+RUNTIME_FILES = ("editor.js", "editor.css", "qwebchannel.js")
+READY_TIMEOUT_MS = 5000  # spec: page ready() within 5 s
+# Spec: a pull answers within 3 s. Big documents take longer to serialize in the page
+# (~2 s for 28 MB of document JSON), so each MB of the last document JSON adds this much.
+PULL_TIMEOUT_MS = 3000
+PULL_MS_PER_MB = 100
+_MAIN_WORLD = 0  # QWebEngineScript.ScriptWorldId.MainWorld: where window.mdEditor lives
+# PySide6 types adjusted()'s parameter as ComponentFormattingOption, so the bare
+# UrlFormattingOption.RemoveFragment is rejected; OR-ing in PrettyDecoded is accepted.
+_NO_FRAGMENT = QUrl.ComponentFormattingOption.PrettyDecoded | QUrl.UrlFormattingOption.RemoveFragment
+# A pull reads the document and marks the page clean in one step: no edit falls in between.
+_PULL_JS = "(() => {{ const json = JSON.stringify(window.mdEditor.getDocument()); window.mdEditor.markClean({}); return json; }})()"
+
+
+class Bridge(QObject):
+    """The only object the page sees: one slot per call in web-src/src/bridge.js CALLS."""
+
+    def __init__(self, view: "RichView"):
+        super().__init__(view)
+        self._view = view
+
+    @Slot()
+    def ready(self) -> None:
+        self._view._on_ready()
+
+    @Slot(int)
+    def changed(self, epoch: int) -> None:
+        self._view._on_changed(epoch)
+
+    @Slot("QVariantMap")
+    def selectionState(self, state: dict) -> None:
+        self._view.selectionState.emit(state)
+
+    @Slot(str, str)
+    def requestLinkDialog(self, text: str, href: str) -> None:
+        self._view.requestLinkDialog.emit(text, href)
+
+    @Slot()
+    def requestImageDialog(self) -> None:
+        self._view.requestImageDialog.emit()
+
+    @Slot(str)
+    def openLink(self, href: str) -> None:
+        self._view.openLink.emit(href)
+
+    @Slot(str)
+    def hoverLink(self, href: str) -> None:
+        self._view.hoverLink.emit(href)
+
+    @Slot(int)
+    def editProtected(self, index: int) -> None:
+        self._view.editProtected.emit(index)
+
+    @Slot(int)
+    def caretBlock(self, index: int) -> None:
+        self._view.caretBlock.emit(index)
+
+
+class _Page(QWebEnginePage):
+    """Stays on the editor page: links leave only through Bridge.openLink (Ctrl+click)."""
+
+    def __init__(self, page_url: QUrl, parent=None):
+        super().__init__(parent)
+        self.page_url = page_url
+
+    def acceptNavigationRequest(self, url, nav_type, is_main_frame) -> bool:
+        if is_main_frame:
+            return url.adjusted(_NO_FRAGMENT) == self.page_url  # our loads and in-page anchors
+        return url.scheme() == "about"  # raw HTML frames (about:srcdoc)
+
+
+class RichView(QWebEngineView):
+    """The Rendered editor. Calls made before ready() are queued and run once it arrives."""
+
+    ready = Signal()
+    changed = Signal()  # first edit since the last set_document or request_document
+    selectionState = Signal(dict)
+    requestLinkDialog = Signal(str, str)
+    requestImageDialog = Signal()
+    openLink = Signal(str)
+    hoverLink = Signal(str)
+    editProtected = Signal(int)
+    caretBlock = Signal(int)
+    load_failed = Signal()  # no ready() within READY_TIMEOUT_MS, or the page files are missing
+    crashed = Signal()  # the render process died; restart() loads a fresh page
+
+    def __init__(self, theme: str = "light", parent=None):
+        super().__init__(parent)
+        self._tmpdir = tempfile.TemporaryDirectory(prefix="mdviewer-", ignore_cleanup_errors=True)
+        self.page_file = Path(self._tmpdir.name) / "editor.html"
+        self.setPage(_Page(QUrl.fromLocalFile(str(self.page_file)), self))
+        # v1's preview disabled JavaScript; the editor needs it. Raw HTML stays script-free
+        # (sandboxed frames, CSP script-src 'self').
+        self.settings().setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+        # Chromium's menu offers Reload and View Source; Task 17 adds our own menu.
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        self._channel = QWebChannel(self.page())
+        self._bridge = Bridge(self)
+        self._channel.registerObject("bridge", self._bridge)
+        self.page().setWebChannel(self._channel)
+        self.page().renderProcessTerminated.connect(self._on_crash)
+        self._ready_timer = QTimer(self)
+        self._ready_timer.setSingleShot(True)
+        self._ready_timer.timeout.connect(self._fail)
+        self._theme = theme
+        self._doc_mb = 0.0  # size of the last document JSON, for the pull timeout
+        self._sent = 0  # set_document calls made
+        self._applied = 0  # set_document calls the page has finished
+        # Every set_document and pull starts a new epoch; the page's changed(epoch) names the
+        # one it follows, so a change from before a load or pull is never taken for a new one.
+        self._epoch = 0
+        self.modified = False  # the page has changed since the last set_document or pull
+        self._pulls: dict[int, tuple[Callable[[dict | None], None], bool]] = {}
+        self._waiting: list[int] = []  # pulls whose timeout starts when the page is idle
+        self._next_pull = 0
+        self.restart()
+
+    # --- lifecycle -------------------------------------------------------------
+
+    def restart(self) -> None:
+        """Load a fresh editor page (start, or after `crashed`); the document is empty."""
+        self._forget_page()
+        self.failed = False
+        self._epoch += 1
+        self.modified = False
+        self._queue.append((f"window.mdEditor.markClean({self._epoch}), 0", None))
+        self.page().setBackgroundColor(QColor(render.PAGE_BACKGROUND[self._theme]))
+        try:
+            folder = self.page_file.parent
+            folder.mkdir(parents=True, exist_ok=True)
+            for name in RUNTIME_FILES:
+                shutil.copyfile(render.WEB_DIR / name, folder / name)
+            self.page_file.write_text(render.editor_page(self._theme), encoding="utf-8")
+        except OSError:
+            QTimer.singleShot(0, self, self._fail)  # after the caller has connected load_failed
+            return
+        self._ready_timer.start(READY_TIMEOUT_MS)
+        self.load(QUrl.fromLocalFile(str(self.page_file)))
+
+    def _on_ready(self) -> None:
+        if self.is_ready or self.failed:
+            return
+        self._ready_timer.stop()
+        self.is_ready = True
+        queue, self._queue = self._queue, []
+        for script, callback in queue:
+            self._js(script, callback)
+        self._arm_waiting()
+        self.ready.emit()
+
+    def _fail(self) -> None:
+        if self.failed:
+            return
+        self._forget_page()
+        self.failed = True
+        self.load_failed.emit()
+
+    def _on_crash(self, _status, _code) -> None:
+        self._forget_page()
+        self.crashed.emit()
+
+    def _forget_page(self) -> None:
+        """Drop everything tied to the current page: its JavaScript callbacks never arrive."""
+        self._ready_timer.stop()
+        self.is_ready = False
+        self._queue: list[tuple[str, Callable | None]] = []
+        self._applied = self._sent
+        self._fail_pulls()
+
+    # --- Python -> page --------------------------------------------------------
+
+    def _js(self, script: str, callback: Callable | None = None) -> None:
+        if callback is None:
+            self.page().runJavaScript(script, _MAIN_WORLD)
+        else:
+            self.page().runJavaScript(script, _MAIN_WORLD, callback)
+
+    def _call(self, script: str, callback: Callable | None = None) -> bool:
+        """Runs `script` now, or queues it until ready(); False once loading has failed."""
+        if self.failed:
+            return False
+        if self.is_ready:
+            self._js(script, callback)
+        else:
+            self._queue.append((script, callback))
+        return True
+
+    def set_document(self, doc: dict, keep_scroll: bool = False) -> None:
+        """Replace the document (new undo history). keep_scroll: external reload."""
+        payload = json.dumps(doc)
+        self._epoch += 1
+        self.modified = False
+        self._sent += 1
+        number = self._sent
+        if self._call(f"window.mdEditor.setDocument({payload}, {json.dumps(keep_scroll)}, {self._epoch}), 0",
+                      lambda _result: self._on_applied(number)):
+            self._doc_mb = len(payload) / 1e6
+        else:
+            self._applied = self._sent
+
+    def _on_applied(self, number: int) -> None:
+        self._applied = max(self._applied, number)
+        self._arm_waiting()
+
+    def _on_changed(self, epoch: int) -> None:
+        if epoch == self._epoch and not self.modified:
+            self.modified = True
+            self.changed.emit()
+
+    def request_document(self, callback: Callable[[dict | None], None]) -> None:
+        """callback(doc) with the page's document, or callback(None) on timeout, crash or
+        load failure. Called exactly once, never synchronously from a working page.
+        The page counts as clean from then on (`modified` False): the caller keeps the
+        document's text. A failed pull leaves `modified` as it was."""
+        if self.failed:
+            callback(None)
+            return
+        self._next_pull += 1
+        number = self._next_pull
+        self._pulls[number] = (callback, self.modified)
+        self._epoch += 1
+        self.modified = False
+        self._call(_PULL_JS.format(self._epoch), lambda value: self._on_pulled(number, value))
+        self._waiting.append(number)
+        self._arm_waiting()
+
+    def _arm_waiting(self) -> None:
+        """Start the timeouts of waiting pulls once the page has run every earlier load."""
+        if not self.is_ready or self._applied != self._sent:
+            return
+        timeout = PULL_TIMEOUT_MS + int(PULL_MS_PER_MB * self._doc_mb)
+        for number in self._waiting:
+            QTimer.singleShot(timeout, self, lambda n=number: self._finish_pull(n, None))
+        self._waiting.clear()
+
+    def _on_pulled(self, number: int, value) -> None:
+        try:
+            doc = json.loads(value) if isinstance(value, str) else None
+        except ValueError:
+            doc = None
+        if isinstance(value, str):
+            self._doc_mb = len(value) / 1e6
+        self._finish_pull(number, doc if isinstance(doc, dict) else None)
+
+    def _finish_pull(self, number: int, doc: dict | None) -> None:
+        pull = self._pulls.pop(number, None)
+        if number in self._waiting:
+            self._waiting.remove(number)
+        if pull is not None:
+            callback, was_modified = pull
+            if doc is None:
+                self.modified = self.modified or was_modified
+            callback(doc)
+
+    def _fail_pulls(self) -> None:
+        pulls, self._pulls = self._pulls, {}
+        self._waiting.clear()
+        for callback, was_modified in pulls.values():
+            self.modified = self.modified or was_modified
+            callback(None)
+
+    def command(self, name: str, args=None) -> None:
+        """Run a toolbar or menu command (web-src/src/commands.js, tables.js)."""
+        self._call(f"window.mdEditor.command({json.dumps(name)}, {json.dumps(args)}), 0")
+
+    def set_theme(self, theme: str) -> None:
+        """Swap the theme stylesheet in place: no reload, same document and undo history."""
+        self._theme = theme
+        self.page().setBackgroundColor(QColor(render.PAGE_BACKGROUND[theme]))
+        self._call(f"window.mdEditor.setTheme({json.dumps(render.page_css(theme))}), 0")
+
+    def focus_block(self, index: int) -> None:
+        """Caret at the start of top-level block `index` (mode-switch caret mapping)."""
+        self._call(f"window.mdEditor.focusBlock({int(index)}), 0")
+```
+
+- [ ] **Step 12: Run the smoke to verify it passes**
+
+Run: `.venv/Scripts/python scripts/smoke_ui.py`
+Expected: `SMOKE OK` (Chromium may print a few `GLES3 ... fallback`
+lines to stderr; they are harmless)
+
+- [ ] **Step 13: Align the spec with the Bridge, epoch and pull-timeout decisions**
+
+In `docs/superpowers/specs/2026-10-20-wysiwyg-editing-design.md`:
+- Section 6.2, Python -> JS table:
+  - The `setDocument(json, keepScroll)` row becomes
+    `setDocument(json, keepScroll, epoch)`. Its purpose gains: `epoch`
+    numbers the load for `changed`.
+  - Add a row below `getDocument`: ``| `markClean(epoch)` | The document
+    was just pulled: start epoch `epoch`; the next edit reports `changed`
+    again (keeps the undo history) |``.
+- Section 6.2, JS -> Python: replace `JS -> Python (\`Bridge\` signals/slots):`
+  with ``JS -> Python (`Bridge` slots, re-emitted as `RichView` signals of the same names):``.
+  The `changed()` row becomes ``| `changed(epoch)` | First change since the
+  last `setDocument` or `markClean` (sets dirty); Python ignores older
+  epochs |``.
+- Section 6.3: replace `(mode switch, reload or save)` with
+  `(mode switch or reload; a save keeps the editor state)`.
+- Section 7: replace the row header cell
+  `Pull callback missing after 3 s (renderer crash)` with
+  `Pull callback missing after 3 s plus 0.1 s per MB of document JSON, counted once earlier document loads have finished (renderer hang)`
+
+- [ ] **Step 14: Run the full verification**
+
+Run:
+
+```bash
+.venv/Scripts/python -m pytest -v
+.venv/Scripts/python scripts/smoke_ui.py
+.venv/Scripts/python scripts/check_web.py
+rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests
+sha256sum mdviewer/web/* > /tmp/web1.txt && .venv/Scripts/python scripts/build_web.py > /dev/null && sha256sum mdviewer/web/* | diff /tmp/web1.txt - && echo REPRODUCIBLE
+```
+
+Expected: all tests pass (730 at the time of writing); `SMOKE OK`;
+`WEB OK`; the `rg` line prints nothing; `REPRODUCIBLE`.
+
+- [ ] **Step 15: Commit**
+
+```bash
+git add mdviewer/richview.py mdviewer/core/render.py tests/test_render.py web-src/src/editor.js mdviewer/web scripts/smoke_ui.py scripts/check_web.py docs/superpowers/specs/2026-10-20-wysiwyg-editing-design.md
+git status --short   # must not list web-src/node_modules
+git commit -m "feat: add RichView web editor host with QWebChannel bridge"
+```
+
+**Review Focus:**
+
+- **Dirty-flag correctness across loads and saves.** A merely viewed file
+  must never look edited, and a real edit must never be lost.
+  - `changed` is emitted at most once per epoch, and only for the current
+    epoch, whichever of a pull's answer and a `changed()` message arrives
+    first.
+  - A pull re-arms `changed` without touching the undo history.
+  - Undo back to the loaded or saved text still counts as edited, matching
+    Task 9's "first change since the last load".
+- **Pull callbacks:** exactly once each.
+  - `None` on timeout, crash, failure or a non-object result, with
+    `modified` restored.
+  - A late answer is dropped.
+  - No timeout starts while the page is still loading or applying an
+    earlier document, so big documents are not reported as hung. A hang
+    during `setDocument` itself is therefore caught only by the pull's own
+    timer, once that load has finished, or by `crashed`.
+- **No navigation away from the page.**
+  - Every main-frame URL other than the page file (fragments aside) is
+    refused and never opened.
+  - Dropped files and link clicks do nothing; Ctrl+click goes through
+    `openLink` only.
+  - Chromium's own menu (Reload, View Source) is off.
+- **Failure paths never raise into `MainWindow`.**
+  - Missing `mdviewer/web` files become `load_failed`, emitted after the
+    constructor returns.
+  - After `load_failed`, every call is a no-op and pulls answer `None` at
+    once; a late `ready()` changes nothing.
+- **Bridge surface:**
+  - nine slots, matching `bridge.js` `CALLS`, and no signals or
+    properties of its own;
+  - no slot takes a path or touches the filesystem (spec section 5.6).
+- **Accepted behaviors:**
+  - `restart()` shows an empty document until the caller's next
+    `set_document`. It resets the zoom to 100% (the view gets a new
+    `focusProxy()`).
+  - `set_document` before `ready()` queues the whole JSON. Several loads
+    in a row before `ready()` all run, in order; only the last one shows.
+  - Code blocks edited after a save keep no highlight until the next mode
+    switch or reload.
+  - The temp folder is removed when the view is garbage-collected (as v1's
+    preview).
+- **Handed on:**
+  - **Task 13:**
+    - Pull only when `rich.modified`. Connect `rich.changed` for the
+      dirty flag and `rich.caretBlock` for the caret mapping. Keep
+      `loadFinished -> _apply_zoom` as v1 does: `restart()` resets the
+      zoom.
+    - File drops: install the event filter on `rich.focusProxy()` again on
+      every `rich.ready` (the proxy is replaced after a crash).
+    - Opening a 4.8 MB file in Rendered mode takes ~6 s in
+      `from_markdown` (UI thread) and ~5.6 s in the page's `setDocument`.
+  - **Task 14:**
+    - `crashed` arrives after any pending pull has been answered `None`.
+      Show the stopped-responding dialog from the pull callback when a
+      pull was in flight, and from `crashed` otherwise. Then `restart()`
+      and `set_document` from the buffer.
+  - **Task 16:** add `open_external(url: QUrl)` (`QDesktopServices.openUrl`,
+    as v1's `preview.py` had it) for `openLink`.
+  - **Task 17:** switch `NoContextMenu` to `CustomContextMenu` for the
+    native menu.
+- **No regressions:**
+  - `tests/` stays Qt-free; `render.editor_page` only reads a file.
+  - `MainWindow` still uses `preview.py`: Task 13 swaps it in.
 
 ### Task 13: Rendered/Source modes and synchronous paths
 
-- **Files:** `mdviewer/main_window.py`, delete `mdviewer/preview.py`, `scripts/smoke_ui.py` (update existing preview checks).
-- **Covers:** menu items renamed (View > Rendered / Source), `RENDERED`/`SOURCE` mode constants, `with_buffer`, `_rendered_changed` flag (no re-serialization when unchanged), switching without prompt, caret mapping by top-level block, open in Rendered (Source above 5 MB), New in Rendered, Save/Save As through `with_buffer`, theme via `set_theme`, status bar left text `Rendered`, load-failure fallback to Source with warning.
-- **Test:** smoke: open -> Rendered; switch both ways without edits keeps buffer byte-identical; command `toggleMark strong` + Save writes `**...**`; 5 MB file opens in Source; theme change does not reload the page.
-- **Commit:** `feat: replace preview with editable Rendered mode and Source mode`
+**Status: steps detailed.** All code below was run before being written into
+this plan (2026-10-20, PySide6 6.12.0 offscreen), on top of Task 12's code as
+this plan details it. Results:
+- The full suite passes (730 tests; no pytest changes), `SMOKE OK` in five
+  runs in a row, `WEB OK`, and the Qt-import `rg` prints nothing.
+- The smoke takes ~13 s.
+- Run against Task 12's `main_window.py`, the rewritten smoke stops with
+  `AttributeError: 'MainWindow' object has no attribute 'rich'` (Step 2).
+- Nineteen deliberate breaks of `main_window.py` each make the smoke fail:
+  - `with_buffer` never pulls
+  - no `_pending_pull` guard
+  - no document-number guard
+  - editor modifications counted in Rendered mode
+  - Rendered edits never mark the buffer dirty
+  - Source mode keeps the old undo history
+  - Source mode ignores the dirty flag
+  - no large-file limit
+  - a serializer failure drops the pending edits
+  - an external change reloads over Rendered edits
+  - the theme not sent to the page
+  - the caret not mapped into Rendered mode
+  - the caret not mapped into Source mode
+  - the drop filter installed only at start-up
+  - `load_failed` ignored
+  - Rendered not greyed after a load failure
+  - `buffer` ignoring Rendered mode
+  - no warning when `docmodel` fails on open
+  - a pull failure not reported
+
+**Findings that shape this task:**
+
+- **The serializer normalizes on the first Rendered save**, as spec 1
+  accepts: the sample's `line two` / `edited` soft break comes back
+  as `line two edited`. The smoke pins that exact output (CRLF and
+  NBSP kept).
+- **`QPlainTextEdit` signals during a switch:** `setPlainText` and
+  `setModified` fire `modificationChanged`. Rendered -> Source sets the
+  editor's text and modified flag, so `_on_modification` must ignore the
+  editor while the mode is Rendered, or the dirty flag would follow the
+  hidden editor.
+- **A pull can outlive its document.** Between `with_buffer`'s request and
+  its callback, a drop, an external reload or `open_file` can load another
+  file. Its text must not land in the new buffer, so pulls carry a
+  document number.
+- **File drops on the page** go to the view's focus proxy, which only
+  accepts a `Drop` after a `DragEnter` (a lone synthesized `QDropEvent`
+  reaches no filter). After a renderer crash the proxy is a new widget,
+  present by `rich.ready` (Task 12). Drags that start inside the page
+  (text, images) have a `source()`; Explorer's have none.
+- **The smoke's `pump()` runs the event loop**, so the 1 s file-watch timer
+  would poll during unrelated checks (a theme check saw a reload from
+  disk). The file-watch checks already call `_poll_disk()` by hand; the
+  smoke stops the timer right after checking it runs.
+- **A missing image shows Task 8's placeholder**, not an `<img>`: the smoke
+  reads `display_src` from `mdEditor.getDocument()`.
+
+**Design decisions:**
+
+- **Modes:** `MainWindow.RENDERED = "rendered"` and `SOURCE = "source"`
+  replace `PREVIEW` / `EDIT`. The View radio pair becomes
+  `act_rendered` (`&Rendered`, Ctrl+P) and `act_source` (`&Source`,
+  Ctrl+E). `self.rich = RichView(...)` replaces `self.preview` at stack
+  index 0; `mdviewer/preview.py` is deleted. The settings key
+  `preview_zoom` keeps its name (existing `settings.json` files).
+- **One buffer:**
+  - In Source mode, `buffer` is the editor's raw text (as v1).
+  - In Rendered mode, it is `_rendered_text`: the text last loaded into
+    the page (`_render`) or pulled from it (`with_buffer`).
+  - `_load` puts the file text in both, so opening never needs a pull.
+  - `_block_lines` holds the top-level blocks' source lines of
+    `_rendered_text`, from the document `_render` built; `None` after a
+    pull changed the text (recomputed by parsing when needed).
+- **`with_buffer(fn)`**, spec 6.4:
+  - It calls `fn(buffer)` at once in Source mode, or when `rich.modified`
+    is False (the page equals `_rendered_text`).
+  - Otherwise it pulls, serializes with `serialize.to_text`, stores the
+    text, then calls `fn(text)`.
+  - `_pending_pull` drops re-triggers while a pull is in flight (spec 6.4;
+    moved here from the Task 14 outline, since a second pull's sync path
+    would read a stale buffer).
+  - A pull whose document was replaced meanwhile (`_doc_number` changed by
+    `_load` or `_render`) is discarded.
+  - A pull answered `None` shows `PULL_FAILED_NOTE` in the status bar;
+    Task 14 replaces that with the stopped-responding dialog.
+  - A serializer exception restores `rich.modified` (the edits stay
+    pending) and goes through `show_error`, so nothing is saved or
+    switched.
+- **Switching** (`set_mode`) never prompts; the dirty flag carries over.
+  - **Rendered -> Source:** goes through `with_buffer`. `_enter_source`
+    sets the editor text only if it differs, clears the undo stacks, and
+    sets the editor's modified flag from `dirty`. The caret goes to the
+    first line of the caret block (`RichView.caretBlock`): from
+    `_block_lines`, or from a parse of the new text after a pull. An
+    unedited round trip therefore keeps the buffer byte-identical.
+  - **Source -> Rendered:** `_render(buffer)` with a fresh undo history.
+    The caret goes to the block that starts last at or before the editor's
+    line (`focus_block`). If `docmodel` raises, the view stays in Source
+    mode with `SWITCH_FAILED_NOTE`.
+- **Open:**
+  - A file larger than `LARGE_FILE_BYTES = 5 * 1024 * 1024` bytes opens in
+    Source mode with `LARGE_FILE_NOTE` (exact spec copy). The user can
+    still switch.
+  - Otherwise it opens in Rendered mode. If `docmodel` raises, it opens in
+    Source mode with `OPEN_FAILED_NOTE` (exact spec copy).
+  - New and Close show an empty Rendered page.
+- **Save / Save As:** `_save_when_ready(path)` runs `_save_to` through
+  `with_buffer`. `on_save()` / `on_save_as()` return True only when the
+  file was written before they return.
+  - In Rendered mode with unpulled edits, the save finishes after the pull
+    and they return False.
+  - Interim until Task 14: a "Save changes?" prompt answered Save (New,
+    Open, drop, Open Recent, Close, Exit) then cancels its action. The
+    save still completes, and the next attempt finds the buffer clean.
+  - Saving keeps the Rendered undo history: the pull re-armed `changed`
+    (Task 12).
+- **Editor page start-up:** `RichView` is created with the saved theme
+  (`read_system_theme()` for System), so a dark start shows no light
+  flash.
+  - `load_failed` shows `EDITOR_FAILED_NOTE` and switches to Source if
+    needed. `act_rendered` is greyed while `rich.failed`. Opens then use
+    Source mode silently.
+- **Theme:** `_apply_theme` calls `rich.set_theme(theme)`: no reload, same
+  document, history and scroll.
+- **External changes** (spec section 2 table; moved here from the Task 14
+  outline because a silent reload over Rendered edits would lose them):
+  - Source mode, or a dirty buffer in Rendered mode: v1's dialog.
+    "Keep my version" marks Rendered mode dirty; "Reload" reloads into the
+    current mode.
+  - Rendered mode, clean: silent reload with `keep_scroll=True`.
+    Read-failure retries only while clean.
+- **Drops on the page:** `MainWindow` filters events on
+  `rich.focusProxy()`, installed at start-up and again on every
+  `rich.ready`. It handles only drags from outside the app
+  (`event.source() is None`) that carry local files. Drags inside the
+  page (ProseMirror moves text and images) and web links go to the page.
+  v1's `setAcceptDrops(False)` on the preview is gone: it would also
+  disable the page's own drag and drop.
+- **Edit menu (interim until Task 17):** Undo, Redo, Cut, Paste, Select
+  All, Find and Replace are Source-only, as in v1's preview. Their keys
+  then reach the page, which handles Ctrl+Z/Y/X/V/A itself. Copy works in
+  both modes (`rich.page().triggerAction(Copy)`). Zoom is Rendered-only,
+  as v1's preview.
+- **Status bar:** the left label shows `Rendered` (or `Rendered 125%`) in
+  Rendered mode, and `Ln X, Col Y` in Source mode.
+
+**Files:**
+- Modify: `mdviewer/main_window.py`
+- Delete: `mdviewer/preview.py`
+- Modify: `scripts/smoke_ui.py` (v1 sections rewritten for the two modes)
+
+**Interfaces:**
+- Consumes:
+  - Task 12: `RichView` (`set_document`, `request_document`,
+    `focus_block`, `set_theme`, `modified`, `failed`, `is_ready`,
+    `restart`; signals `changed`, `caretBlock`, `ready`, `load_failed`),
+    `richview.PULL_TIMEOUT_MS`, `render.WEB_DIR`; the smoke helpers
+    `pump`, `page_js`.
+  - Tasks 3-7: `frontmatter.split(text)`,
+    `docmodel.from_markdown(body, front, base_dir)` (top-level nodes carry
+    `attrs["line"]`), `serialize.to_text(doc)`.
+- Produces (later tasks rely on these exact names):
+  - `MainWindow.RENDERED = "rendered"`, `MainWindow.SOURCE = "source"`,
+    `MainWindow.mode`
+  - `MainWindow.rich`, `MainWindow.act_rendered`, `MainWindow.act_source`
+  - `MainWindow.with_buffer(fn: Callable[[str], None]) -> None` and the
+    `_pending_pull` flag
+  - `MainWindow.set_mode(mode: str) -> None`
+  - `MainWindow._show_mode(mode: str, keep_scroll: bool = False) -> bool`
+    (False: Source shown instead)
+  - `MainWindow._render(text: str, keep_scroll: bool = False) -> bool`
+  - `MainWindow._enter_source(text: str) -> None`
+  - `MainWindow._save_when_ready(path: Path) -> bool`
+  - `MainWindow._caret_block: int`, `_block_lines`, `_doc_number`
+  - Module constants: `LARGE_FILE_BYTES`, `LARGE_FILE_NOTE`,
+    `OPEN_FAILED_NOTE`, `SWITCH_FAILED_NOTE`, `EDITOR_FAILED_NOTE`,
+    `PULL_FAILED_NOTE`
+  - `scripts/smoke_ui.py`: the main window is shown from the start;
+    `drop_on_page(url)`; `RENDERED_SAVED`; `doc_md`; the file-watch timer
+    is stopped after the Task 11 checks.
+
+- [ ] **Step 1: Rewrite the smoke for the two modes**
+
+In `scripts/smoke_ui.py`, replace everything from the line
+`# --- Startup state ---...` up to (not including)
+`# --- Task 10: editor intelligence ---...` with:
+
+```python
+# --- Startup state ---------------------------------------------------------
+window.show()  # shown like the app: Chromium throttles the timers of hidden pages
+check(window.mode == "rendered", "starts in Rendered mode")
+check(window.stack.currentWidget() is window.rich, "the Rendered editor is shown at startup")
+check(window.windowTitle() == "Untitled - MD Viewer", "Untitled title at startup")
+check(pump(lambda: window.rich.is_ready, 5), "the Rendered editor page is ready")
+
+# --- Menus and shortcuts (spec section 3; v2 spec section 2) ----------------
+check(
+    [a.text() for a in window.menuBar().actions()] == ["&File", "&Edit", "&View", "&Help"],
+    "menu bar is File / Edit / View / Help",
+)
+for act, keys in [
+    (window.act_new, "Ctrl+N"), (window.act_open, "Ctrl+O"),
+    (window.act_save, "Ctrl+S"), (window.act_save_as, "Ctrl+Shift+S"),
+    (window.act_close, "Ctrl+W"), (window.act_exit, "Alt+F4"),
+    (window.act_undo, "Ctrl+Z"), (window.act_redo, "Ctrl+Y"),
+    (window.act_cut, "Ctrl+X"), (window.act_copy, "Ctrl+C"),
+    (window.act_paste, "Ctrl+V"), (window.act_find, "Ctrl+F"),
+    (window.act_replace, "Ctrl+H"), (window.act_select_all, "Ctrl+A"),
+    (window.act_rendered, "Ctrl+P"), (window.act_source, "Ctrl+E"),
+    (window.act_zoom_in, "Ctrl+="), (window.act_zoom_out, "Ctrl+-"),
+    (window.act_zoom_reset, "Ctrl+0"),
+]:
+    check(act.shortcut().toString() == keys, f"{act.text()} shortcut is {keys}")
+check([a.text() for a in window.menu_view.actions()[:2]] == ["&Rendered", "&Source"], "View menu starts with Rendered / Source")
+check(window.act_rendered.isChecked() and window.act_rendered.actionGroup().isExclusive(), "the two modes are a radio pair")
+check(window.act_copy.isEnabled(), "Copy enabled in Rendered mode")
+check(not window.act_paste.isEnabled(), "Paste disabled in Rendered mode (its keys go to the page)")
+check(window.act_zoom_in.isEnabled(), "Zoom enabled in Rendered mode")
+check(window.act_wrap.isChecked(), "Word Wrap on by default")
+
+# --- Open: Rendered mode, encoding, CRLF, NBSP, title, status bar ------------
+check(window.open_file(sample), "open_file returns True")
+check(window.mode == "rendered" and window.stack.currentWidget() is window.rich, "a file opens in Rendered mode")
+check(window.buffer == SAMPLE_TEXT, "buffer uses \\n breaks and keeps NBSP")
+check(window.newline == "\r\n", "CRLF newline style detected")
+check(window.encoding == "utf-8", "UTF-8 detected")
+check(window.windowTitle() == "sample.md - MD Viewer", "title shows file name")
+check(window._left_label.text() == "Rendered", "status left shows Rendered")
+size = len(sample.read_bytes())
+check(window._right_label.text() == f"100% | UTF-8 | {size} B", "status right shows zoom, encoding, size")
+check(page_js(window.rich, "document.querySelector('#editor h1')?.textContent") == "Café", "the editor page shows the file")
+
+# --- Open failure keeps the current document --------------------------------
+ERRORS.clear()
+check(not window.open_file(TMP / "missing.md"), "missing file returns False")
+check(len(ERRORS) == 1 and "File not found." in ERRORS[0], "missing-file error uses Notepad wording")
+check(window.loaded_path == sample, "failed open keeps the current document")
+
+# --- Switching without edits never touches the buffer (v2 spec section 2) ----
+window.act_source.trigger()
+check(window.mode == "source" and window.stack.currentIndex() == 1, "Source shows the plain-text editor")
+check(window.buffer == SAMPLE_TEXT and not window.dirty, "Rendered -> Source without edits keeps the buffer")
+check(window.act_undo.isEnabled() and window.act_paste.isEnabled(), "edit actions enabled in Source mode")
+check(window.act_copy.isEnabled(), "Copy enabled in Source mode")
+check(not window.act_zoom_in.isEnabled(), "Zoom disabled in Source mode")
+check(window.act_find.isEnabled() and window.act_replace.isEnabled(), "Find/Replace enabled in Source mode")
+window.editor.moveCursor(START)
+check(window._left_label.text() == "Ln 1, Col 1", "status shows Ln 1, Col 1 at start")
+window.editor.moveCursor(END)
+check(window._left_label.text() == "Ln 4, Col 1", "status follows the cursor")
+window.act_rendered.trigger()
+check(window.mode == "rendered" and window.buffer == SAMPLE_TEXT and not window.dirty, "Source -> Rendered keeps the buffer")
+window.act_source.trigger()
+check(window.buffer == SAMPLE_TEXT, "and back: still byte-identical")
+
+# --- The caret maps across a switch by top-level block -----------------------
+window.editor.setTextCursor(QTextCursor(window.editor.document().findBlockByNumber(2)))  # "line\u00a0two"
+window.act_rendered.trigger()
+check(pump(lambda: window._caret_block == 1, 3), "Source -> Rendered puts the caret in the block of the source line")
+window.rich.focus_block(0)
+check(pump(lambda: window._caret_block == 0, 3), "the Rendered caret moves")
+window.rich.focus_block(1)
+pump(lambda: window._caret_block == 1, 3)
+window.act_source.trigger()
+check(window.editor.textCursor().blockNumber() == 2, "Rendered -> Source puts the caret on the block's first line")
+
+# --- Dirty carries across switches, with no prompt ---------------------------
+window.editor.moveCursor(END)
+window.editor.insertPlainText("edited\n")
+check(window.dirty, "typing marks the buffer dirty")
+check(window.windowTitle() == "*sample.md - MD Viewer", "dirty title has * prefix")
+ASKED.clear()
+window.act_rendered.trigger()
+check(not ASKED and window.mode == "rendered" and window.dirty, "switching asks nothing and keeps the buffer dirty")
+check(window.windowTitle() == "*sample.md - MD Viewer", "the * stays in Rendered mode")
+window.act_source.trigger()
+check(window.buffer == SAMPLE_TEXT + "edited\n" and window.dirty, "unedited Rendered mode hands the same text back")
+check(not window.editor.document().isUndoAvailable(), "each switch starts a new undo history")
+
+# --- Save keeps CRLF and NBSP ------------------------------------------------
+check(window.on_save(), "Save in Source mode")
+check(
+    sample.read_bytes() == "# Café\r\n\r\nline\u00a0two\r\nedited\r\n".encode("utf-8"),
+    "save writes CRLF and NBSP exactly",
+)
+check(not window.dirty and window.windowTitle() == "sample.md - MD Viewer", "title clean after save")
+
+# --- Rendered edits: Save pulls and serializes, editing goes on (v2 spec 6.4) -
+window.act_rendered.trigger()
+window.rich.focus_block(0)
+window.rich.command("setBlock", {"type": "heading", "level": 2})
+check(pump(lambda: window.dirty, 3), "an edit in Rendered mode marks the buffer dirty")
+check(window.windowTitle() == "*sample.md - MD Viewer", "and shows the * prefix")
+check(not window.on_save(), "Save with unpulled edits returns before the pull")
+check(pump(lambda: not window.dirty, 5), "the pulled document is saved")
+RENDERED_SAVED = "## Café\n\nline\u00a0two edited\n"  # normalized: the soft break becomes a space
+check(sample.read_bytes() == RENDERED_SAVED.replace("\n", "\r\n").encode("utf-8"),
+      "Save writes normalized Markdown with the file's CRLF and NBSP")
+check(window.buffer == RENDERED_SAVED and window.mode == "rendered", "the buffer holds the saved text")
+check(page_js(window.rich, "window.mdEditor.command('undo')") is True, "Save keeps the Rendered undo history")
+check(pump(lambda: window.dirty, 3), "the first edit after a save marks the buffer dirty again")
+window.act_source.trigger()
+check(pump(lambda: window.mode == "source", 5), "Rendered -> Source with edits switches once the pull is done")
+check(window.buffer == "# Café\n\nline\u00a0two edited\n" and window.dirty, "the Source text has the edits, still unsaved")
+check(window.editor.document().isModified() and not window.editor.document().isUndoAvailable(),
+      "the editor marks it unsaved, with a new undo history")
+check(window.editor.textCursor().blockNumber() == 0, "the caret lands on the edited block's line")
+
+# --- Unencodable text in a Windows-1252 file --------------------------------
+legacy = TMP / "legacy.md"
+legacy.write_bytes(b"caf\xe9\n")
+window.open_file(legacy)
+check(window.encoding == "windows-1252", "Windows-1252 detected")
+check("Windows-1252" in window._right_label.text(), "status shows Windows-1252")
+window.act_source.trigger()
+window.editor.moveCursor(START)
+window.editor.insertPlainText("日本")
+FAKE["answer"] = S.Cancel
+check(not window.on_save(), "declined unencodable save returns False")
+check(legacy.read_bytes() == b"caf\xe9\n", "declined unencodable save leaves the file untouched")
+check(window.dirty, "declined unencodable save keeps the buffer dirty")
+FAKE["answer"] = S.Yes
+check(window.on_save(), "accepting the UTF-8 offer saves")
+check(legacy.read_bytes() == "日本café\n".encode("utf-8"), "file rewritten as UTF-8")
+check(window.encoding == "utf-8", "encoding switches to UTF-8 after the offer")
+
+# --- New / Save As on Untitled ----------------------------------------------
+window.on_new()
+check(window.mode == "rendered" and window.stack.currentWidget() is window.rich, "New opens in Rendered mode")
+check(window.loaded_path is None and window.buffer == "", "New gives an empty Untitled buffer")
+check(window.windowTitle() == "Untitled - MD Viewer", "New shows Untitled title")
+window.act_source.trigger()
+window.editor.insertPlainText("hello")
+FAKE["save_path"] = ""
+check(not window.on_save(), "cancelled Save As returns False")
+check(window.dirty, "cancelled Save As keeps dirty")
+FAKE["save_path"] = str(TMP / "fresh")
+check(window.on_save(), "Save on Untitled acts as Save As")
+check((TMP / "fresh.md").read_bytes() == b"hello", "Save As appends .md and writes the buffer")
+check(window.windowTitle() == "fresh.md - MD Viewer", "title follows Save As path")
+
+# --- New while dirty: Cancel keeps the buffer -------------------------------
+window.editor.insertPlainText("!")
+FAKE["answer"] = S.Cancel
+window.on_new()
+check(window.loaded_path == TMP / "fresh.md" and window.dirty, "cancelled New keeps the buffer")
+
+# --- Open from Source mode lands in Rendered mode ---------------------------
+FAKE["answer"] = S.Discard
+FAKE["open_path"] = str(sample)
+window.on_open()
+check(window.loaded_path == sample, "File > Open loads the picked file")
+check(window.mode == "rendered" and window.stack.currentWidget() is window.rich, "open from Source mode shows Rendered")
+check(window.act_rendered.isChecked(), "open from Source mode checks Rendered")
+
+# --- Drag-and-drop with a dirty buffer --------------------------------------
+window.act_source.trigger()
+window.editor.insertPlainText("x")
+FAKE["answer"] = S.Cancel
+window._open_dropped([str(legacy)])
+check(window.loaded_path == sample and window.dirty, "cancelled drop keeps the document")
+FAKE["answer"] = S.Discard
+window._open_dropped([str(legacy)])
+check(window.loaded_path == legacy and window.mode == "rendered", "drop opens the file in Rendered mode")
+
+# --- Files dropped on the editor page open; web links stay in the page --------
+from PySide6.QtCore import QMimeData, QPointF, Qt, QUrl  # noqa: E402
+from PySide6.QtGui import QDragEnterEvent, QDropEvent  # noqa: E402
+
+
+def drop_on_page(url: QUrl) -> None:
+    """A drag from Explorer: DragEnter then Drop on the page's focus proxy (Qt needs both)."""
+    mime = QMimeData()
+    mime.setUrls([url])
+    for kind in (QDragEnterEvent, QDropEvent):
+        qt_app.sendEvent(window.rich.focusProxy(), kind(QPointF(40, 40), Qt.DropAction.CopyAction, mime,
+                                                        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+    pump(lambda: False, 0.3)  # the open is deferred to the next event-loop turn
+
+
+drop_on_page(QUrl.fromLocalFile(str(sample)))
+check(window.loaded_path == sample and window.mode == "rendered", "a file dropped on the Rendered page opens")
+drop_on_page(QUrl("https://example.com/page.md"))
+check(window.loaded_path == sample, "a web link dropped on the page opens nothing")
+os.kill(window.rich.page().renderProcessPid(), signal.SIGTERM)  # a crash replaces the focus proxy
+pump(lambda: window.rich.focusProxy() is None, 5)
+window.rich.restart()
+check(pump(lambda: window.rich.is_ready and window.rich.focusProxy() is not None, 5), "the restarted page is ready")
+drop_on_page(QUrl.fromLocalFile(str(legacy)))
+check(window.loaded_path == legacy, "files dropped on a restarted page still open")
+
+# --- Window close with unsaved changes --------------------------------------
+window.act_source.trigger()
+window.editor.insertPlainText("unsaved")
+FAKE["answer"] = S.Cancel
+event = QCloseEvent()
+window.closeEvent(event)
+check(not event.isAccepted(), "Cancel on close keeps the window open")
+FAKE["answer"] = S.Discard
+event = QCloseEvent()
+window.closeEvent(event)
+check(event.isAccepted(), "Don't Save on close lets the window close")
+
+# --- File > Close resets to a fresh state -----------------------------------
+window.on_close()  # still dirty: FAKE answer is Discard
+check(window.loaded_path is None and window.buffer == "", "Close empties the buffer")
+check(window.mode == "rendered" and not window.dirty, "Close returns to a clean Rendered page")
+check(window.windowTitle() == "Untitled - MD Viewer", "Close shows Untitled title")
+
+# --- Zoom -------------------------------------------------------------------
+window._zoom_in()
+check(window._zoom == 1.25, "Zoom In multiplies by 1.25")
+check(window._left_label.text() == "Rendered 125%", "status left shows zoom when not 100%")
+check(window._right_label.text().startswith("125% | "), "status right shows zoom")
+for _ in range(20):
+    window._zoom_in()
+check(window._zoom == 3.0, "zoom clamps at 300%")
+for _ in range(40):
+    window._zoom_out()
+check(window._zoom == 0.25, "zoom clamps at 25%")
+window._zoom_reset()
+check(window._zoom == 1.0 and window.rich.zoomFactor() == 1.0, "Zoom Reset returns to 100%")
+
+# --- Word Wrap --------------------------------------------------------------
+window.act_wrap.setChecked(False)
+check(window.editor.lineWrapMode() == QPlainTextEdit.LineWrapMode.NoWrap, "Word Wrap off")
+window.act_wrap.setChecked(True)
+check(window.editor.lineWrapMode() == QPlainTextEdit.LineWrapMode.WidgetWidth, "Word Wrap on")
+
+# --- Settings: geometry, zoom, theme ----------------------------------------
+data = {
+    "theme": "dark",
+    "window": {"x": 100, "y": 120, "width": 640, "height": 480},
+    "preview_zoom": 1.5,
+    "recent_files": [str(TMP / "r1.md"), str(TMP / "r2.md")],
+    "editor_font": {"family": "Courier New", "size": 14},
+}
+restored = main_window.MainWindow(data)
+check(restored.settings_snapshot() == data, "settings snapshot round-trips constructor data")
+lost = main_window.MainWindow(
+    {"theme": "system", "window": {"x": -50000, "y": -50000, "width": 640, "height": 480}, "preview_zoom": 1.0}
+)
+check(lost.pos().x() > -50000, "off-screen geometry is not restored")
+app_module.save_settings(restored)
+check(settings.load() == data, "save_settings writes settings.json")
+original_save = settings.save
+
+
+def broken_save(path, data):
+    raise PermissionError("read-only")
+
+
+settings.save = broken_save
+try:
+    app_module.save_settings(restored)
+    survived = True
+except OSError:
+    survived = False
+settings.save = original_save
+check(survived, "save_settings swallows write errors on exit")
+
+# --- WYSIWYG Task 13: the Rendered editor in the window -----------------------
+from mdviewer import richview  # noqa: E402
+from mdviewer.core import docmodel, render, serialize  # noqa: E402
+
+check(isinstance(window.rich, richview.RichView), "the Rendered view is a RichView")
+doc_md = TMP / "doc.md"
+doc_md.write_text("# Title\n\n![pic](pic.png)\n\n[web](https://example.com)\n", encoding="utf-8")
+FAKE["answer"] = S.Discard
+check(window.open_file(doc_md), "open doc.md")
+check(page_js(window.rich, "window.mdEditor.getDocument().content[1].content[0].attrs.display_src")
+      == (TMP / "pic.png").as_uri(), "relative image resolved against the file's folder")
+check(page_js(window.rich, "getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()")
+      == render.PAGE_BACKGROUND["light"], "light theme by default")
+
+# a file docmodel cannot load opens in Source mode; a switch to Rendered then stays in Source
+def boom(*args, **kwargs):
+    raise RuntimeError("docmodel bug")
+
+
+original_from_markdown = docmodel.from_markdown
+docmodel.from_markdown = boom
+window.statusBar().clearMessage()
+check(window.open_file(doc_md), "a file docmodel cannot load still opens")
+check(window.mode == "source" and window.buffer == doc_md.read_text(encoding="utf-8"), "it opens in Source mode")
+check(window.statusBar().currentMessage() == main_window.OPEN_FAILED_NOTE, "with the Source-mode warning")
+window.act_rendered.trigger()
+check(window.mode == "source" and window.act_source.isChecked(), "a switch to Rendered that cannot load stays in Source")
+check(window.statusBar().currentMessage() == main_window.SWITCH_FAILED_NOTE, "and says so")
+docmodel.from_markdown = original_from_markdown
+
+# files larger than 5 MB open in Source mode, smaller ones in Rendered mode
+saved_limit = main_window.LARGE_FILE_BYTES
+main_window.LARGE_FILE_BYTES = 10
+small, large = TMP / "ten.md", TMP / "eleven.md"
+small.write_bytes(b"0123456789")
+large.write_bytes(b"0123456789\n")
+window.statusBar().clearMessage()
+check(window.open_file(small) and window.mode == "rendered", "a file at the limit opens in Rendered mode")
+check(window.open_file(large) and window.mode == "source", "a file over the limit opens in Source mode")
+check(window.statusBar().currentMessage() == "Large file: opened in Source mode", "with the large-file note")
+window.act_rendered.trigger()
+check(window.mode == "rendered", "a large file can still be switched to Rendered mode")
+main_window.LARGE_FILE_BYTES = saved_limit
+check(saved_limit == 5 * 1024 * 1024, "the limit is 5 MB")
+
+# a Rendered pull that gets no answer saves nothing and keeps the edits
+window.open_file(doc_md)
+window.rich.focus_block(0)
+window.rich.command("setBlock", {"type": "heading", "level": 3})
+pump(lambda: window.dirty, 3)
+saved_timeout = richview.PULL_TIMEOUT_MS
+richview.PULL_TIMEOUT_MS = 300
+window.rich.page().runJavaScript("(() => { const t = Date.now(); while (Date.now() - t < 1200); })()", 0)
+window.statusBar().clearMessage()
+window.on_save()
+check(pump(lambda: window.statusBar().currentMessage() == main_window.PULL_FAILED_NOTE, 3), "a pull with no answer warns")
+richview.PULL_TIMEOUT_MS = saved_timeout
+pump(lambda: False, 1.2)
+check(doc_md.read_text(encoding="utf-8").startswith("# Title") and window.dirty, "nothing was saved; still dirty")
+
+# a serializer failure saves nothing and keeps the edits for the next try
+def bad_to_text(doc):
+    raise ValueError("serializer bug")
+
+
+ERRORS.clear()
+original_to_text = serialize.to_text
+serialize.to_text = bad_to_text
+window.on_save()
+check(pump(lambda: ERRORS, 3) and "could not be converted to Markdown" in ERRORS[0], "a serializer failure is reported")
+serialize.to_text = original_to_text
+check(doc_md.read_text(encoding="utf-8").startswith("# Title") and window.dirty, "nothing was saved")
+window.on_save()
+check(pump(lambda: not window.dirty, 5) and doc_md.read_text(encoding="utf-8").startswith("### Title"),
+      "the next Save writes the edits")
+
+# a pull in flight: other pulls are dropped; a pull of a replaced document is discarded
+window.rich.focus_block(0)
+window.rich.command("setBlock", {"type": "heading", "level": 1})
+pump(lambda: window.dirty, 3)
+window.rich.page().runJavaScript("(() => { const t = Date.now(); while (Date.now() - t < 600); })()", 0)
+window.on_save()
+window.act_source.trigger()
+check(window.mode == "rendered" and window.act_rendered.isChecked(), "a switch while a pull is in flight is dropped")
+check(pump(lambda: not window.dirty, 5) and doc_md.read_text(encoding="utf-8").startswith("# Title"), "the first pull saves")
+window.rich.command("setBlock", {"type": "heading", "level": 2})
+pump(lambda: window.dirty, 3)
+window.rich.page().runJavaScript("(() => { const t = Date.now(); while (Date.now() - t < 600); })()", 0)
+window.on_save()
+window.open_file(sample)
+pump(lambda: False, 1)
+check(window.buffer == RENDERED_SAVED and doc_md.read_text(encoding="utf-8").startswith("# Title"),
+      "a pull from a document replaced meanwhile is discarded")
+
+# a page that never loads: Source mode only, with a warning
+saved_web = render.WEB_DIR
+render.WEB_DIR = TMP / "no-web"
+broken = main_window.MainWindow({"theme": "light", "window": None, "preview_zoom": 1.0})
+render.WEB_DIR = saved_web
+check(pump(lambda: broken.rich.failed, 2) and broken.mode == "source", "a page that never loads leaves Source mode")
+check(not broken.act_rendered.isEnabled(), "Rendered is greyed for the session")
+check(broken.statusBar().currentMessage() == main_window.EDITOR_FAILED_NOTE, "with a warning")
+check(broken.open_file(doc_md) and broken.mode == "source", "files then open in Source mode")
+
+```
+
+Then make these replacements further down, in file order:
+
+**Task 10: type into Source mode.** Replace:
+
+```python
+window.show()  # the completer popup only opens for a visible editor
+FAKE["answer"] = S.Discard
+window.on_new()
+qt_app.processEvents()
+```
+
+with:
+
+```python
+window.show()  # the completer popup only opens for a visible editor
+FAKE["answer"] = S.Discard
+window.on_new()
+window.act_source.trigger()
+qt_app.processEvents()
+```
+
+**Task 11: stop the timer after checking it.** Replace:
+
+```python
+check(window._watch_timer.interval() == 1000 and window._watch_timer.isActive(), "watcher polls every 1000 ms")
+```
+
+with:
+
+```python
+check(window._watch_timer.interval() == 1000 and window._watch_timer.isActive(), "watcher polls every 1000 ms")
+window._watch_timer.stop()  # the checks below poll by hand; pump() would let the timer poll too
+```
+
+**Task 11: silent reload in Rendered mode.** Replace:
+
+```python
+# preview mode: silent re-render
+watched.write_bytes(b"two two\n")
+window._poll_disk()
+check(window.buffer == "two two\n" and "two two" in window.preview.last_html, "preview re-renders silently")
+check(not ASKED and not window.dirty, "silent re-render asks nothing")
+
+# own save is not an external change
+window.act_edit.trigger()
+```
+
+with:
+
+```python
+# Rendered mode, no edits: silent reload
+watched.write_bytes(b"two two\n")
+window._poll_disk()
+check(window.buffer == "two two\n" and window.mode == "rendered", "Rendered mode reloads silently")
+check(page_js(window.rich, "document.querySelector('#editor p')?.textContent") == "two two", "the page shows the new text")
+check(not ASKED and not window.dirty, "silent reload asks nothing")
+
+# own save is not an external change
+window.act_source.trigger()
+```
+
+**Task 11: Source-mode dialog.** Replace:
+
+```python
+check(len(ASKED) == 1 and '"watched.md" was modified externally at' in ASKED[0], "edit mode asks before replacing")
+check(window.buffer == "external 1\n" and not window.dirty, "Reload loads the disk content")
+check(window.mode == "edit", "Reload stays in edit mode")
+```
+
+with:
+
+```python
+check(len(ASKED) == 1 and '"watched.md" was modified externally at' in ASKED[0], "Source mode asks before replacing")
+check(window.buffer == "external 1\n" and not window.dirty, "Reload loads the disk content")
+check(window.mode == "source", "Reload stays in Source mode")
+```
+
+**Task 11: missing file.** Replace:
+
+```python
+# missing file: one warning, then recovery
+window.act_preview.trigger()
+```
+
+with:
+
+```python
+# missing file: one warning, then recovery
+window.act_rendered.trigger()
+```
+
+**Task 11: deleted file.** Replace:
+
+```python
+check(window.buffer == "back again\n", "reappearing file re-renders")
+
+# Save recreates a deleted file without a false alarm
+window.act_edit.trigger()
+```
+
+with:
+
+```python
+check(window.buffer == "back again\n", "reappearing file reloads")
+
+# Save recreates a deleted file without a false alarm
+window.act_source.trigger()
+```
+
+**Task 11: read failure.** Replace:
+
+```python
+# preview read failure is retried on the next tick
+window.act_preview.trigger()
+window._read_disk = lambda: None
+watched.write_bytes(b"locked content!\n")
+window.statusBar().clearMessage()
+window._poll_disk()
+check("Could not read" in window.statusBar().currentMessage(), "read failure warns")
+check("locked content" not in window.preview.last_html, "read failure keeps the last render")
+```
+
+with:
+
+```python
+# a Rendered-mode read failure is retried on the next tick
+window.act_rendered.trigger()
+before_lock = window.buffer
+window._read_disk = lambda: None
+watched.write_bytes(b"locked content!\n")
+window.statusBar().clearMessage()
+window._poll_disk()
+check("Could not read" in window.statusBar().currentMessage(), "read failure warns")
+check(window.buffer == before_lock, "read failure keeps the last version")
+```
+
+**Task 11: Rendered mode with edits.** Replace:
+
+```python
+moved.write_bytes(b"new path changed\n")
+window._poll_disk()
+check(window.buffer == "new path changed\n", "watcher follows the Save As path")
+```
+
+with:
+
+```python
+moved.write_bytes(b"new path changed\n")
+window._poll_disk()
+check(window.buffer == "new path changed\n", "watcher follows the Save As path")
+
+# Rendered mode with edits: the dialog, as in Source mode (v2 spec section 2)
+window.rich.focus_block(0)
+window.rich.command("setBlock", {"type": "heading", "level": 1})
+check(pump(lambda: window.dirty, 3), "a Rendered edit marks the buffer dirty")
+ASKED.clear()
+moved.write_bytes(b"changed under an edit\n")
+FAKE["answer"] = S.No
+window._poll_disk()
+check(len(ASKED) == 1 and window.mode == "rendered" and window.dirty, "Rendered mode with edits asks first")
+check(page_js(window.rich, "document.querySelector('#editor h1')?.textContent") == "new path changed",
+      "Keep my version keeps the edited page")
+moved.write_bytes(b"changed again\n")
+FAKE["answer"] = S.Yes
+window._poll_disk()
+check(len(ASKED) == 2 and window.buffer == "changed again\n" and not window.dirty, "Reload replaces the edits")
+check(window.mode == "rendered" and page_js(window.rich, "document.querySelector('#editor p')?.textContent")
+      == "changed again", "the page shows the reloaded file")
+```
+
+**v1 Task 12: Find / Replace.** Replace:
+
+```python
+window.on_close()
+check(not window.act_find.isEnabled() and not window.act_replace.isEnabled(), "Find/Replace disabled in preview")
+window.on_new()
+check(window.act_find.isEnabled() and window.act_replace.isEnabled(), "Find/Replace enabled in edit mode")
+```
+
+with:
+
+```python
+window.on_close()
+check(not window.act_find.isEnabled() and not window.act_replace.isEnabled(), "Find/Replace disabled in Rendered mode")
+window.on_new()
+window.act_source.trigger()
+check(window.act_find.isEnabled() and window.act_replace.isEnabled(), "Find/Replace enabled in Source mode")
+```
+
+**v1 Task 13: dark theme.** Replace:
+
+```python
+check(qt_app.style().name().lower() == "fusion" and window_color() == DARK_WINDOW, "dark palette on the Fusion style")
+check("#0d1117" in window.preview.last_html, "preview re-rendered with dark CSS")
+check("on disk only" not in window.preview.last_html, "theme switch re-renders the buffer, not the disk")
+check(window.mode == "preview" and not window.dirty, "theme switch keeps mode and dirty state")
+```
+
+with:
+
+```python
+check(qt_app.style().name().lower() == "fusion" and window_color() == DARK_WINDOW, "dark palette on the Fusion style")
+check(pump(lambda: page_js(window.rich, "getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()")
+           == "#0d1117", 3), "the editor page switches to the dark CSS")
+check(page_js(window.rich, "document.body.innerText.includes('on disk only')") is False,
+      "theme switch keeps the document, not the disk")
+check(window.mode == "rendered" and not window.dirty, "theme switch keeps mode and dirty state")
+```
+
+**v1 Task 13: theme loads.** Replace:
+
+```python
+FAKE["system_theme"] = "dark"
+window._poll_theme()
+check(window._effective_theme == "dark", "System mode follows Windows switching to dark")
+```
+
+with:
+
+```python
+theme_loads: list = []
+window.rich.loadStarted.connect(lambda: theme_loads.append(1))
+FAKE["system_theme"] = "dark"
+window._poll_theme()
+check(window._effective_theme == "dark", "System mode follows Windows switching to dark")
+```
+
+**v1 Task 13: gray theme.** Replace:
+
+```python
+check("#3a3d41" in window.preview.last_html, "preview re-rendered with gray CSS")
+```
+
+with:
+
+```python
+check(pump(lambda: page_js(window.rich, "getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()")
+           == "#3a3d41", 3), "the editor page switches to the gray CSS")
+check(theme_loads == [], "theme changes never reload the editor page")
+```
+
+**v1 Task 13: startup theme.** Replace:
+
+```python
+check("#0d1117" in restarted.preview.last_html, "startup preview is already dark")
+```
+
+with:
+
+```python
+check("#0d1117" in restarted.rich.page_file.read_text(encoding="utf-8"), "the startup editor page is already dark")
+```
+
+**Open Recent: dirty buffer.** Replace:
+
+```python
+rw.act_edit.trigger()
+rw.editor.insertPlainText("dirty")
+```
+
+with:
+
+```python
+rw.act_source.trigger()
+rw.editor.insertPlainText("dirty")
+```
+
+**Open Recent: opened mode.** Replace:
+
+```python
+check(rw.loaded_path == rdoc and rw.mode == "preview", "clicking an entry opens it in preview")
+```
+
+with:
+
+```python
+check(rw.loaded_path == rdoc and rw.mode == "rendered", "clicking an entry opens it in Rendered mode")
+```
+
+**Open Recent: Save As.** Replace:
+
+```python
+rw.on_new()
+rw.editor.insertPlainText("fresh")
+```
+
+with:
+
+```python
+rw.on_new()
+rw.act_source.trigger()
+rw.editor.insertPlainText("fresh")
+```
+
+**Preferences: modes.** Replace:
+
+```python
+check(window.act_preferences.isEnabled(), "Preferences enabled in preview mode")
+window.act_edit.trigger()
+check(window.act_preferences.isEnabled(), "Preferences enabled in edit mode")
+window.act_preview.trigger()
+```
+
+with:
+
+```python
+check(window.act_preferences.isEnabled(), "Preferences enabled in Rendered mode")
+window.act_source.trigger()
+check(window.act_preferences.isEnabled(), "Preferences enabled in Source mode")
+window.act_rendered.trigger()
+```
+
+**Preferences: mode check.** Replace:
+
+```python
+check(window._theme_choice == "system" and window.mode == "preview" and not window.dirty, "font change keeps theme, mode and dirty state")
+```
+
+with:
+
+```python
+check(window._theme_choice == "system" and window.mode == "rendered" and not window.dirty, "font change keeps theme, mode and dirty state")
+```
+
+- [ ] **Step 2: Run the smoke to verify it fails**
+
+Run: `.venv/Scripts/python scripts/smoke_ui.py`
+Expected: a traceback ending in `AttributeError: 'MainWindow' object has no attribute 'rich'`
+
+- [ ] **Step 3: Switch `mdviewer/main_window.py` to the Rendered editor**
+
+Make these replacements, in file order:
+
+**Imports (standard library and Qt).** Replace:
+
+```python
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+
+from PySide6.QtCore import QEvent, QRect, QTimer
+from PySide6.QtGui import QActionGroup, QColor, QFont, QGuiApplication, QKeySequence, QPalette
+```
+
+with:
+
+```python
+import os
+import sys
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+
+from PySide6.QtCore import QEvent, QRect, QTimer
+from PySide6.QtGui import QActionGroup, QColor, QFont, QGuiApplication, QKeySequence, QPalette, QTextCursor
+```
+
+**Imports (project modules).** Replace:
+
+```python
+from mdviewer.core import encoding, settings, themeservice
+from mdviewer.core.filewatch import Watcher, WatchEvent
+from mdviewer.editor import MarkdownEditor
+from mdviewer.findbar import FindBar
+from mdviewer.preferences import PreferencesDialog
+from mdviewer.preview import MarkdownPreview
+```
+
+with:
+
+```python
+from mdviewer.core import docmodel, encoding, frontmatter, serialize, settings, themeservice
+from mdviewer.core.filewatch import Watcher, WatchEvent
+from mdviewer.editor import MarkdownEditor
+from mdviewer.findbar import FindBar
+from mdviewer.preferences import PreferencesDialog
+from mdviewer.richview import RichView
+```
+
+**Module constants.** Replace:
+
+```python
+POLL_MS = 1000
+THEME_POLL_MS = 2000
+```
+
+with:
+
+```python
+POLL_MS = 1000
+THEME_POLL_MS = 2000
+LARGE_FILE_BYTES = 5 * 1024 * 1024  # spec: larger files open in Source mode
+LARGE_FILE_NOTE = "Large file: opened in Source mode"
+OPEN_FAILED_NOTE = "Opened in Source mode: the rendered editor could not load this file."
+SWITCH_FAILED_NOTE = "Staying in Source mode: the rendered editor could not load this document."
+EDITOR_FAILED_NOTE = "Rendered mode is unavailable: the rendered editor did not start."
+PULL_FAILED_NOTE = "The rendered editor did not answer; nothing was saved or switched."
+```
+
+**Mode constants and initial mode.** Replace:
+
+```python
+class MainWindow(QMainWindow):
+    PREVIEW = "preview"
+    EDIT = "edit"
+
+    def __init__(self, data: dict):
+        super().__init__()
+        self.mode = self.PREVIEW
+        self.dirty = False
+```
+
+with:
+
+```python
+class MainWindow(QMainWindow):
+    RENDERED = "rendered"
+    SOURCE = "source"
+
+    def __init__(self, data: dict):
+        super().__init__()
+        self.mode = self.RENDERED
+        self.dirty = False
+```
+
+**The reload-retry comment.** Replace:
+
+```python
+        self._pending_reload = False  # a preview re-read failed; retry on the next tick
+```
+
+with:
+
+```python
+        self._pending_reload = False  # a Rendered re-read failed; retry on the next tick
+```
+
+**Rendered state and the editor page.** Replace:
+
+```python
+        self._effective_theme = "light"  # Task 13 makes this follow System/Light/Dark
+
+        self.editor = MarkdownEditor()
+        self._apply_editor_font()
+        self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+
+        self.preview = MarkdownPreview()
+        # Dropped files must reach MainWindow, not navigate the page.
+        self.preview.setAcceptDrops(False)
+```
+
+with:
+
+```python
+        self._effective_theme = "light"  # Task 13 makes this follow System/Light/Dark
+        # Rendered mode: the buffer is the text last loaded into the editor page or pulled
+        # from it; _block_lines are its top-level blocks' source lines (None: not parsed yet).
+        self._rendered_text = ""
+        self._block_lines: list[int] | None = []
+        self._caret_block = 0  # top-level block of the Rendered caret (RichView.caretBlock)
+        self._pending_pull = False  # a with_buffer pull is in flight; re-triggers are dropped
+        self._doc_number = 0  # counts loads; a pull started before the latest one is discarded
+
+        self.editor = MarkdownEditor()
+        self._apply_editor_font()
+        self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+
+        # Start the page in the saved theme: no light flash before the first set_theme.
+        self.rich = RichView(read_system_theme() if self._theme_choice == "system" else self._theme_choice)
+        self.rich.changed.connect(self._on_rendered_changed)
+        self.rich.caretBlock.connect(self._on_caret_block)
+        self.rich.load_failed.connect(self._on_editor_failed)
+        self.rich.ready.connect(self._watch_rich_drops)
+        self._watch_rich_drops()
+```
+
+**The stack.** Replace:
+
+```python
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.preview)  # index 0
+```
+
+with:
+
+```python
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.rich)  # index 0
+```
+
+**Zoom after page loads.** Replace:
+
+```python
+        # setHtml can reset the page zoom; re-apply ours after every load.
+        self.preview.loadFinished.connect(self._apply_zoom)
+```
+
+with:
+
+```python
+        # A page load (restart) resets the zoom; re-apply ours after every load.
+        self.rich.loadFinished.connect(self._apply_zoom)
+```
+
+**`buffer`.** Replace:
+
+```python
+    @property
+    def buffer(self) -> str:
+        """Editor text with \\n breaks. toPlainText() would turn NBSP into spaces."""
+        return self.editor.document().toRawText().replace("\u2029", "\n")
+```
+
+with:
+
+```python
+    @property
+    def buffer(self) -> str:
+        """Source mode: editor text with \\n breaks (toPlainText() would turn NBSP into spaces).
+        Rendered mode: the text last loaded into the editor page or pulled from it."""
+        if self.mode == self.RENDERED:
+            return self._rendered_text
+        return self.editor.document().toRawText().replace("\u2029", "\n")
+```
+
+**`_load`.** Replace:
+
+```python
+        self.editor.setPlainText(text.replace("\r\n", "\n"))
+        self.editor.document().setModified(False)
+        self.dirty = False
+        self._watch(path)
+```
+
+with:
+
+```python
+        self._doc_number += 1
+        self._rendered_text = text.replace("\r\n", "\n")
+        self._block_lines = None
+        self.editor.setPlainText(self._rendered_text)
+        self.editor.document().setModified(False)
+        self.dirty = False
+        self._watch(path)
+```
+
+**View menu.** Replace:
+
+```python
+        m = self.menu_view = bar.addMenu("&View")
+        modes = QActionGroup(self)
+        self.act_preview = self._action(
+            m, "&Preview Mode", "Ctrl+P", lambda: self.set_mode(self.PREVIEW), checkable=True
+        )
+        self.act_edit = self._action(
+            m, "&Edit Mode", "Ctrl+E", lambda: self.set_mode(self.EDIT), checkable=True
+        )
+        modes.addAction(self.act_preview)
+        modes.addAction(self.act_edit)
+```
+
+with:
+
+```python
+        m = self.menu_view = bar.addMenu("&View")
+        modes = QActionGroup(self)
+        self.act_rendered = self._action(
+            m, "&Rendered", "Ctrl+P", lambda: self.set_mode(self.RENDERED), checkable=True
+        )
+        self.act_source = self._action(
+            m, "&Source", "Ctrl+E", lambda: self.set_mode(self.SOURCE), checkable=True
+        )
+        modes.addAction(self.act_rendered)
+        modes.addAction(self.act_source)
+```
+
+**Mode-dependent action lists.** Replace:
+
+```python
+        self._edit_only_actions = [
+            self.act_undo, self.act_redo, self.act_cut, self.act_paste, self.act_select_all,
+            self.act_find, self.act_replace,
+        ]
+        self._preview_only_actions = [self.act_zoom_in, self.act_zoom_out, self.act_zoom_reset]
+```
+
+with:
+
+```python
+        # Task 17 routes the Edit menu to the Rendered editor; until then its keys go to the page.
+        self._source_only_actions = [
+            self.act_undo, self.act_redo, self.act_cut, self.act_paste, self.act_select_all,
+            self.act_find, self.act_replace,
+        ]
+        self._rendered_only_actions = [self.act_zoom_in, self.act_zoom_out, self.act_zoom_reset]
+```
+
+**`open_file` and `on_new`.** Replace:
+
+```python
+        self._load(target, raw)
+        self._remember_recent(target)
+        self._show_mode(self.PREVIEW)
+        return True
+
+    def on_new(self) -> None:
+        if not self._ok_to_replace():
+            return
+        self._load(None, b"")
+        self._show_mode(self.EDIT)  # a preview of an empty file is meaningless
+```
+
+with:
+
+```python
+        self._load(target, raw)
+        self._remember_recent(target)
+        if len(raw) > LARGE_FILE_BYTES:
+            self._show_mode(self.SOURCE)
+            self._warn(LARGE_FILE_NOTE)
+        elif not self._show_mode(self.RENDERED) and not self.rich.failed:
+            self._warn(OPEN_FAILED_NOTE)
+        return True
+
+    def on_new(self) -> None:
+        if not self._ok_to_replace():
+            return
+        self._load(None, b"")
+        self._show_mode(self.RENDERED)
+```
+
+**`on_save`.** Replace:
+
+```python
+    def on_save(self) -> bool:
+        if self.loaded_path is None:
+            return self.on_save_as()
+        return self._save_to(self.loaded_path)
+```
+
+with:
+
+```python
+    def on_save(self) -> bool:
+        """True when the file was written before returning. In Rendered mode with edits not
+        yet pulled, the save finishes after the pull and this returns False."""
+        if self.loaded_path is None:
+            return self.on_save_as()
+        return self._save_when_ready(self.loaded_path)
+```
+
+**`on_save_as`, `on_close` and `_save_when_ready`.** Replace:
+
+```python
+        if not target.suffix:
+            target = target.with_suffix(".md")
+        return self._save_to(target)
+
+    def on_close(self) -> None:
+        if not self._ok_to_replace():
+            return
+        self._load(None, b"")
+        self._show_mode(self.PREVIEW)
+```
+
+with:
+
+```python
+        if not target.suffix:
+            target = target.with_suffix(".md")
+        return self._save_when_ready(target)
+
+    def on_close(self) -> None:
+        if not self._ok_to_replace():
+            return
+        self._load(None, b"")
+        self._show_mode(self.RENDERED)
+
+    def _save_when_ready(self, path: Path) -> bool:
+        saved: list[bool] = []
+        self.with_buffer(lambda _text: saved.append(self._save_to(path)))
+        return saved == [True]
+```
+
+**Delete `_reload_or_clear`.** Delete:
+
+```python
+    def _reload_or_clear(self) -> None:
+        """Don't Save: put the disk content back (empty for Untitled or unreadable files)."""
+        if self.loaded_path is not None:
+            try:
+                raw = self.loaded_path.read_bytes()
+            except OSError:
+                raw = None
+            if raw is not None:
+                self._load(self.loaded_path, raw)
+                return
+        self.editor.setPlainText("")
+        self.editor.document().setModified(False)
+        self.dirty = False
+
+```
+
+**Modes: `set_mode`, `with_buffer`, `_enter_source`, `_show_mode` and helpers.** Replace:
+
+```python
+    def set_mode(self, mode: str) -> None:
+        if mode == self.mode:
+            self._update_chrome()
+            return
+        if mode == self.PREVIEW and self.dirty:
+            answer = self._prompt_save()
+            if answer == "cancel":
+                self._update_chrome()  # the action group already moved the radio check
+                return
+            if answer == "discard":
+                self._reload_or_clear()
+        self._show_mode(mode)
+
+    def _show_mode(self, mode: str) -> None:
+        self.mode = mode
+        self.stack.setCurrentIndex(0 if mode == self.PREVIEW else 1)
+        if mode == self.PREVIEW:
+            self._render_preview()
+        else:
+            self.editor.setFocus()
+        self._update_chrome()
+
+    def _render_preview(self, keep_scroll: bool = False) -> None:
+        base_dir = self.loaded_path.parent if self.loaded_path else None
+        if not self.preview.show_markdown(self.buffer, self._effective_theme, base_dir, keep_scroll):
+            self._warn("Preview could not render this document; showing plain text.")
+```
+
+with:
+
+```python
+    def set_mode(self, mode: str) -> None:
+        """Switch without a prompt; the dirty flag carries over, each mode starts a new undo history."""
+        self._update_chrome()  # the action group already moved the radio; it follows self.mode
+        if mode == self.mode:
+            return
+        if mode == self.SOURCE:
+            self.with_buffer(self._enter_source)
+            return
+        line = self.editor.textCursor().blockNumber() + 1
+        if self._show_mode(self.RENDERED):
+            self.rich.focus_block(self._block_at_line(line))
+        else:
+            self._warn(SWITCH_FAILED_NOTE)
+
+    def with_buffer(self, fn: Callable[[str], None]) -> None:
+        """fn(text) with the current buffer: at once in Source mode or when the Rendered document
+        is unchanged since it was loaded or last pulled; otherwise after pulling it. Dropped
+        while another pull is in flight (spec 6.4)."""
+        if self._pending_pull:
+            return
+        if self.mode != self.RENDERED or not self.rich.modified:
+            fn(self.buffer)
+            return
+        self._pending_pull = True
+        number = self._doc_number
+        self.rich.request_document(lambda doc: self._pulled(doc, fn, number))
+
+    def _pulled(self, doc: dict | None, fn: Callable[[str], None], number: int) -> None:
+        self._pending_pull = False
+        if number != self._doc_number:
+            return  # another document was loaded meanwhile: this one is gone
+        if doc is None:
+            self._warn(PULL_FAILED_NOTE)  # Task 14: the stopped-responding dialog
+            return
+        try:
+            text = serialize.to_text(doc)
+        except Exception as exc:  # a serializer bug must not lose the edits
+            self.rich.modified = True
+            show_error(self, f"The document could not be converted to Markdown, so nothing was saved.\n{exc}")
+            return
+        if text != self._rendered_text:
+            self._rendered_text = text
+            self._block_lines = None
+        fn(text)
+
+    def _enter_source(self, text: str) -> None:
+        """Rendered -> Source with `text`, the Rendered buffer (unchanged text keeps the editor's)."""
+        line = self._line_of_block(self._caret_block)
+        if self.editor.document().toRawText().replace("\u2029", "\n") != text:
+            self.editor.setPlainText(text)
+        self.editor.document().clearUndoRedoStacks()
+        self.editor.document().setModified(self.dirty)
+        self._show_mode(self.SOURCE)
+        self.editor.setTextCursor(QTextCursor(self.editor.document().findBlockByNumber(line - 1)))
+        self.editor.ensureCursorVisible()
+
+    def _show_mode(self, mode: str, keep_scroll: bool = False) -> bool:
+        """Show `mode`; Rendered first loads the buffer into the editor page. False (and Source
+        shown) when the page is unavailable or the buffer cannot be parsed."""
+        shown = True
+        if mode == self.RENDERED:
+            shown = not self.rich.failed and self._render(self.buffer, keep_scroll)
+            if not shown:
+                mode = self.SOURCE
+        self.mode = mode
+        self.stack.setCurrentIndex(0 if mode == self.RENDERED else 1)
+        (self.rich if mode == self.RENDERED else self.editor).setFocus()
+        self._update_chrome()
+        return shown
+
+    def _render(self, text: str, keep_scroll: bool = False) -> bool:
+        """Load `text` into the editor page (new undo history); False when docmodel fails."""
+        try:
+            doc = self._parse(text)
+        except Exception:  # an unmappable construct must not block the file: Source still works
+            return False
+        self._doc_number += 1
+        self._rendered_text = text
+        self._block_lines = [block["attrs"].get("line") for block in doc.get("content", [])]
+        self.rich.set_document(doc, keep_scroll)
+        return True
+
+    def _parse(self, text: str) -> dict:
+        front, body = frontmatter.split(text)
+        return docmodel.from_markdown(body, front, self.loaded_path.parent if self.loaded_path else None)
+
+    def _line_of_block(self, index: int) -> int:
+        """First source line (1-based) of top-level block `index` of the Rendered buffer."""
+        if self._block_lines is None:
+            try:
+                doc = self._parse(self._rendered_text)
+            except Exception:
+                return 1
+            self._block_lines = [block["attrs"].get("line") for block in doc.get("content", [])]
+        lines = [line for line in self._block_lines[: index + 1] if line is not None]
+        return lines[-1] if lines else 1
+
+    def _block_at_line(self, line: int) -> int:
+        """Top-level block containing source line `line`: the one starting last at or before it."""
+        best, start = 0, 0
+        for index, block_line in enumerate(self._block_lines or []):
+            if block_line is not None and start < block_line <= line:
+                best, start = index, block_line
+        return best
+```
+
+**Zoom and Copy.** Replace:
+
+```python
+    def _apply_zoom(self, _ok: bool = True) -> None:
+        self.preview.setZoomFactor(self._zoom)
+
+    def _copy(self) -> None:
+        if self.mode == self.PREVIEW:
+            self.preview.page().triggerAction(QWebEnginePage.WebAction.Copy)
+        else:
+            self.editor.copy()
+```
+
+with:
+
+```python
+    def _apply_zoom(self, _ok: bool = True) -> None:
+        self.rich.setZoomFactor(self._zoom)
+
+    def _copy(self) -> None:
+        if self.mode == self.RENDERED:
+            self.rich.page().triggerAction(QWebEnginePage.WebAction.Copy)
+        else:
+            self.editor.copy()
+```
+
+**`_update_chrome`.** Replace:
+
+```python
+    def _update_chrome(self) -> None:
+        editing = self.mode == self.EDIT
+        (self.act_edit if editing else self.act_preview).setChecked(True)
+        for act in self._edit_only_actions:
+            act.setEnabled(editing)
+        for act in self._preview_only_actions:
+            act.setEnabled(not editing)
+
+        pct = round(self._zoom * 100)
+        if editing:
+            cursor = self.editor.textCursor()
+            left = f"Ln {cursor.blockNumber() + 1}, Col {cursor.positionInBlock() + 1}"
+        else:
+            left = "Preview" if pct == 100 else f"Preview {pct}%"
+```
+
+with:
+
+```python
+    def _update_chrome(self) -> None:
+        source = self.mode == self.SOURCE
+        (self.act_source if source else self.act_rendered).setChecked(True)
+        self.act_rendered.setEnabled(not self.rich.failed)
+        for act in self._source_only_actions:
+            act.setEnabled(source)
+        for act in self._rendered_only_actions:
+            act.setEnabled(not source)
+
+        pct = round(self._zoom * 100)
+        if source:
+            cursor = self.editor.textCursor()
+            left = f"Ln {cursor.blockNumber() + 1}, Col {cursor.positionInBlock() + 1}"
+        else:
+            left = "Rendered" if pct == 100 else f"Rendered {pct}%"
+```
+
+**`_on_modification` and the editor-page handlers.** Replace:
+
+```python
+    def _on_modification(self, modified: bool) -> None:
+        self.dirty = modified
+        self._update_chrome()
+```
+
+with:
+
+```python
+    def _on_modification(self, modified: bool) -> None:
+        if self.mode == self.SOURCE:  # Rendered mode: the editor only holds text between switches
+            self.dirty = modified
+            self._update_chrome()
+
+    def _on_rendered_changed(self) -> None:
+        if self.mode == self.RENDERED:
+            self.dirty = True
+            self._update_chrome()
+
+    def _on_caret_block(self, index: int) -> None:
+        self._caret_block = index
+
+    def _on_editor_failed(self) -> None:
+        """No ready() in time: Source only for this session. Nothing was edited in the page."""
+        if self.mode == self.RENDERED:
+            self._show_mode(self.SOURCE)
+        self._warn(EDITOR_FAILED_NOTE)
+```
+
+**Drops on the editor page.** Replace:
+
+```python
+    def eventFilter(self, obj, event) -> bool:
+        """Open files dropped on the editor instead of inserting their path as text."""
+        if event.type() in _DROP_EVENTS and event.mimeData().hasUrls():
+            if event.type() == QEvent.Type.Drop:
+```
+
+with:
+
+```python
+    def _watch_rich_drops(self) -> None:
+        """Files dropped on the editor page open; its own drags (text, images) stay in the page.
+        Drops go to the view's focus proxy; a restart after a renderer crash replaces it, and
+        the new one exists by ready() (before loadFinished)."""
+        proxy = self.rich.focusProxy()
+        if proxy is not None:
+            proxy.installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:
+        """Open files dropped on the editors instead of inserting their path as text."""
+        if event.type() in _DROP_EVENTS and event.mimeData().hasUrls():
+            if obj is not self.editor.viewport() and (
+                event.source() is not None or not _local_paths(event.mimeData())
+            ):
+                return super().eventFilter(obj, event)  # a drag inside the page, or a web link
+            if event.type() == QEvent.Type.Drop:
+```
+
+**File watching.** Replace:
+
+```python
+        elif event == WatchEvent.CHANGED:
+            if self.mode == self.EDIT:
+                self._busy = True
+                try:
+                    self._ask_reload()
+                finally:
+                    self._busy = False
+            else:
+                self._reload_preview(warn=True)
+        elif self._pending_reload and self.mode == self.PREVIEW:
+            self._reload_preview(warn=False)
+
+    def _reload_preview(self, warn: bool) -> None:
+        raw = self._read_disk()
+        if raw is None:
+            self._pending_reload = True
+            if warn:
+                self._warn(f'Could not read "{self.loaded_path.name}"; showing the last version.')
+            return
+        self._load(self.loaded_path, raw)
+        self._render_preview(keep_scroll=True)
+        self._update_chrome()
+```
+
+with:
+
+```python
+        elif event == WatchEvent.CHANGED:
+            if self.mode == self.SOURCE or self.dirty:
+                self._busy = True
+                try:
+                    self._ask_reload()
+                finally:
+                    self._busy = False
+            else:
+                self._reload_rendered(warn=True)
+        elif self._pending_reload and self.mode == self.RENDERED and not self.dirty:
+            self._reload_rendered(warn=False)
+
+    def _reload_rendered(self, warn: bool) -> None:
+        """Rendered and clean: reload silently, keeping the scroll position (spec section 2)."""
+        raw = self._read_disk()
+        if raw is None:
+            self._pending_reload = True
+            if warn:
+                self._warn(f'Could not read "{self.loaded_path.name}"; showing the last version.')
+            return
+        self._load(self.loaded_path, raw)
+        if not self._show_mode(self.RENDERED, keep_scroll=True):
+            self._warn(OPEN_FAILED_NOTE)
+```
+
+**`_ask_reload`.** Replace:
+
+```python
+        if ask(box) != buttons.Yes:
+            self.editor.document().setModified(True)  # buffer now differs from disk
+            return
+        raw = self._read_disk()
+        if raw is None:
+            self._warn(f'Could not read "{name}"; your version is kept.')
+            return
+        position = self.editor.textCursor().position()
+        self._load(self.loaded_path, raw)
+```
+
+with:
+
+```python
+        if ask(box) != buttons.Yes:
+            if self.mode == self.SOURCE:
+                self.editor.document().setModified(True)  # buffer now differs from disk
+            else:
+                self.dirty = True
+                self._update_chrome()
+            return
+        raw = self._read_disk()
+        if raw is None:
+            self._warn(f'Could not read "{name}"; your version is kept.')
+            return
+        if self.mode == self.RENDERED:
+            self._load(self.loaded_path, raw)
+            if not self._show_mode(self.RENDERED, keep_scroll=True):
+                self._warn(OPEN_FAILED_NOTE)
+            return
+        position = self.editor.textCursor().position()
+        self._load(self.loaded_path, raw)
+```
+
+**Theme.** Replace:
+
+```python
+        self.editor.set_theme(theme)
+        if self.mode == self.PREVIEW:
+            self._render_preview(keep_scroll=True)  # same buffer, new CSS variables
+```
+
+with:
+
+```python
+        self.editor.set_theme(theme)
+        self.rich.set_theme(theme)  # no reload: same document, undo history and scroll
+```
+
+- [ ] **Step 4: Delete `mdviewer/preview.py`**
+
+Run: `git rm mdviewer/preview.py`, then
+`rg -n "preview import|import preview|MarkdownPreview" mdviewer scripts`
+Expected: the `rg` line prints nothing.
+
+- [ ] **Step 5: Run the smoke to verify it passes**
+
+Run: `.venv/Scripts/python scripts/smoke_ui.py`
+Expected: `SMOKE OK`
+
+- [ ] **Step 6: Run the full verification**
+
+Run:
+
+```bash
+.venv/Scripts/python -m pytest -v
+.venv/Scripts/python scripts/smoke_ui.py
+.venv/Scripts/python scripts/check_web.py
+rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests
+```
+
+Expected: all tests pass (730 at the time of writing); `SMOKE OK`;
+`WEB OK`; the `rg` line prints nothing.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add mdviewer/main_window.py scripts/smoke_ui.py
+git commit -m "feat: replace preview with editable Rendered mode and Source mode"
+```
+
+(`git rm` in Step 4 already staged the deletion.)
+
+**Review Focus:**
+
+- **A file only viewed or switched is never rewritten** (spec section 2).
+  - Rendered -> Source without a Rendered edit touches neither the buffer
+    nor the editor text.
+  - Source -> Rendered parses but never serializes.
+  - Saves write `buffer`, which in Rendered mode is the loaded text until
+    a pull replaces it.
+- **No edit is lost between modes:**
+  - the dirty flag follows the hidden editor in neither direction;
+  - a Rendered pull happens only through `with_buffer`, one at a time;
+  - a pull from a replaced document is dropped;
+  - a failed pull or serializer error keeps `rich.modified`, so the next
+    Save or switch pulls again.
+- **Caret mapping is block-level only**, from the top-level `line` attrs.
+  A caret in a block added in Rendered mode maps through a fresh parse of
+  the pulled text.
+- **Failure paths never strand the user without Source mode:** a
+  `docmodel` exception (open or switch), a page that never loads, a pull
+  that never answers.
+- **Accepted interim behaviors (later tasks):**
+  - **Task 14:**
+    - Prompts answered Save over Rendered edits cancel their action once.
+    - A renderer crash is not handled yet; the next pull reports
+      `PULL_FAILED_NOTE`.
+  - **Task 17:** the Edit menu is Source-only apart from Copy.
+- **Handed on:**
+  - **Task 14:**
+    - Make `_ok_to_replace` / `_prompt_save` / `closeEvent` continue after
+      an async save (`with_buffer`), and replace `PULL_FAILED_NOTE` with
+      the dialog.
+    - Handle `rich.crashed` (`restart()`, then `_render(buffer)`).
+    - `_pending_pull`, the external-change policy and the serializer error
+      box are done here.
+  - **Task 15:** the toolbar shows only in Rendered mode: hook it where
+    `_update_chrome` reads `self.mode`.
+  - **Task 16:** `openLink` needs `open_external`, which left with
+    `preview.py`.
+  - **Task 17:** route the Source-only Edit actions to `rich` in Rendered
+    mode, and switch its context menu policy.
+- **No regressions:** encoding, newline style, Save As suffix, UTF-8 offer,
+  recent files, theme polling, Preferences and the file watcher keep their
+  v1 behavior, checked by the same smoke sections.
 
 ### Task 14: Asynchronous lifecycle and error handling
 
 - **Files:** `mdviewer/main_window.py`, `scripts/smoke_ui.py`.
-- **Covers:** `_pending_pull` guard; Close, Exit (`closeEvent` ignore + re-issue), Open, drop and Open Recent over a dirty Rendered document; external-change policy by dirty flag (spec section 2 table); pull timeout / renderer crash dialog (`Switch to Source` / `Retry`); serializer exception aborts the action with a message box.
-- **Test:** smoke per flow using `FAKE` (`answer`, `during_ask`), plus faked timeout and serializer failure; table edits and unsafe paste checks from Task 11.
+- **Covers:** New, Open, drop, Open Recent, Close and Exit (`closeEvent` ignore + re-issue) over a Rendered document with unpulled edits: the "Save changes?" prompt continues its action after `with_buffer`'s save instead of cancelling it (Task 13's interim); pull timeout / renderer crash dialog (`Switch to Source` / `Retry`) replacing Task 13's `PULL_FAILED_NOTE`; `rich.crashed` -> `restart()` then `_render(buffer)`. Task 13 already did the `_pending_pull` guard, the external-change policy by dirty flag and the serializer error box.
+- **Test:** smoke per flow using `FAKE` (`answer`, `during_ask`), plus faked timeout and a killed renderer (`os.kill(rich.page().renderProcessPid(), SIGTERM)`, Task 12); table edits and unsafe paste checks from Task 11.
 - **Commit:** `feat: handle save prompts, external changes and editor failures in Rendered mode`
 
 ### Task 15: Format toolbar
@@ -11157,7 +13989,7 @@ git commit -m "feat: add table editing, safe paste and plain-text paste"
 ### Task 16: Link and image dialogs, link navigation, protected blocks
 
 - **Files:** `mdviewer/dialogs.py`, `mdviewer/main_window.py`, `scripts/smoke_ui.py`.
-- **Covers:** `LinkDialog`, `ImageDialog` (relative path when possible, absolute for Untitled), seams `run_link_dialog` / `run_image_dialog`, `FAKE` entries for them; `openLink` -> scheme check -> `open_external` or in-page anchor; `hoverLink` -> status bar; `editProtected` -> Source mode at that block.
+- **Covers:** `LinkDialog`, `ImageDialog` (relative path when possible, absolute for Untitled), seams `run_link_dialog` / `run_image_dialog`, `FAKE` entries for them; `openLink` -> scheme check -> `open_external` (re-added: it left with `preview.py` in Task 13) or in-page anchor; `hoverLink` -> status bar; `editProtected` -> Source mode at that block.
 - **Test:** smoke: faked dialogs insert a link and an image and the saved Markdown matches; `javascript:` openLink ignored; double-click path switches to Source with caret on the block's line.
 - **Commit:** `feat: add link and image dialogs and link navigation in Rendered mode`
 
