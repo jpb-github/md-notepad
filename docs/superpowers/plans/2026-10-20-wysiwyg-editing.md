@@ -2725,7 +2725,7 @@ breaks without them). The JS schema must declare them (defaults `1`, `1`,
     `colspan`/`rowspan`/`colwidth` on cell types.
   - For Task 9: `getDocument` strips those three cell attrs.
 
-- [ ] **Step 1: Write the failing `highlight_code` tests**
+- [x] **Step 1: Write the failing `highlight_code` tests**
 
 At the top of `tests/test_render.py`, replace
 
@@ -2770,14 +2770,14 @@ def test_highlight_code_unknown_language_is_empty(language):
     assert render.highlight_code("x = 1", language) == ""
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_render.py -v`
 Expected: the 7 new tests FAIL with
 `AttributeError: module 'mdviewer.core.render' has no attribute 'highlight_code'`;
 the 21 existing tests pass.
 
-- [ ] **Step 3: Add `highlight_code` to `render.py`**
+- [x] **Step 3: Add `highlight_code` to `render.py`**
 
 In `mdviewer/core/render.py`, directly after the `render_body` function, add:
 
@@ -2800,12 +2800,12 @@ def highlight_code(code: str, language: str) -> str:
 (`highlight`, `HtmlFormatter`, `get_lexer_by_name` and `ClassNotFound` are
 already imported by `render.py`.)
 
-- [ ] **Step 4: Run the render tests to verify they pass**
+- [x] **Step 4: Run the render tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_render.py -v`
 Expected: 28 passed.
 
-- [ ] **Step 5: Append the failing document-model tests**
+- [x] **Step 5: Append the failing document-model tests**
 
 Append to the end of `tests/test_docmodel.py` (the block uses a four-backtick
 fence because the tests contain triple-backtick Markdown):
@@ -3114,14 +3114,14 @@ def test_repo_documents_map_without_fallback():
                 assert block["attrs"]["source"].lstrip().startswith("<"), (path, block["attrs"]["line"])
 ````
 
-- [ ] **Step 6: Run them to verify they fail**
+- [x] **Step 6: Run them to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_docmodel.py -v`
 Expected: 32 failed, 54 passed. Lists, code, tables, images, raw HTML and
 footnote references still come out as `html_block`, and no `footnote_def` is
 produced.
 
-- [ ] **Step 7: Replace `mdviewer/core/docmodel.py`**
+- [x] **Step 7: Replace `mdviewer/core/docmodel.py`**
 
 Replace the whole file with:
 
@@ -3515,12 +3515,12 @@ def _decode(raw: str) -> str:
     return _ENTITY.sub(lambda m: html.unescape(m.group()), raw)
 ```
 
-- [ ] **Step 8: Run the document-model tests to verify they pass**
+- [x] **Step 8: Run the document-model tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_docmodel.py -v`
 Expected: 86 passed.
 
-- [ ] **Step 9: Run the full suite, the Qt-import check and the UI smoke**
+- [x] **Step 9: Run the full suite, the Qt-import check and the UI smoke**
 
 Run:
 
@@ -3533,7 +3533,7 @@ rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests
 Expected: all tests pass; the `rg` line prints nothing; `SMOKE OK` (the
 preview's `_Renderer` is unchanged).
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add mdviewer/core/render.py mdviewer/core/docmodel.py tests/test_render.py tests/test_docmodel.py
