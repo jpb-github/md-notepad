@@ -5,7 +5,7 @@
 > **Status: high-level outline.** Phases and tasks are fixed; each task's
 > bite-sized steps (tests, code, commands) are written out on request, task
 > by task, below its heading. Do not execute a task whose steps are not yet
-> detailed. Detailed so far: Tasks 1-8.
+> detailed. Detailed so far: Tasks 1-9.
 
 **Goal:** Make the rendered view an editable WYSIWYG Markdown editor with a
 format toolbar, keeping the plain-text editor as Source mode.
@@ -8142,10 +8142,965 @@ git commit -m "feat: add ProseMirror schema and node views for the rendered edit
 
 ### Task 9: Bridge and document lifecycle
 
-- **Files:** `web-src/src/bridge.js`, `web-src/src/editor.js`, rebuilt bundle.
-- **Produces:** `window.mdEditor` API (`setDocument`, `getDocument`, `command`, `setTheme`, `focusBlock`; keeps Task 8's `schema` and `view` for `check_web.py`; `setTheme` calls `refreshFrames()`; Task 8's `events` list becomes bridge signals (`editProtected` first); `getDocument` deletes the `prosemirror-tables` cell attrs `colspan`/`rowspan`/`colwidth` so the JSON matches `docschema`); signals `ready`, `changed` (once per load), `selectionState` (~50 ms throttle), `caretBlock`, `hoverLink`, `openLink` (Ctrl+click only); history plugin reset on `setDocument`; scroll kept on `keepScroll`.
-- **Test:** covered by Task 12's smoke checks (bundle-only task: verify by loading the page offscreen and calling each API once).
-- **Commit:** `feat: add QWebChannel bridge and document lifecycle to the editor bundle`
+**Status: steps detailed.** All code below was run before being written into
+this plan (2026-10-20, PySide6 6.12.0 offscreen, Node 26, the Task 1 pins,
+prosemirror-history 1.5.1), on top of the committed Task 8 code. Results:
+- `scripts/check_web.py` prints `WEB OK`.
+- `tests/test_web_assets.py` has 11 passing tests. The full suite passes
+  (725 tests), `SMOKE OK`, and a second `build_web.py` changes no bytes.
+- Run against the Task 8 bundle, the new checks fail cleanly (Step 4).
+- Seven deliberate breaks each fail a check:
+  - `changed` sent on every edit instead of once per load
+  - `selectionState` sent on every transaction (no throttle)
+  - `getDocument` deleting the cell attrs in place
+  - `keepScroll` ignored
+  - `setTheme` without `refreshFrames()`
+  - `setDocument` as a replace transaction (the undo history survives)
+  - `openLink` on a plain click
+
+**Findings that shape this task:**
+
+- **QWebChannel argument types:**
+  - A JS object passed to a `@Slot("QVariantMap")` arrives as a Python
+    `dict`. Integers stay `int`, `null` becomes `None`, and nested objects
+    and arrays come through.
+  - `@Slot(int)` and `@Slot(str, str)` receive JS numbers and strings as
+    is.
+  - So `selectionState` stays a dict on the wire (no JSON string).
+- **Hidden pages throttle timers:** Chromium runs a hidden page's
+  `setTimeout` at most once per second. An unshown `QWebEngineView` (also
+  with `page.setVisible(True)`) delivers every `selectionState` one step
+  late.
+  - `check_web.py` therefore shows its view.
+  - Shown offscreen, Chromium logs ~390 GPU context errors to stderr.
+    `QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu` leaves 6 harmless
+    `GLES3 ... fallback` lines.
+  - Task 12's smoke must show the `RichView` (or its window) too.
+- **`toJSON()` shares each node's `attrs` object.** Deleting keys from the
+  returned JSON would edit the live document. `getDocument` copies the
+  cells' attrs.
+- **Links:** Chromium follows no link inside editable content. Plain and
+  Ctrl synthetic `mousedown`/`click` events request no navigation (the check
+  records every navigation request), so the editor needs no `click`
+  handler.
+  - v1's `preview._Page` calls `open_external` on every link-click
+    navigation. Task 12's guard must instead **refuse** them, so that
+    `openLink` is the only way a link leaves the page.
+- **Undo history lives in `EditorState`.** A new state from
+  `EditorState.create` starts with an empty history. Replacing the content
+  with a transaction would keep the old history and also report `changed`
+  (break 6).
+- **`runJavaScript` and `undefined`:** `JSON.stringify(undefined)` returns
+  `undefined`, which made `check_web.run_js` crash on `json.loads`. `run_js`
+  now evaluates `JSON.stringify((script) ?? null)`.
+
+**Design decisions:**
+
+- **`bridge.js`** holds the JS -> Python surface:
+  - `CALLS`, the nine names of spec section 6.2 in table order, as strict
+    JSON. `tests/test_web_assets.py` pins the list, and `check_web.py`
+    checks that its recorder `Bridge` has a slot for each.
+  - `send(name, ...args)` throws on any other name and drops calls made
+    before the channel connects (Python ignores the page until `ready()`).
+  - `connectBridge()` is a no-op outside Qt (`qt` undefined), so the page
+    can be opened in a browser for debugging.
+  - `requestLinkDialog` and `requestImageDialog` are in `CALLS` now. Task
+    10's Ctrl+K and toolbar paths call `send` with them.
+- **`COMMANDS` registry** (in `editor.js`):
+  - Each entry is
+    `name: { run(state, dispatch, view, args) -> boolean, can?(state) -> boolean }`.
+  - `mdEditor.command(name, args)` runs it, focuses the editor when it
+    applied, and returns the boolean. An unknown name warns in the console
+    and returns `false`.
+  - Every `can` is reported in `selectionState.can`.
+  - Task 9 registers `undo` and `redo` (Task 17's Edit menu enablement
+    reads `can.undo` / `can.redo`). Task 10 adds the formatting commands.
+- **`changed`** is sent by `dispatchTransaction` the first time a
+  transaction leaves a different `doc` (appended transactions included).
+  `setDocument` resets the flag, so the next edit sends it again. Selection
+  changes, `focusBlock`, `setTheme` and loading never send it.
+- **`selectionState`** is `{marks, block, can}`:
+  - `marks`: names in rank order. With an empty selection they come from
+    the stored marks or `$from.marks()`. With a range, a mark counts if it
+    appears anywhere in it (`rangeHasMark`), because that is when
+    `toggleMark` removes it.
+  - `block`: `{type}` of the textblock at the selection start, plus `level`
+    for headings: `paragraph`, `heading`, `code_block`, `table_header` or
+    `table_cell`. It is `null` when the selection start is not in a
+    textblock (a selected rule or protected block).
+  - `can`: `{commandName: boolean}` from `COMMANDS`.
+  - Throttle: the first transaction arms a 50 ms timer. When it fires, it
+    sends the **current** state, and only if it differs from the last one
+    sent (compared as JSON). `setDocument` clears the timer and the
+    last-sent value and arms it again, so Python always gets the state
+    after a load.
+- **`caretBlock`** is the top-level index of the selection start, clamped
+  to the last block. It is sent at once, only when it changes, and once
+  after every `setDocument`. A mode switch reads it right after a click,
+  so it cannot wait for the throttle.
+- **`hoverLink`:** the raw `href` attribute of the `a[href]` under the
+  mouse (`mouseover`), `""` over anything else and on `mouseleave`. It is
+  sent only when it changes, and `setDocument` clears it. Unsafe hrefs
+  never reach the DOM (Task 8's `toDOM`), so they are never shown.
+- **`openLink`:** Ctrl + primary-button `mousedown` on a link sends its raw
+  `href` and swallows the event (the caret does not move). Python checks
+  the scheme and resolves relative paths (Task 16).
+- **`setDocument(json, keepScroll = false)`:**
+  - It builds and checks the new state first. On invalid JSON it throws and
+    the old document stays.
+  - It installs the state with `updateState` (new history, caret at the
+    start), then restores the page's previous `scrollTop` with
+    `keepScroll`, or scrolls to the top without it.
+- **`setTheme(css)`** takes `render.page_css(theme)` from Python, replaces
+  the text of `<style id="theme">`, and calls `refreshFrames()`. This
+  matches Key Interfaces. Step 9 aligns spec sections 6.2 and 6.7, which
+  said `setTheme(theme)`.
+- **`getDocument()`** returns `toJSON()` with `colspan`, `rowspan` and
+  `colwidth` removed from copies of the cells' attrs. Its output therefore
+  validates in `docschema` as is, and `check_web.without_cell_extras` is
+  deleted.
+- **Keymaps are Task 10's**, including Mod-z / Mod-y. Task 9 adds only the
+  `history()` plugin and the `undo` / `redo` commands.
+
+**Files:**
+- Create: `web-src/src/bridge.js`
+- Replace: `web-src/src/editor.js`
+- Modify: `tests/test_web_assets.py`, `scripts/check_web.py`
+- Modify: `docs/superpowers/specs/2026-10-20-wysiwyg-editing-design.md` (sections 6.2 and 6.7)
+- Regenerate and commit: `mdviewer/web/editor.js`, `mdviewer/web/THIRD_PARTY.txt` (`editor.css` comes out unchanged)
+
+**Interfaces:**
+- Consumes:
+  - Task 8: `schema`, `createNodeViews()`, `displayPlugins(callbacks)`
+    (`callbacks.editProtected(index)`), `refreshFrames()`
+  - Task 1's page shell: `<style id="theme">`, `#editor`, and
+    `qwebchannel.js` loaded first
+  - `check_web.py` helpers: `check`, `pump`, `run_js`, `set_doc`, `get_doc`,
+    `every_node_doc`, `check_editor`
+- Produces (later tasks rely on these exact names):
+  - `web-src/src/bridge.js`: `CALLS`, `send(name, ...args)`,
+    `connectBridge()`
+  - `web-src/src/editor.js`: the `COMMANDS` registry. Task 10 adds
+    entries, either in place or by spreading in an object imported from
+    `commands.js`.
+  - `window.mdEditor`:
+    - `schema` and `view`, for `check_web.py`
+    - `setDocument(json, keepScroll = false)`
+    - `getDocument() -> json`
+    - `command(name, args) -> boolean`
+    - `setTheme(css)`
+    - `focusBlock(index)`
+  - Python reads the document as `check_web.get_doc` does:
+    `runJavaScript("JSON.stringify(window.mdEditor.getDocument())")`, then
+    `json.loads`.
+  - The Python `Bridge` (Task 12) needs these slots, exactly as
+    `check_web.Bridge` declares them:
+    - `ready()` and `changed()`
+    - `selectionState` as `@Slot("QVariantMap")`
+    - `requestLinkDialog(str, str)` and `requestImageDialog()`
+    - `openLink(str)` and `hoverLink(str)`
+    - `editProtected(int)` and `caretBlock(int)`
+  - `selectionState` payload, e.g.
+    `{"marks": ["strong", "em"], "block": {"type": "heading", "level": 2}, "can": {"undo": true, "redo": false}}`
+  - `scripts/check_web.py`:
+    - `Bridge.calls`, `Bridge.args(name, start)` and `Page.navigations`
+    - `bridge_doc()`, `latest_state()`, `mouse()` and `js_calls()`
+    - `check_editor(app, view, folder, bridge)` and
+      `check_bridge(app, view, page, bridge)`
+    - Tasks 10-11 append their checks after `check_bridge`, using
+      `Bridge.args` to watch calls.
+
+- [ ] **Step 1: Write the failing bridge-contract test**
+
+Append to the end of `tests/test_web_assets.py`:
+
+```python
+
+
+def test_bridge_calls_match_the_spec():
+    source = (ROOT / "web-src" / "src" / "bridge.js").read_text(encoding="utf-8")
+    match = re.search(r"^export const CALLS = (\[.*?^\]);$", source, flags=re.S | re.M)
+    assert match, "bridge.js has no 'export const CALLS = [...];' block"
+    assert json.loads(match.group(1)) == [
+        "ready", "changed", "selectionState", "requestLinkDialog", "requestImageDialog",
+        "openLink", "hoverLink", "editProtected", "caretBlock",
+    ]
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `.venv/Scripts/python -m pytest tests/test_web_assets.py -v`
+Expected: `test_bridge_calls_match_the_spec` FAILS with `FileNotFoundError`
+(`web-src/src/bridge.js`); the other 10 pass.
+
+- [ ] **Step 3: Write the failing page checks**
+
+All edits are in `scripts/check_web.py`.
+
+a. Replace
+
+```python
+import json
+import os
+```
+
+with
+
+```python
+import json
+import os
+import re
+```
+
+b. Directly after `os.environ["QT_QPA_PLATFORM"] = "offscreen"` add
+
+```python
+os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")  # the view is shown: no GPU log noise
+```
+
+c. Replace the whole `class Bridge(QObject):` and `class Page(QWebEnginePage):`
+definitions (from `class Bridge` down to the blank lines before
+`def pump`) with
+
+```python
+class Bridge(QObject):
+    """Stands in for richview.Bridge: records every call from the page as [name, *args]."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls: list[list] = []
+
+    def args(self, name: str, start: int = 0) -> list:
+        """Argument lists of the calls to `name` from index `start` of `calls` on."""
+        return [call[1:] for call in self.calls[start:] if call[0] == name]
+
+    @Slot()
+    def ready(self) -> None:
+        self.calls.append(["ready"])
+
+    @Slot()
+    def changed(self) -> None:
+        self.calls.append(["changed"])
+
+    @Slot("QVariantMap")
+    def selectionState(self, state: dict) -> None:
+        self.calls.append(["selectionState", state])
+
+    @Slot(str, str)
+    def requestLinkDialog(self, text: str, href: str) -> None:
+        self.calls.append(["requestLinkDialog", text, href])
+
+    @Slot()
+    def requestImageDialog(self) -> None:
+        self.calls.append(["requestImageDialog"])
+
+    @Slot(str)
+    def openLink(self, href: str) -> None:
+        self.calls.append(["openLink", href])
+
+    @Slot(str)
+    def hoverLink(self, href: str) -> None:
+        self.calls.append(["hoverLink", href])
+
+    @Slot(int)
+    def editProtected(self, index: int) -> None:
+        self.calls.append(["editProtected", index])
+
+    @Slot(int)
+    def caretBlock(self, index: int) -> None:
+        self.calls.append(["caretBlock", index])
+
+
+class Page(QWebEnginePage):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.console: list[str] = []
+        self.page_url = QUrl()
+        self.navigations: list[str] = []  # main-frame navigations away from the page, all refused
+
+    def javaScriptConsoleMessage(self, level, message, line, source) -> None:
+        self.console.append(message)
+
+    def acceptNavigationRequest(self, url, nav_type, is_main_frame) -> bool:
+        if is_main_frame and url != self.page_url:
+            self.navigations.append(url.toString())
+            return False
+        return True
+```
+
+d. In `run_js`, replace
+
+```python
+    """Evaluates `script` in the page's main world; the value must be JSON-serializable."""
+    box: list = []
+    view.page().runJavaScript(f"JSON.stringify({script})", 0, box.append)
+```
+
+with
+
+```python
+    """Evaluates `script` in the page's main world; the value must be JSON-serializable (undefined -> None)."""
+    box: list = []
+    view.page().runJavaScript(f"JSON.stringify(({script}) ?? null)", 0, box.append)
+```
+
+e. Delete the whole `def without_cell_extras(node):` function (and the two
+blank lines after it). Keep `CELL_EXTRAS`, because `expected_schema_shape`
+still uses it. In `get_doc`, replace
+
+```python
+    return without_cell_extras(run_js(app, view, "window.mdEditor.getDocument()"))
+```
+
+with
+
+```python
+    return run_js(app, view, "window.mdEditor.getDocument()")
+```
+
+f. In `check_editor`, replace the signature line with
+
+```python
+def check_editor(app: QApplication, view: QWebEngineView, folder: Path, bridge: Bridge) -> None:
+```
+
+replace
+
+```python
+    check(docschema.validate(without_cell_extras(doc)) == [], "the every-node document is valid in Python")
+    set_doc(app, view, doc)
+    check(get_doc(app, view) == doc, "every node type comes back unchanged from setDocument/getDocument")
+    check(run_js(app, view, "window.mdEditor.events.length") == 0, "loading a document sends no events")
+```
+
+with
+
+```python
+    check(docschema.validate(doc) == [], "the every-node document is valid in Python")
+    mark = len(bridge.calls)
+    set_doc(app, view, doc)
+    check(get_doc(app, view) == doc, "every node type comes back unchanged from setDocument/getDocument")
+    pump(app, lambda: False, 0.3)  # a change report would arrive by now
+    check(bridge.args("changed", mark) == [], "loading a document does not report a change")
+```
+
+and in the double-click part, add `mark = len(bridge.calls)` directly under
+`# Double-click on protected nodes reports the top-level block index.`, then replace
+
+```python
+    events = run_js(app, view, "window.mdEditor.events")
+    check(events == [["editProtected", 0], ["editProtected", 2], ["editProtected", 10], ["editProtected", 12]],
+          f"double-click on protected nodes ({events})")
+```
+
+with
+
+```python
+    pump(app, lambda: len(bridge.args("editProtected", mark)) >= 4, 3)
+    events = bridge.args("editProtected", mark)
+    check(events == [[0], [2], [10], [12]], f"double-click on protected nodes calls bridge.editProtected ({events})")
+```
+
+g. Insert the following block directly above `def main() -> int:`, with two
+blank lines before and after it:
+
+```python
+# --- Task 9: bridge and document lifecycle ---------------------------------------------------
+
+LINK_HREF = "https://example.com/a?b=1"
+# Positions in bridge_doc(): inside "plain ", inside "bold", inside "link", inside the code.
+PLAIN, BOLD, LINK, CODE = 9, 16, 21, 26
+TABLE_INDEX, RULE_INDEX = 3, 4
+NO_UNDO = {"undo": False, "redo": False}
+# Defines select(from, to = from); needs window.TextSelection (set by check_bridge).
+SELECT_JS = """(window.select = (from, to = from) => {
+  const view = window.mdEditor.view;
+  view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, from, to)));
+  return 0;
+}, 0)"""
+
+
+def bridge_doc() -> dict:
+    """Heading, marked text and a link, code, a table, a rule and raw HTML."""
+    def text(value, *marks):
+        node = {"type": "text", "text": value}
+        if marks:
+            node["marks"] = list(marks)
+        return node
+
+    link = {"type": "link", "attrs": {"href": LINK_HREF, "title": None}}
+    return {"type": "doc", "content": [
+        {"type": "heading", "attrs": {"level": 2, "line": 1}, "content": [text("Title")]},
+        {"type": "paragraph", "attrs": {"line": 3}, "content": [
+            text("plain "), text("bold", {"type": "strong"}, {"type": "em"}), text(" "), text("link", link),
+        ]},
+        {"type": "code_block", "attrs": {"language": "", "highlight": "", "line": 5}, "content": [text("x = 1")]},
+        {"type": "table", "attrs": {"line": 9}, "content": [{"type": "table_row", "content": [
+            {"type": "table_header", "attrs": {"align": None}, "content": [text("h")]},
+        ]}]},
+        {"type": "horizontal_rule", "attrs": {"line": 12}},
+        {"type": "html_block", "attrs": {"source": "<p>raw</p>", "line": 14}},
+    ]}
+
+
+def latest_state(app: QApplication, bridge: Bridge) -> dict | None:
+    """The last selectionState sent, once the throttle has flushed."""
+    pump(app, lambda: False, 0.2)
+    states = bridge.args("selectionState")
+    return states[-1][0] if states else None
+
+
+def mouse(selector: str, kind: str, ctrl: bool = False) -> str:
+    return (f"(document.querySelector({json.dumps(selector)}).dispatchEvent(new MouseEvent({json.dumps(kind)}, "
+            f"{{ bubbles: true, cancelable: true, button: 0, ctrlKey: {json.dumps(ctrl)} }})), 0)")
+
+
+def js_calls() -> list[str]:
+    """The CALLS list of web-src/src/bridge.js: every call the page makes on the Bridge."""
+    source = (WEB.parent.parent / "web-src" / "src" / "bridge.js").read_text(encoding="utf-8")
+    match = re.search(r"^export const CALLS = (\[.*?^\]);$", source, flags=re.S | re.M)
+    return json.loads(match.group(1)) if match else []
+
+
+def check_bridge(app: QApplication, view: QWebEngineView, page: Page, bridge: Bridge) -> None:
+    if not run_js(app, view, "typeof window.mdEditor?.command === 'function'"):
+        check(False, "window.mdEditor exposes command and setTheme")
+        return
+    meta = Bridge.staticMetaObject
+    slots = {bytes(meta.method(i).name()).decode() for i in range(meta.methodOffset(), meta.methodCount())}
+    check(js_calls() and set(js_calls()) <= slots, f"the Bridge has a slot for every call in bridge.js ({slots})")
+    doc = bridge_doc()
+    check(docschema.validate(doc) == [], "the bridge document is valid in Python")
+    mark = len(bridge.calls)
+    set_doc(app, view, doc)
+    pump(app, lambda: False, 0.2)
+    calls = bridge.calls[mark:]
+    check(calls == [["caretBlock", 0],
+                    ["selectionState", {"marks": [], "block": {"type": "heading", "level": 2}, "can": NO_UNDO}]],
+          f"setDocument reports the caret block and the selection state, nothing else ({calls})")
+    get_doc(app, view)
+    check(run_js(app, view, "window.mdEditor.view.state.doc.child(3).child(0).child(0).attrs.colspan") == 1,
+          "getDocument leaves the live table cell attrs alone")
+
+    # Selection state: at most one report per 50 ms, with the latest state; caretBlock at once.
+    run_js(app, view, "(window.mdEditor.focusBlock(0), "
+                      "window.TextSelection = window.mdEditor.view.state.selection.constructor, 0)")
+    run_js(app, view, SELECT_JS)
+    pump(app, lambda: False, 0.2)
+    mark = len(bridge.calls)
+    run_js(app, view, f"(select({PLAIN}), select({CODE}), select(3), select({BOLD}), 0)")
+    pump(app, lambda: False, 0.2)
+    states = bridge.args("selectionState", mark)
+    check(bridge.args("caretBlock", mark) == [[1], [2], [0], [1]], "caretBlock follows every block change at once")
+    check(states == [[{"marks": ["strong", "em"], "block": {"type": "paragraph"}, "can": NO_UNDO}]],
+          f"four quick selection changes send one selectionState with the last one ({states})")
+    expected = {
+        f"select({PLAIN})": ([], {"type": "paragraph"}),
+        f"select({LINK})": (["link"], {"type": "paragraph"}),
+        f"select({PLAIN}, {LINK})": (["strong", "em", "link"], {"type": "paragraph"}),
+        f"select({CODE})": ([], {"type": "code_block"}),
+        f"window.mdEditor.focusBlock({TABLE_INDEX})": ([], {"type": "table_header"}),
+        f"window.mdEditor.focusBlock({RULE_INDEX})": ([], None),
+    }
+    for script, (marks, block) in expected.items():
+        run_js(app, view, f"({script}, 0)")
+        state = latest_state(app, bridge)
+        check(state == {"marks": marks, "block": block, "can": NO_UNDO}, f"selectionState after {script} ({state})")
+    check(bridge.args("changed", mark) == [], "selection changes do not report a change")
+
+    # changed: once per load. Undo history: per load, through command().
+    mark = len(bridge.calls)
+    run_js(app, view, f"""(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('A', {PLAIN})),
+        window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('B', {PLAIN})), 0)""")
+    state = latest_state(app, bridge)
+    check(bridge.args("changed", mark) == [[]], "two edits after a load report changed once")
+    check(state and state["can"] == {"undo": True, "redo": False}, f"an edit can be undone ({state})")
+    check(run_js(app, view, "window.mdEditor.command('undo')") is True and get_doc(app, view) == doc,
+          "command('undo') restores the loaded document")
+    state = latest_state(app, bridge)
+    check(state and state["can"] == {"undo": False, "redo": True}, f"an undone edit can be redone ({state})")
+    check(run_js(app, view, "window.mdEditor.command('redo')") is True
+          and get_doc(app, view)["content"][1]["content"][0]["text"] == "pBAlain ",
+          "command('redo') reapplies the edit")
+    check(run_js(app, view, "window.mdEditor.command('noSuchCommand')") is False, "an unknown command returns false")
+    check(any("unknown command noSuchCommand" in message for message in page.console),
+          "an unknown command logs a warning")
+    set_doc(app, view, doc)
+    check(run_js(app, view, "window.mdEditor.command('undo')") is False, "setDocument starts a new undo history")
+    state = latest_state(app, bridge)
+    check(state and state["can"] == NO_UNDO, f"after setDocument nothing can be undone ({state})")
+    mark = len(bridge.calls)
+    run_js(app, view, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('C', {PLAIN})), 0)")
+    pump(app, lambda: bridge.args("changed", mark), 3)
+    check(bridge.args("changed", mark) == [[]], "the first edit after another load reports changed again")
+
+    # setTheme: swaps the theme stylesheet and the raw HTML frame colors, without a reload.
+    set_doc(app, view, doc)
+    frame_fg = """(() => {
+      const fg = getComputedStyle(document.documentElement).getPropertyValue('--fg').trim();
+      return document.querySelector('#editor .md-html-block iframe').srcdoc.includes('color:' + fg);
+    })()"""
+    light_fg = run_js(app, view, "getComputedStyle(document.documentElement).getPropertyValue('--fg').trim()")
+    check(run_js(app, view, frame_fg) is True, "the raw HTML frame uses the page's text color")
+    run_js(app, view, "(window.notReloaded = true, 0)")
+    pump(app, lambda: False, 0.2)
+    mark = len(bridge.calls)
+    run_js(app, view, f"(window.mdEditor.setTheme({json.dumps(render.page_css('dark'))}), 0)")
+    pump(app, lambda: False, 0.2)
+    background = run_js(app, view, "getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()")
+    dark_fg = run_js(app, view, "getComputedStyle(document.documentElement).getPropertyValue('--fg').trim()")
+    check((background or "").lower() == render.PAGE_BACKGROUND["dark"].lower()
+          and run_js(app, view, "window.notReloaded") is True,
+          f"setTheme swaps the theme CSS without reloading (--bg = {background!r})")
+    check(dark_fg != light_fg and run_js(app, view, frame_fg) is True, "setTheme refreshes the raw HTML frames")
+    check(bridge.calls[mark:] == [] and get_doc(app, view) == doc, "setTheme leaves the document alone")
+    run_js(app, view, f"(window.mdEditor.setTheme({json.dumps(render.page_css('light'))}), 0)")
+
+    # Links: hover shows the href; Ctrl+click opens it; a plain click never navigates.
+    mark = len(bridge.calls)
+    for script in (mouse("#editor a", "mouseover"), mouse("#editor a", "mouseover"),
+                   mouse("#editor h2", "mouseover"), mouse("#editor a", "mouseover")):
+        run_js(app, view, script)
+    run_js(app, view, "(document.querySelector('#editor .ProseMirror').dispatchEvent(new MouseEvent('mouseleave')), 0)")
+    pump(app, lambda: len(bridge.args("hoverLink", mark)) >= 4, 3)
+    hovers = bridge.args("hoverLink", mark)
+    check(hovers == [[LINK_HREF], [""], [LINK_HREF], [""]], f"hovering links reports their href ({hovers})")
+    for script in (mouse("#editor a", "mousedown"), mouse("#editor a", "click"),
+                   mouse("#editor a", "mousedown", ctrl=True), mouse("#editor a", "click", ctrl=True)):
+        run_js(app, view, script)
+    pump(app, lambda: bridge.args("openLink", mark), 3)
+    pump(app, lambda: False, 0.3)  # a navigation would be requested by now
+    check(bridge.args("openLink", mark) == [[LINK_HREF]], f"only Ctrl+click opens a link ({bridge.calls[mark:]})")
+    check(page.navigations == [], f"clicking a link never navigates the page ({page.navigations})")
+    run_js(app, view, mouse("#editor a", "mouseover"))
+    mark = len(bridge.calls)
+    set_doc(app, view, doc)
+    pump(app, lambda: bridge.args("hoverLink", mark), 3)
+    check(bridge.args("hoverLink", mark) == [[""]], "setDocument clears the hovered link")
+
+    # keepScroll: an external reload keeps the scroll offset; other loads scroll to the top.
+    long_doc = {"type": "doc", "content": [
+        {"type": "paragraph", "attrs": {"line": None}, "content": [{"type": "text", "text": f"paragraph {i}"}]}
+        for i in range(200)
+    ]}
+    set_doc(app, view, long_doc)
+    scroll_top = "document.scrollingElement.scrollTop"
+    run_js(app, view, f"({scroll_top} = 600, 0)")
+    check(run_js(app, view, scroll_top) == 600, "the long document scrolls")
+    run_js(app, view, f"(window.mdEditor.setDocument({json.dumps(long_doc)}, true), 0)")
+    check(run_js(app, view, scroll_top) == 600, "setDocument(doc, true) keeps the scroll offset")
+    run_js(app, view, f"(window.mdEditor.setDocument({json.dumps(long_doc)}, false), 0)")
+    check(run_js(app, view, scroll_top) == 0, "setDocument(doc, false) scrolls to the top")
+```
+
+h. In `main()`, replace
+
+```python
+    view.load(QUrl.fromLocalFile(str(build_page(folder))))
+    check(pump(app, lambda: bridge.ready_calls > 0, READY_TIMEOUT_S), "bridge.ready() received within 5 s")
+```
+
+with
+
+```python
+    # Shown like the app's view: Chromium throttles the timers of hidden pages to one per second.
+    view.resize(900, 700)
+    view.show()
+    page.page_url = QUrl.fromLocalFile(str(build_page(folder)))
+    view.load(page.page_url)
+    check(pump(app, lambda: bridge.args("ready"), READY_TIMEOUT_S), "bridge.ready() received within 5 s")
+```
+
+replace
+
+```python
+    check(bridge.ready_calls == 1, f"ready() called exactly once (got {bridge.ready_calls})")
+```
+
+with
+
+```python
+    check(bridge.calls == [["ready"]], f"ready() is the first and only call after loading ({bridge.calls})")
+```
+
+and replace
+
+```python
+    check_editor(app, view, folder)
+```
+
+with
+
+```python
+    check_editor(app, view, folder, bridge)
+    check_bridge(app, view, page, bridge)
+```
+
+- [ ] **Step 4: Run the page check to verify it fails**
+
+Run: `.venv/Scripts/python scripts/check_web.py`
+Expected: exit code 1, and the committed Task 8 bundle fails with exactly
+these labels (the long `pasted HTML` label also prints the pasted document,
+cut here), followed by the console dump:
+
+```
+WEB CHECK FAILED:
+  - every node type comes back unchanged from setDocument/getDocument
+  - double-click on protected nodes calls bridge.editProtected ([])
+  - copy and paste inside the editor keeps every node (line and highlight reset)
+  - pasted HTML: unsafe URLs dropped, task box, code language and cell align kept (...)
+  - window.mdEditor exposes command and setTheme
+```
+
+The first, third and fourth fail because the Task 8 bundle still returns
+the cell attrs `colspan` / `rowspan` / `colwidth`.
+
+- [ ] **Step 5: Write the bridge module**
+
+Create `web-src/src/bridge.js`:
+
+```js
+// QWebChannel glue: the calls the Rendered editor makes on Python's Bridge object
+// (mdviewer/richview.py). Python calls the editor through window.mdEditor (editor.js).
+/* global QWebChannel, qt */
+
+// Every call the page makes on the Python Bridge, in spec section 6.2 order. The Python
+// Bridge needs a slot for each one; send() refuses any other name.
+export const CALLS = [
+  "ready",
+  "changed",
+  "selectionState",
+  "requestLinkDialog",
+  "requestImageDialog",
+  "openLink",
+  "hoverLink",
+  "editProtected",
+  "caretBlock"
+];
+
+let bridge = null;
+
+export function send(name, ...args) {
+  if (!CALLS.includes(name)) throw new Error(`bridge: unknown call ${name}`);
+  if (bridge) bridge[name](...args);
+}
+
+// Connects to the channel's "bridge" object, then tells Python the page is ready.
+// Calls made before that are dropped: Python ignores the page until ready().
+export function connectBridge() {
+  if (typeof qt === "undefined") return; // page opened outside Qt, e.g. in a browser
+  // qwebchannel.js is loaded by its own <script> before the bundle.
+  new QWebChannel(qt.webChannelTransport, (channel) => {
+    bridge = channel.objects.bridge;
+    send("ready");
+  });
+}
+```
+
+- [ ] **Step 6: Replace the editor entry point**
+
+Replace the whole of `web-src/src/editor.js` with:
+
+```js
+// Rendered editor bundle: EditorView, document lifecycle and window.mdEditor, the API
+// Python calls through runJavaScript. Calls to Python go through bridge.js.
+import "prosemirror-view/style/prosemirror.css";
+import "./editor.css";
+import { history, redo, redoDepth, undo, undoDepth } from "prosemirror-history";
+import { EditorState, NodeSelection, Plugin, Selection } from "prosemirror-state";
+import { EditorView } from "prosemirror-view";
+import { connectBridge, send } from "./bridge.js";
+import { createNodeViews, displayPlugins, refreshFrames } from "./nodeviews.js";
+import { schema } from "./schema.js";
+
+const SELECTION_THROTTLE_MS = 50;
+// prosemirror-tables' cell attrs; docschema does not know them (merged cells are a non-goal).
+const CELL_EXTRAS = ["colspan", "rowspan", "colwidth"];
+
+// Commands run by mdEditor.command(name, args): { run(state, dispatch, view, args) -> boolean,
+// can?(state) -> boolean }. Each `can` is reported in selectionState.can.
+const COMMANDS = {
+  undo: { run: (state, dispatch) => undo(state, dispatch), can: (state) => undoDepth(state) > 0 },
+  redo: { run: (state, dispatch) => redo(state, dispatch), can: (state) => redoDepth(state) > 0 },
+};
+
+// What has been reported to Python since the last setDocument.
+const sent = { changed: false, caretBlock: null, selectionState: null, hoverLink: "" };
+let selectionTimer = null;
+
+function linkAt(view, target) {
+  const link = target instanceof Element ? target.closest("a[href]") : null;
+  return link && view.dom.contains(link) ? link : null;
+}
+
+function hover(href) {
+  if (href === sent.hoverLink) return;
+  sent.hoverLink = href;
+  send("hoverLink", href);
+}
+
+// Hovering a link shows its URL in the status bar; Ctrl+click opens it (Python checks
+// the scheme). A plain click only places the caret: Chromium follows no links in
+// editable content.
+const linkPlugin = new Plugin({
+  props: {
+    handleDOMEvents: {
+      mouseover(view, event) {
+        hover(linkAt(view, event.target)?.getAttribute("href") ?? "");
+        return false;
+      },
+      mouseleave() {
+        hover("");
+        return false;
+      },
+      mousedown(view, event) {
+        const link = event.ctrlKey && event.button === 0 ? linkAt(view, event.target) : null;
+        if (!link) return false;
+        event.preventDefault();
+        send("openLink", link.getAttribute("href"));
+        return true;
+      },
+    },
+  },
+});
+
+const callbacks = { editProtected: (index) => send("editProtected", index) };
+const plugins = [history(), linkPlugin, ...displayPlugins(callbacks)];
+
+function createState(json) {
+  if (!json) return EditorState.create({ schema, plugins });
+  const doc = schema.nodeFromJSON(json);
+  doc.check(); // throws on content the schema does not allow
+  return EditorState.create({ schema, plugins, doc });
+}
+
+// Top-level block of the selection start (a gap cursor after the last block counts as it).
+function caretBlock(state) {
+  return Math.min(state.selection.$from.index(0), state.doc.childCount - 1);
+}
+
+// Toolbar state: marks active at the caret (or anywhere in the selection, as toggling
+// then removes them), the textblock type at the selection start, command availability.
+function selectionState(state) {
+  const { empty, from, to, $from } = state.selection;
+  const stored = empty ? state.storedMarks || $from.marks() : null;
+  const marks = Object.values(schema.marks)
+    .filter((type) => (stored ? type.isInSet(stored) : state.doc.rangeHasMark(from, to, type)))
+    .map((type) => type.name);
+  const parent = $from.parent;
+  let block = null;
+  if (parent.isTextblock) {
+    block = parent.type.name === "heading" ? { type: "heading", level: parent.attrs.level } : { type: parent.type.name };
+  }
+  const can = {};
+  for (const [name, command] of Object.entries(COMMANDS)) {
+    if (command.can) can[name] = command.can(state);
+  }
+  return { marks, block, can };
+}
+
+function flushSelectionState() {
+  selectionTimer = null;
+  const state = selectionState(view.state);
+  const key = JSON.stringify(state);
+  if (key === sent.selectionState) return;
+  sent.selectionState = key;
+  send("selectionState", state);
+}
+
+// caretBlock goes out at once (it changes rarely and a mode switch reads it);
+// selectionState at most every SELECTION_THROTTLE_MS, always with the latest state.
+function report(state) {
+  const index = caretBlock(state);
+  if (index !== sent.caretBlock) {
+    sent.caretBlock = index;
+    send("caretBlock", index);
+  }
+  if (selectionTimer === null) selectionTimer = setTimeout(flushSelectionState, SELECTION_THROTTLE_MS);
+}
+
+const view = new EditorView(document.getElementById("editor"), {
+  state: createState(null),
+  nodeViews: createNodeViews(),
+  dispatchTransaction(tr) {
+    const before = view.state.doc;
+    view.updateState(view.state.apply(tr));
+    if (view.state.doc !== before && !sent.changed) {
+      sent.changed = true;
+      send("changed");
+    }
+    report(view.state);
+  },
+});
+
+// New EditorState: empty undo history, caret at the start. With keepScroll the page
+// keeps its scroll offset (external reload), otherwise it scrolls to the top.
+function setDocument(json, keepScroll = false) {
+  const state = createState(json);
+  const scroller = document.scrollingElement;
+  const top = scroller.scrollTop;
+  view.updateState(state);
+  scroller.scrollTop = keepScroll ? top : 0;
+  clearTimeout(selectionTimer);
+  selectionTimer = null;
+  Object.assign(sent, { changed: false, caretBlock: null, selectionState: null });
+  hover("");
+  report(state);
+}
+
+// toJSON() shares each node's attrs object: copy the cells' attrs, never edit them.
+function withoutCellExtras(json) {
+  if (json.type === "table_header" || json.type === "table_cell") {
+    json.attrs = Object.fromEntries(Object.entries(json.attrs).filter(([name]) => !CELL_EXTRAS.includes(name)));
+  }
+  json.content?.forEach(withoutCellExtras);
+  return json;
+}
+
+window.mdEditor = {
+  schema,
+  view,
+  setDocument,
+  getDocument: () => withoutCellExtras(view.state.doc.toJSON()),
+  // Runs a toolbar or menu command; false when it does not apply here (or is unknown).
+  command(name, args) {
+    const command = Object.hasOwn(COMMANDS, name) ? COMMANDS[name] : null;
+    if (!command) {
+      console.warn(`mdEditor.command: unknown command ${name}`);
+      return false;
+    }
+    const done = command.run(view.state, view.dispatch, view, args);
+    if (done) view.focus();
+    return done;
+  },
+  // `css` is render.page_css(theme); the frames re-read the theme colors.
+  setTheme(css) {
+    document.getElementById("theme").textContent = css;
+    refreshFrames();
+  },
+  // Caret at the start of top-level block `index`; atoms (protected blocks, rules) are selected.
+  focusBlock(index) {
+    const { doc } = view.state;
+    if (!Number.isInteger(index) || index < 0 || index >= doc.childCount) return;
+    let pos = 0;
+    for (let i = 0; i < index; i++) pos += doc.child(i).nodeSize;
+    const block = doc.child(index);
+    const selection = block.isLeaf ? NodeSelection.create(doc, pos) : Selection.near(doc.resolve(pos + 1));
+    view.dispatch(view.state.tr.setSelection(selection).scrollIntoView());
+    view.focus();
+  },
+};
+
+connectBridge();
+```
+
+- [ ] **Step 7: Rebuild the bundle**
+
+Run: `.venv/Scripts/python scripts/build_web.py`
+Expected: exit code 0. esbuild reports `editor.js` at about 221 KB and
+`editor.css` at 2.3 KB (unchanged). The output ends with
+`THIRD_PARTY.txt: 10 packages`: Task 8's 8 plus `prosemirror-history` and
+its dependency `rope-sequence`.
+
+- [ ] **Step 8: Run the tests and the page check to verify they pass**
+
+Run:
+
+```bash
+.venv/Scripts/python -m pytest tests/test_web_assets.py -v
+.venv/Scripts/python scripts/check_web.py
+```
+
+Expected: 11 passed; `WEB OK`, exit code 0. Six
+`Failed to create GLES3 context` / `shared context` lines on stderr are
+expected noise.
+
+If only the throttle or `latest_state` checks fail on a slower machine,
+first confirm that the view is shown (`view.show()`) and that the page is
+not throttled. Raise the 0.2 s pumps only after that. Do **not** drop the
+throttle.
+
+- [ ] **Step 9: Align the spec with `setTheme(css)`**
+
+In `docs/superpowers/specs/2026-10-20-wysiwyg-editing-design.md`, section
+6.2, replace
+
+```
+| `setTheme(theme)` | Swap CSS variables and code-highlight variant, no reload |
+```
+
+with
+
+```
+| `setTheme(css)` | Swap the theme stylesheet (`render.page_css(theme)`: CSS variables and code-highlight colors), no reload |
+```
+
+and in section 6.7 replace `calls \`setTheme(theme)\`:` with
+`calls \`setTheme(render.page_css(theme))\`:`.
+
+- [ ] **Step 10: Run the full verification**
+
+Run:
+
+```bash
+.venv/Scripts/python -m pytest -v
+.venv/Scripts/python scripts/smoke_ui.py
+.venv/Scripts/python scripts/check_web.py
+rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests
+sha256sum mdviewer/web/* > /tmp/web1.txt && .venv/Scripts/python scripts/build_web.py > /dev/null && sha256sum mdviewer/web/* | diff /tmp/web1.txt - && echo REPRODUCIBLE
+```
+
+Expected: all tests pass (725 at the time of writing); `SMOKE OK`
+(nothing in `mdviewer/` loads the web editor yet); `WEB OK`; the `rg` line
+prints nothing; `REPRODUCIBLE`.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add web-src/src/bridge.js web-src/src/editor.js mdviewer/web tests/test_web_assets.py scripts/check_web.py docs/superpowers/specs/2026-10-20-wysiwyg-editing-design.md
+git status --short   # must not list web-src/node_modules
+git commit -m "feat: add QWebChannel bridge and document lifecycle to the editor bundle"
+```
+
+**Review Focus:**
+
+- **`changed` is exactly once per load.**
+  - It is sent only from `dispatchTransaction`, never from `setDocument`,
+    `setTheme`, `focusBlock` or selection changes.
+  - A stale-highlight `appendTransaction` only follows a user edit, so it
+    never sends `changed` on its own.
+  - A language-field change is an edit and does send it.
+- **Throttle:**
+  - The timer always sends the latest state, never a queued old one.
+  - `setDocument` clears a pending timer, so a state from the previous
+    document is never sent after a load.
+  - Duplicates are suppressed by value, not by identity.
+- **No live-state mutation:** `getDocument` copies the cells' attrs before
+  filtering them. `selectionState` and `caretBlock` only read the state.
+- **Bridge surface:**
+  - `send` accepts only `CALLS`.
+  - The only Python-bound value that names a location is `openLink`'s and
+    `hoverLink`'s `href`, and it comes from a DOM attribute that
+    `isSafeUrl` already filtered.
+  - No call carries a file path chosen by the page.
+- **`setDocument` failure:** invalid JSON throws before `updateState`, so
+  the old document, history and flags stay intact.
+- **Accepted behaviors:**
+  - Undoing back to the loaded document keeps the dirty flag (`changed` is
+    not retracted). This matches "first change since the last load".
+  - `keepScroll` restores the offset right after the new DOM is built.
+    Images and raw HTML frames that finish loading later can still shift
+    the content under it.
+  - `block` reports `table_header` / `table_cell` in tables. The
+    combo's choices do not include them, and Task 15 decides how to show
+    that.
+- **Handed to Task 12:**
+  - The navigation guard refuses link-click navigations instead of calling
+    `open_external`.
+  - `selectionState` uses `@Slot("QVariantMap")`.
+  - The smoke shows the view.
+- **No regressions:** `tests/` stays Qt-free; `mdviewer/` still does not
+  load `mdviewer/web`.
 
 ### Task 10: Formatting commands, keymaps and input rules
 
@@ -8166,8 +9121,8 @@ git commit -m "feat: add ProseMirror schema and node views for the rendered edit
 ### Task 12: RichView and Bridge
 
 - **Files:** `mdviewer/richview.py`, `mdviewer/core/render.py` (`editor_page`), `scripts/smoke_ui.py`.
-- **Produces:** `RichView` per Key Interfaces: writes `editor_page(theme)` and copies `editor.js`, `editor.css`, `qwebchannel.js` to its temp dir, registers the `Bridge` under the channel name `"bridge"`, navigation guard (from `preview._Page`), JS enabled with CSP, `ready` 5 s timeout -> `load_failed` signal, `request_document` with 3 s timeout -> `callback(None)`, `renderProcessTerminated` -> `crashed` signal, zoom passthrough.
-- **Test:** smoke: standalone `RichView` loads, `set_document(from_markdown(...))` then `request_document` returns an equal document; a sandboxed `<script>` marker is never set.
+- **Produces:** `RichView` per Key Interfaces: writes `editor_page(theme)` and copies `editor.js`, `editor.css`, `qwebchannel.js` to its temp dir, registers the `Bridge` under the channel name `"bridge"`, navigation guard (from `preview._Page`, but refusing link-click navigations instead of opening them: `openLink` is the only way out, Task 9), Bridge slots as `check_web.Bridge` declares them (Task 9), JS enabled with CSP, `ready` 5 s timeout -> `load_failed` signal, `request_document` with 3 s timeout -> `callback(None)`, `renderProcessTerminated` -> `crashed` signal, zoom passthrough.
+- **Test:** smoke (the view shown: hidden pages throttle timers, Task 9): standalone `RichView` loads, `set_document(from_markdown(...))` then `request_document` returns an equal document; a sandboxed `<script>` marker is never set.
 - **Commit:** `feat: add RichView web editor host with QWebChannel bridge`
 
 ### Task 13: Rendered/Source modes and synchronous paths
