@@ -1522,7 +1522,7 @@ others, which would disagree with how the Markdown parser sees lines.
     `join(front, serialize.to_markdown(doc))`. `front` is taken from the
     `front_matter` node's `source` and emitted verbatim.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_frontmatter.py`:
 
@@ -1604,12 +1604,12 @@ def test_join_split_round_trip_is_byte_exact(text):
     assert join(*split(text)) == text
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_frontmatter.py -v`
 Expected: collection error, `ModuleNotFoundError: No module named 'mdviewer.core.frontmatter'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `mdviewer/core/frontmatter.py`:
 
@@ -1653,12 +1653,12 @@ def join(front: str | None, body: str) -> str:
     return (front or "") + body
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_frontmatter.py -v`
 Expected: 33 passed.
 
-- [ ] **Step 5: Run the full suite and the Qt-import check**
+- [x] **Step 5: Run the full suite and the Qt-import check**
 
 Run:
 
@@ -1669,7 +1669,7 @@ rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests
 
 Expected: all tests pass; the `rg` line prints nothing.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add mdviewer/core/frontmatter.py tests/test_frontmatter.py
