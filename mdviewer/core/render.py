@@ -134,6 +134,21 @@ def render_body(text: str, base_dir: Path | None = None) -> str:
     return markdown(text)
 
 
+def highlight_code(code: str, language: str) -> str:
+    """Pygments markup for a code block in the Rendered editor; "" when the language is unknown.
+
+    Class-based <span>s only (no wrapper, no inline colors): the editor puts them in
+    a <pre class="highlight"> and page_css(theme) supplies the colors. The text is
+    kept exactly, leading and trailing newlines included."""
+    if not language.strip():
+        return ""
+    try:
+        lexer = get_lexer_by_name(language, stripnl=False, ensurenl=False)
+    except ClassNotFound:
+        return ""
+    return highlight(code, lexer, HtmlFormatter(nowrap=True))
+
+
 def build_page(text: str, theme: str, base_dir: Path | None = None) -> tuple[str, bool]:
     """Full HTML page; falls back to the escaped raw text if rendering fails."""
     try:

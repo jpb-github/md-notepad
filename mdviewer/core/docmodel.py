@@ -5,29 +5,48 @@ ProseMirror's toJSON() gives for the same document: every declared attr present
 (LINE_ATTR is None below the top level), empty content and marks omitted,
 adjacent text nodes with equal marks merged, marks in docschema.MARKS order.
 A top-level block containing anything this module cannot map becomes a protected
-html_block holding its source text, so nothing is lost.
+html_block holding its source text, so nothing is lost. Footnote definitions
+become footnote_def nodes at the end of the document, in source order.
 """
 
 import html
 import re
 from bisect import bisect_left
+from dataclasses import dataclass
 from pathlib import Path
 
 import mistune
 from mistune.plugins import import_plugin
+from mistune.util import unikey
 
 from mdviewer.core import docschema, urls
-from mdviewer.core.render import PLUGINS
+from mdviewer.core.render import PLUGINS, highlight_code
 
 # CommonMark entity references (the ';' is required); html.unescape decodes each match.
 _ENTITY = re.compile(r"&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
 _MARK_RANK = {name: rank for rank, name in enumerate(docschema.MARKS)}
 # mistune inline token -> mark without attrs.
 _SIMPLE_MARKS = {"strong": "strong", "emphasis": "em", "strikethrough": "strike"}
+# mistune's block rule for "[^label]: text" (footnotes plugin) and where we keep what it matched.
+_FOOTNOTE_RULE = "ref_footnote"
+_FOOTNOTE_ENV = "mdviewer_footnote_defs"
 
 
 class _Unmappable(Exception):
     """A token with no document node; its top-level block is kept as source."""
+
+
+@dataclass
+class _Footnote:
+    label: str  # as written in the definition
+    source: str  # the definition's text, without trailing newlines
+    pos: int  # offset of the definition in the body
+
+
+@dataclass
+class _Context:
+    base_dir: Path | None
+    labels: dict[str, str]  # mistune footnote key -> label as written in its definition
 
 
 # --- mistune with block start offsets -------------------------------------------
@@ -35,6 +54,8 @@ class _Unmappable(Exception):
 # "_pos", the offset where its block starts. Rules record m.start() while they run
 # (a stack: the list rule may parse an interrupting block on the same state), and
 # paragraphs and indented code are added while state.cursor is still at their start.
+# Footnote definitions produce no token; their source is recorded in state.env.
+# (mistune only recognizes them at the top level; nested ones are link definitions.)
 
 
 class _Tokens(list):
@@ -71,19 +92,27 @@ class _BlockParser(mistune.BlockParser):
             return super().parse_method(m, state)
         state.block_starts.append(m.start())
         try:
-            return super().parse_method(m, state)
+            end = super().parse_method(m, state)
         finally:
             state.block_starts.pop()
+        if m.lastgroup == _FOOTNOTE_RULE:
+            defs = state.env.setdefault(_FOOTNOTE_ENV, {})
+            key = unikey(m.group("footnote_key"))
+            if key not in defs:  # mistune also keeps the first definition
+                source = state.src[m.start() : end].rstrip("\n")
+                defs[key] = _Footnote(m.group("footnote_key"), source, m.start())
+        return end
 
 
-def _parse(body: str) -> list[dict]:
+def _parse(body: str) -> tuple[list[dict], dict[str, _Footnote]]:
     markdown = mistune.Markdown(
         renderer=None,
         block=_BlockParser(),
         inline=mistune.InlineParser(),
         plugins=[import_plugin(name) for name in PLUGINS],
     )
-    return markdown(body)
+    tokens, state = markdown.parse(body)
+    return tokens, state.env.get(_FOOTNOTE_ENV, {})
 
 
 # --- public API -----------------------------------------------------------------
@@ -95,26 +124,37 @@ def from_markdown(body: str, front: str | None = None, base_dir: Path | None = N
     base_dir is the folder image paths resolve against (display_src); None for Untitled."""
     offset = front.count("\n") if front is not None else 0
     newlines = [m.start() for m in re.finditer("\n", body)]
+
+    def line(pos: int) -> int:
+        return offset + bisect_left(newlines, pos) + 1
+
+    tokens, footnotes = _parse(body)
+    ctx = _Context(base_dir, {key: note.label for key, note in footnotes.items()})
+    note_starts = sorted(note.pos for note in footnotes.values())
     blocks: list[dict] = []
-    if front is not None:
-        blocks.append(_node("front_matter", {"source": front, docschema.LINE_ATTR: 1}))
-    tokens = _parse(body)
     for index, token in enumerate(tokens):
-        if token["type"] == "blank_line":
+        if token["type"] in ("blank_line", "footnotes"):  # footnotes: rebuilt from the definitions
             continue
-        start = token.get("_pos", len(body))  # the footnotes token is added after parsing
+        start = token["_pos"]
         end = tokens[index + 1].get("_pos", len(body)) if index + 1 < len(tokens) else len(body)
         try:
-            node = _block(token)
+            node = _block(ctx, token)
         except _Unmappable:
+            # The slice may run into footnote definitions; those become their own nodes.
+            end = next((pos for pos in note_starts if start < pos < end), end)
             source = body[start:end].rstrip("\n")
             if not source.strip():
                 continue
             node = _node("html_block", {"source": source})
-        node["attrs"][docschema.LINE_ATTR] = offset + bisect_left(newlines, start) + 1
+        node["attrs"][docschema.LINE_ATTR] = line(start)
         blocks.append(node)
-    if not any(block["type"] != "front_matter" for block in blocks):
+    if not blocks:
         blocks.append(_node("paragraph", {docschema.LINE_ATTR: offset + 1}))
+    if front is not None:
+        blocks.insert(0, _node("front_matter", {"source": front, docschema.LINE_ATTR: 1}))
+    for note in sorted(footnotes.values(), key=lambda note: note.pos):
+        attrs = {"label": note.label, "source": note.source, docschema.LINE_ATTR: line(note.pos)}
+        blocks.append(_node("footnote_def", attrs))
     return {"type": "doc", "content": blocks}
 
 
@@ -134,49 +174,109 @@ def _node(kind: str, attrs: dict | None = None, content: list | None = None) -> 
     return node
 
 
-def _block(token: dict) -> dict:
+def _block(ctx: _Context, token: dict) -> dict:
     handler = _BLOCKS.get(token["type"])
     if handler is None:
         raise _Unmappable(token["type"])
-    return handler(token)
+    return handler(ctx, token)
 
 
-def _blocks(tokens: list[dict]) -> list[dict]:
+def _blocks(ctx: _Context, tokens: list[dict]) -> list[dict]:
     """Child blocks without blank lines; an empty container gets one empty paragraph."""
-    nodes = [_block(token) for token in tokens if token["type"] != "blank_line"]
+    nodes = [_block(ctx, token) for token in tokens if token["type"] != "blank_line"]
     return nodes or [_node("paragraph")]
 
 
-def _paragraph(token: dict) -> dict:
-    return _node("paragraph", content=_inline(token["children"]))
+def _paragraph(ctx: _Context, token: dict) -> dict:
+    return _node("paragraph", content=_inline(ctx, token["children"]))
 
 
-def _heading(token: dict) -> dict:
-    return _node("heading", {"level": token["attrs"]["level"]}, _inline(token["children"]))
+def _heading(ctx: _Context, token: dict) -> dict:
+    return _node("heading", {"level": token["attrs"]["level"]}, _inline(ctx, token["children"]))
 
 
-def _block_quote(token: dict) -> dict:
-    return _node("blockquote", content=_blocks(token["children"]))
+def _block_quote(ctx: _Context, token: dict) -> dict:
+    return _node("blockquote", content=_blocks(ctx, token["children"]))
 
 
-def _thematic_break(token: dict) -> dict:
+def _thematic_break(ctx: _Context, token: dict) -> dict:
     return _node("horizontal_rule")
+
+
+def _list(ctx: _Context, token: dict) -> dict:
+    items = [_list_item(ctx, child) for child in token["children"]]
+    if token["attrs"]["ordered"]:
+        return _node("ordered_list", {"start": token["attrs"].get("start", 1), "tight": token["tight"]}, items)
+    return _node("bullet_list", {"tight": token["tight"]}, items)
+
+
+def _list_item(ctx: _Context, token: dict) -> dict:
+    if token["type"] == "task_list_item":
+        checked = token["attrs"]["checked"]
+    elif token["type"] == "list_item":
+        checked = None
+    else:
+        raise _Unmappable(token["type"])
+    return _node("list_item", {"checked": checked}, _blocks(ctx, token["children"]))
+
+
+def _code_block(ctx: _Context, token: dict) -> dict:
+    raw = token["raw"]
+    code = raw[:-1] if raw.endswith("\n") else raw  # the newline before the closing fence
+    info = (token.get("attrs") or {}).get("info") or ""
+    language = info.split(None, 1)[0] if info.strip() else ""
+    content = [{"type": "text", "text": code}] if code else None
+    return _node("code_block", {"language": language, "highlight": highlight_code(code, language)}, content)
+
+
+def _table(ctx: _Context, token: dict) -> dict:
+    rows: list[dict] = []
+    for part in token["children"]:
+        if part["type"] == "table_head":
+            rows.append(_table_row(ctx, part["children"], "table_header"))
+        elif part["type"] == "table_body":
+            rows.extend(_table_row(ctx, row["children"], "table_cell") for row in part["children"])
+        else:
+            raise _Unmappable(part["type"])
+    if any(len(row["content"]) != len(rows[0]["content"]) for row in rows):
+        raise _Unmappable("ragged table")  # mistune never produces one; keep the source if it does
+    return _node("table", content=rows)
+
+
+def _table_row(ctx: _Context, cells: list[dict], kind: str) -> dict:
+    content = []
+    for cell in cells:
+        inline = _inline(ctx, cell["children"])
+        for node in inline:  # GFM: "\|" inside a code span in a table is a literal pipe
+            if node["type"] == "text" and {"type": "code"} in node.get("marks", []):
+                node["text"] = node["text"].replace("\\|", "|")
+        content.append(_node(kind, {"align": cell["attrs"]["align"]}, inline))
+    return _node("table_row", content=content)
+
+
+def _html_block(ctx: _Context, token: dict) -> dict:
+    return _node("html_block", {"source": token["raw"].rstrip("\n")})
 
 
 _BLOCKS = {
     "paragraph": _paragraph,
+    "block_text": _paragraph,  # tight list items
     "heading": _heading,
     "block_quote": _block_quote,
     "thematic_break": _thematic_break,
+    "list": _list,
+    "block_code": _code_block,
+    "table": _table,
+    "block_html": _html_block,
 }
 
 
 # --- inline ---------------------------------------------------------------------
 
 
-def _inline(children: list[dict]) -> list[dict]:
+def _inline(ctx: _Context, children: list[dict]) -> list[dict]:
     nodes: list[dict] = []
-    _walk_inline(children, {}, nodes)
+    _walk_inline(ctx, children, {}, nodes)
     merged: list[dict] = []
     for node in nodes:
         previous = merged[-1] if merged else None
@@ -191,7 +291,7 @@ def _inline(children: list[dict]) -> list[dict]:
     return merged
 
 
-def _walk_inline(children: list[dict], marks: dict[str, dict | None], out: list[dict]) -> None:
+def _walk_inline(ctx: _Context, children: list[dict], marks: dict[str, dict | None], out: list[dict]) -> None:
     """Append inline nodes to `out`; `marks` maps each active mark name to its attrs (or None)."""
     for child in children:
         kind = child["type"]
@@ -204,9 +304,11 @@ def _walk_inline(children: list[dict], marks: dict[str, dict | None], out: list[
         elif kind == "codespan":
             _text(child["raw"], {**marks, "code": None}, out)
         elif kind in _SIMPLE_MARKS:
-            _walk_inline(child["children"], {**marks, _SIMPLE_MARKS[kind]: None}, out)
+            _walk_inline(ctx, child["children"], {**marks, _SIMPLE_MARKS[kind]: None}, out)
         elif kind == "link":
-            _walk_inline(child["children"], _with_link(child["attrs"], marks), out)
+            _walk_inline(ctx, child["children"], _with_link(child["attrs"], marks), out)
+        elif kind in _INLINE:
+            _INLINE[kind](ctx, child, marks, out)
         else:
             raise _Unmappable(kind)
 
@@ -217,6 +319,54 @@ def _with_link(attrs: dict, marks: dict[str, dict | None]) -> dict[str, dict | N
         return marks  # keep the text, drop the link
     title = attrs.get("title")
     return {**marks, "link": {"href": href, "title": None if title is None else _decode(title)}}
+
+
+def _image(ctx: _Context, token: dict, marks: dict[str, dict | None], out: list[dict]) -> None:
+    src = token["attrs"]["url"]
+    alt = _plain_text(token["children"])
+    if not urls.is_safe(src):
+        _text(alt, marks, out)  # keep what a reader would see, drop the image
+        return
+    title = token["attrs"].get("title")
+    attrs = {
+        "src": src,
+        "display_src": urls.resolve(src, ctx.base_dir),
+        "alt": alt,
+        "title": None if title is None else _decode(title),
+    }
+    out.append(_marked({"type": "image", "attrs": attrs}, marks))
+
+
+def _html_inline(ctx: _Context, token: dict, marks: dict[str, dict | None], out: list[dict]) -> None:
+    out.append(_marked({"type": "html_inline", "attrs": {"source": token["raw"]}}, marks))
+
+
+def _footnote_ref(ctx: _Context, token: dict, marks: dict[str, dict | None], out: list[dict]) -> None:
+    label = ctx.labels.get(token["raw"], token["raw"])
+    out.append(_marked({"type": "footnote_ref", "attrs": {"label": label}}, marks))
+
+
+# mistune inline token -> handler(ctx, token, marks, out) for tokens that become inline nodes.
+_INLINE = {
+    "image": _image,
+    "inline_html": _html_inline,
+    "footnote_ref": _footnote_ref,
+}
+
+
+def _plain_text(children: list[dict]) -> str:
+    """Image alt text: the visible text of the inline tokens, without formatting."""
+    parts = []
+    for child in children:
+        if child["type"] == "text":
+            parts.append(_decode(child["raw"]))
+        elif child["type"] in ("softbreak", "linebreak"):
+            parts.append(" ")
+        elif "children" in child:
+            parts.append(_plain_text(child["children"]))
+        else:  # codespan, inline_html, footnote_ref
+            parts.append(child.get("raw", ""))
+    return "".join(parts)
 
 
 def _text(text: str, marks: dict[str, dict | None], out: list[dict]) -> None:

@@ -1,3 +1,7 @@
+import html
+import re
+
+import pytest
 from pygments.formatters import HtmlFormatter
 
 from mdviewer.core import render
@@ -118,3 +122,27 @@ def test_empty_document():
     page, ok = build_page("", "light")
     assert ok
     assert '<article class="markdown-body"></article>' in page
+
+
+# --- highlight_code (Rendered editor code blocks) ------------------------------------------
+
+
+def test_highlight_code_is_class_based_spans_only():
+    markup = render.highlight_code("print(1)", "python")
+    assert '<span class="nb">print</span>' in markup
+    assert "<pre" not in markup and "<div" not in markup and "style=" not in markup
+
+
+def test_highlight_code_keeps_the_text_exactly():
+    code = "\n\nx = '<b>' & 1\n\n"
+    markup = render.highlight_code(code, "python")
+    assert html.unescape(re.sub(r"<[^>]+>", "", markup)) == code
+
+
+def test_highlight_code_language_lookup_ignores_case():
+    assert render.highlight_code("x = 1", "Python") == render.highlight_code("x = 1", "python") != ""
+
+
+@pytest.mark.parametrize("language", ["", "  ", "nosuchlang", "py thon"])
+def test_highlight_code_unknown_language_is_empty(language):
+    assert render.highlight_code("x = 1", language) == ""
