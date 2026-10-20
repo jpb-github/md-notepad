@@ -5,7 +5,7 @@
 > **Status: high-level outline.** Phases and tasks are fixed; each task's
 > bite-sized steps (tests, code, commands) are written out on request, task
 > by task, below its heading. Do not execute a task whose steps are not yet
-> detailed. Detailed so far: Tasks 1-13.
+> detailed. Detailed so far: Tasks 1-14.
 
 **Goal:** Make the rendered view an editable WYSIWYG Markdown editor with a
 format toolbar, keeping the plain-text editor as Source mode.
@@ -135,6 +135,8 @@ class RichView(QWebEngineView):
 MainWindow.RENDERED = "rendered"; MainWindow.SOURCE = "source"
 MainWindow.rich: RichView; act_rendered, act_source  # replace preview, act_preview, act_edit
 def with_buffer(self, fn: Callable[[str], None]) -> None   # pulls only when rich.modified; one at a time
+def _confirm_replace(self, then: Callable[[], None]) -> None   # New/Open/drop/Recent/Close/closeEvent; Task 14
+def on_save(self, *, then=None) -> bool; def on_save_as(self, *, then=None) -> bool   # then() once written
 def _show_mode(self, mode: str, keep_scroll: bool = False) -> bool   # False: Source shown instead
 def run_link_dialog(parent, text: str, url: str) -> tuple[str, str] | str | None   # "remove"
 def run_image_dialog(parent, base_dir: Path | None) -> tuple[str, str] | None
@@ -14025,10 +14027,896 @@ git commit -m "feat: replace preview with editable Rendered mode and Source mode
 
 ### Task 14: Asynchronous lifecycle and error handling
 
-- **Files:** `mdviewer/main_window.py`, `scripts/smoke_ui.py`.
-- **Covers:** New, Open, drop, Open Recent, Close and Exit (`closeEvent` ignore + re-issue) over a Rendered document with unpulled edits: the "Save changes?" prompt continues its action after `with_buffer`'s save instead of cancelling it (Task 13's interim); pull timeout / renderer crash dialog (`Switch to Source` / `Retry`) replacing Task 13's `PULL_FAILED_NOTE`; `rich.crashed` -> `restart()` then `_render(buffer)`. Task 13 already did the `_pending_pull` guard, the external-change policy by dirty flag and the serializer error box.
-- **Test:** smoke per flow using `FAKE` (`answer`, `during_ask`), plus faked timeout and a killed renderer (`os.kill(rich.page().renderProcessPid(), SIGTERM)`, Task 12); table edits and unsafe paste checks from Task 11.
-- **Commit:** `feat: handle save prompts, external changes and editor failures in Rendered mode`
+**Status: steps detailed.** All code below was run before being written into
+this plan (2026-10-20, PySide6 6.12.0 offscreen), on top of Tasks 12-13 as
+committed (`2988bbd`, which adds to Task 13's text: `_load` clears
+`_pending_pull`, and `_save_to` keeps `dirty` when an edit came in after the
+pull's snapshot). Results:
+- The full suite passes (730 tests; no pytest changes), `SMOKE OK` in five
+  runs in a row, `WEB OK`, and the Qt-import `rg` prints nothing.
+- The smoke takes ~23 s.
+- Run against Task 13's `main_window.py`, the new smoke dies with a
+  segmentation fault: nothing restarts the page the drop section kills
+  (Step 2).
+- Twenty-three deliberate breaks of `main_window.py` each make the smoke
+  fail:
+  - Save in the prompt cancels its action (Task 13's interim)
+  - no re-check after the prompt's save
+  - no `_pending_pull` guard in `_confirm_replace`
+  - `then()` runs after a failed save
+  - `closeEvent` never closes again
+  - `closeEvent` calls `close()` from inside the event
+  - New, Open, drop, Open Recent and Close each not continued (five
+    breaks)
+  - a hang ignored
+  - the hang dialog also shown on a crash
+  - Retry not retrying
+  - Switch to Source without a restart
+  - Switch to Source with the wrong text
+  - Retry not the default
+  - Switch to Source not labelled
+  - `crashed` not connected
+  - a crash asks in Source mode
+  - a crash Retry not reloading the buffer
+  - a Source-mode crash not restarting the page
+  - `load_failed` in Source mode not greying Rendered
+
+**Findings that shape this task:**
+
+- **Qt ignores a `close()` made from inside `closeEvent`** (the widget is
+  already closing). When the save prompt is settled before `closeEvent`
+  returns (Source mode, Don't Save, nothing to pull), the event is accepted
+  there; only a continuation that runs later calls `close()` again.
+- **The second `close()` needs no flag:** by then the buffer is clean, so
+  `closeEvent` accepts at once. If an edit came in after the pull's
+  snapshot, it asks again, which is right.
+- **A crash and a timeout both answer a pull with `None`.** A crash answers
+  it from `_forget_page()` with `rich.is_ready` already False, and only then
+  emits `rich.crashed`. A timeout answers with the page still ready.
+  `_pulled` tells them apart this way, so `richview.py` does not change.
+  This also means one dialog per crash, shown from `crashed` (Task 12's
+  hand-off offered the pull callback too; one place is simpler and cannot
+  ask twice).
+- **After a failed save the edits are already pulled:** `rich.modified` is
+  False, `dirty` stays True, and the next Save writes the buffer without a
+  pull.
+- **An unhandled crash is fatal for the smoke:** using the dead page (a
+  drop on its old focus proxy) kills Python with a segmentation fault. The
+  restart in `_on_editor_crashed` is required, not cosmetic.
+- **Task 13's `_on_editor_failed` greys Rendered only when it switches
+  away from it.** A restart after a hang fails while Source is already
+  shown, so it must call `_update_chrome()` itself.
+- **Each `RichView` has its own render process** (three views, three PIDs),
+  so killing one window's renderer leaves the other windows' pages alone.
+- **PySide passes `triggered(bool)`'s argument only to positional
+  parameters:** `on_save(self, *, then=None)` stays a valid slot for
+  `act_save`.
+- **`Path.write_text` writes CRLF on Windows:** the new smoke checks write
+  their files with `write_bytes`, so the saved bytes are exact.
+
+**Design decisions:**
+
+- **`_confirm_replace(then)`** replaces `_ok_to_replace() -> bool` at all six
+  call sites: New, Open, drop, Open Recent, File > Close, and `closeEvent`
+  (window close and Exit).
+  - It calls `then()` at once when the buffer is clean.
+  - Otherwise it asks "Save changes?":
+    - Don't Save calls `then()` at once.
+    - Save calls `on_save(then=lambda: self._confirm_replace(then))`, so an
+      edit that came in during the pull is asked about again.
+    - Cancel does nothing.
+  - It is dropped while a pull is in flight (`_pending_pull`, spec 6.4): a
+    second prompt over a save already under way would race it.
+- **`on_save(*, then=None)` / `on_save_as(*, then=None)`:** `then()` runs
+  once the file is written, at once or after the pull, and never when the
+  save fails or Save As is cancelled. The return values keep Task 13's
+  meaning.
+- **`closeEvent`:** it accepts when `then()` ran before it returned.
+  Otherwise it ignores the event, and the continuation calls `close()`
+  again (spec 6.4).
+- **The stopped-responding dialog** goes through the `ask` seam.
+  - Text: `STOPPED_TEXT` (spec copy), a blank line, then a detail line.
+  - Buttons: `Discard` relabelled `Switch to Source`, and `Retry` (the
+    default). There is no Cancel: the spec offers two choices.
+  - Detail line for a hang (`HUNG_DETAIL`): Retry waits again, and Switch to
+    Source loses the Rendered edits made since the last open, save or switch.
+  - Detail line for a crash (`CRASHED_DETAIL`): those edits are lost either
+    way.
+- **Hang** (a pull answered `None` while the page is still ready):
+  - Retry calls `with_buffer(fn)` again. RichView restored `modified`, so it
+    pulls again, and the pending action (save, switch, close...) goes on
+    when it answers.
+  - Switch to Source calls `_abandon_rendered()`: `rich.restart()` (a hung
+    page may never answer, and the restart clears `modified`), then
+    `_enter_source(_rendered_text)`. `dirty` is kept and the pending action
+    is dropped: the user has not seen the text it would save. If the
+    restarted page sends no `ready()` within 5 s, Task 13's `load_failed`
+    path greys Rendered for the session.
+- **Crash** (`rich.crashed`):
+  - In Source mode the page holds nothing, so it is restarted without a
+    question. The next switch to Rendered loads the buffer.
+  - In Rendered mode the dialog asks:
+    - Retry: `restart()`, then `_show_mode(RENDERED)` loads the buffer into
+      the fresh page.
+    - Switch to Source: `_abandon_rendered()`.
+  - Either way `dirty` is kept and the pending action is dropped.
+- **`PULL_FAILED_NOTE` is removed:** the dialog replaces it.
+
+**Files:**
+- Modify: `mdviewer/main_window.py`
+- Modify: `scripts/smoke_ui.py` (two Task 13 checks updated, new Task 14
+  section)
+
+**Interfaces:**
+- Consumes:
+  - Task 12: `RichView.restart()`, `is_ready`, `modified`, `failed`,
+    the `crashed` signal, `richview.PULL_TIMEOUT_MS` and
+    `READY_TIMEOUT_MS`. A pull that times out or crashes answers `None` and
+    restores `modified`.
+  - Task 13: `with_buffer`, `_pulled`, `_pending_pull`, `_enter_source`,
+    `_show_mode`, `_rendered_text`, `_on_editor_failed`,
+    `EDITOR_FAILED_NOTE`, `OPEN_FAILED_NOTE`. Smoke helpers: `pump`,
+    `page_js`, `fake_ask`, `edit_after_next_snapshot`, `saved_timeout`,
+    `recent_entries`.
+- Produces (later tasks rely on these exact names):
+  - `MainWindow._confirm_replace(then: Callable[[], None]) -> None`: every
+    action that replaces the document goes through it.
+  - `MainWindow.on_save(*, then=None) -> bool` and
+    `MainWindow.on_save_as(*, then=None) -> bool`.
+  - `MainWindow._ask_stopped(detail: str) -> bool`: True for Retry.
+  - `MainWindow._abandon_rendered() -> None` and
+    `MainWindow._on_editor_crashed() -> None`.
+  - Module constants `STOPPED_TEXT`, `HUNG_DETAIL`, `CRASHED_DETAIL`.
+    `PULL_FAILED_NOTE` is gone.
+  - `scripts/smoke_ui.py`: `ANSWERS` (answers for the next asks, in order;
+    a callable runs while its dialog is open), `BOXES` (every box asked),
+    `edit_rendered(win, level)`, `type_rendered(win, text)`,
+    `busy_page(win, ms)`.
+
+- [ ] **Step 1: Write the failing smoke checks**
+
+In `scripts/smoke_ui.py`, make these replacements:
+
+**Task 13 drop section: a crash now asks, and the window restarts the page.**
+Replace:
+
+```python
+os.kill(window.rich.page().renderProcessPid(), signal.SIGTERM)  # a crash replaces the focus proxy
+pump(lambda: window.rich.focusProxy() is None, 5)
+window.rich.restart()
+check(pump(lambda: window.rich.is_ready and window.rich.focusProxy() is not None, 5), "the restarted page is ready")
+```
+
+with:
+
+```python
+ASKED.clear()
+FAKE["answer"] = S.Retry  # the crash dialog (Task 14): reload the page
+os.kill(window.rich.page().renderProcessPid(), signal.SIGTERM)  # a crash replaces the focus proxy
+check(pump(lambda: ASKED, 5), "a crash asks")
+check(pump(lambda: window.rich.is_ready and window.rich.focusProxy() is not None, 5), "the restarted page is ready")
+```
+
+**Task 13 section: the `PULL_FAILED_NOTE` check goes (the Task 14 section
+covers pulls that get no answer); the edit it set up stays for the checks
+after it.** Replace:
+
+```python
+# a Rendered pull that gets no answer saves nothing and keeps the edits
+window.open_file(doc_md)
+window.rich.focus_block(0)
+window.rich.command("setBlock", {"type": "heading", "level": 3})
+pump(lambda: window.dirty, 3)
+saved_timeout = richview.PULL_TIMEOUT_MS
+richview.PULL_TIMEOUT_MS = 300
+window.rich.page().runJavaScript("(() => { const t = Date.now(); while (Date.now() - t < 1200); })()", 0)
+window.statusBar().clearMessage()
+window.on_save()
+check(pump(lambda: window.statusBar().currentMessage() == main_window.PULL_FAILED_NOTE, 3), "a pull with no answer warns")
+richview.PULL_TIMEOUT_MS = saved_timeout
+pump(lambda: False, 1.2)
+check(doc_md.read_text(encoding="utf-8").startswith("# Title") and window.dirty, "nothing was saved; still dirty")
+```
+
+with:
+
+```python
+# a Rendered edit, not yet saved (pulls that get no answer: Task 14 section)
+window.open_file(doc_md)
+window.rich.focus_block(0)
+window.rich.command("setBlock", {"type": "heading", "level": 3})
+pump(lambda: window.dirty, 3)
+saved_timeout = richview.PULL_TIMEOUT_MS
+```
+
+Then insert directly above
+`# --- Later tasks insert their checks directly above this line. ---`:
+
+```python
+# --- WYSIWYG Task 14: save prompts, stopped and crashed editors ------------------
+import stat  # noqa: E402
+
+BOXES: list = []
+ANSWERS: list = []  # answers for the next asks, in order; then FAKE["answer"]
+
+
+def ask_in_turn(box):
+    BOXES.append(box)
+    answer = fake_ask(box)
+    if ANSWERS:
+        answer = ANSWERS.pop(0)
+    return answer() if callable(answer) else answer  # a callable acts "while the dialog is open"
+
+
+main_window.ask = ask_in_turn
+richview.PULL_TIMEOUT_MS = saved_timeout
+STOPPED_HUNG = main_window.STOPPED_TEXT + "\n\n" + main_window.HUNG_DETAIL
+STOPPED_CRASHED = main_window.STOPPED_TEXT + "\n\n" + main_window.CRASHED_DETAIL
+check(main_window.STOPPED_TEXT == "The rendered editor stopped responding.", "the stopped-responding text is the spec's")
+
+
+def edit_rendered(win, level: int) -> None:
+    """A Rendered edit not yet pulled: the first block becomes a heading of `level`."""
+    win.rich.focus_block(0)
+    win.rich.command("setBlock", {"type": "heading", "level": level})
+    check(pump(lambda: win.rich.modified and win.dirty, 3), f"a Rendered edit (H{level}) is pending")
+
+
+def type_rendered(win, text: str) -> None:
+    page_js(win.rich, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText({json.dumps(text)})), 0)")
+    check(pump(lambda: win.rich.modified and win.dirty, 3), f"typing {text!r} in Rendered mode is pending")
+
+
+def busy_page(win, ms: int) -> None:
+    win.rich.page().runJavaScript(f"(() => {{ const t = Date.now(); while (Date.now() - t < {ms}); }})()", 0)
+
+
+# "Save changes?" answered Save: each action goes on once the pulled document is saved
+flow, other = TMP / "flow.md", TMP / "other.md"
+other.write_bytes(b"# Other\n")
+
+
+def save_prompt_flow(label: str, trigger, done) -> None:
+    flow.write_bytes(b"# Flow\n")
+    window.open_file(flow)
+    edit_rendered(window, 2)
+    ASKED.clear()
+    FAKE["answer"] = S.Save
+    trigger()
+    check(ASKED == ["Save changes to flow.md?"], f"{label}: asks to save the Rendered edits ({ASKED})")
+    check(pump(done, 5), f"{label}: goes on once the pulled document is saved")
+    check(flow.read_bytes() == b"## Flow\n", f"{label}: the Rendered edit is saved ({flow.read_bytes()!r})")
+
+
+FAKE["open_path"] = str(other)
+save_prompt_flow("New", window.on_new, lambda: window.loaded_path is None and window.mode == "rendered")
+save_prompt_flow("Open", window.on_open, lambda: window.loaded_path == other)
+save_prompt_flow("Drop", lambda: window._open_dropped([str(other)]), lambda: window.loaded_path == other)
+save_prompt_flow("Open Recent", lambda: window._open_recent(os.path.abspath(other)), lambda: window.loaded_path == other)
+save_prompt_flow("Close", window.on_close, lambda: window.loaded_path is None and window.buffer == "")
+
+# Untitled: Save goes through Save As (cancelling it stops the action), then the action goes on
+FAKE["answer"] = S.Discard
+window.on_new()
+type_rendered(window, "untitled words")
+FAKE["save_path"] = ""
+FAKE["answer"] = S.Save
+window.on_open()
+pump(lambda: False, 0.3)
+check(window.loaded_path is None and window.dirty and window.rich.modified, "Untitled: cancelling Save As stops Open")
+FAKE["save_path"] = str(TMP / "named")
+window.on_open()
+check(pump(lambda: window.loaded_path == other, 5), "Untitled: Open goes on after Save As")
+check((TMP / "named.md").read_bytes() == b"untitled words\n", "Untitled: the Rendered text is saved as named.md")
+
+# Cancel, or a save that fails, stops the action and keeps the edits
+edit_rendered(window, 3)
+FAKE["answer"] = S.Cancel
+window.on_new()
+pump(lambda: False, 0.3)
+check(window.loaded_path == other and window.dirty and window.rich.modified, "Cancel keeps the Rendered edits")
+os.chmod(other, stat.S_IREAD)
+ERRORS.clear()
+ASKED.clear()
+FAKE["answer"] = S.Save
+window.on_new()
+check(pump(lambda: ERRORS, 5) and window.loaded_path == other and window.dirty, "a save that fails stops the action")
+check(len(ASKED) == 1 and len(ERRORS) == 1, f"and asks once ({len(ASKED)} asks)")
+os.chmod(other, stat.S_IREAD | stat.S_IWRITE)
+check(other.read_bytes() == b"# Other\n", "and wrote nothing")
+
+# an edit that lands after the save's snapshot is asked about again
+edit_rendered(window, 2)
+ASKED.clear()
+edit_after_next_snapshot()
+window.on_new()
+check(pump(lambda: window.loaded_path is None, 5) and len(ASKED) == 2, f"an edit made during the save asks again ({ASKED})")
+check(other.read_bytes() == b"## Other\n", "the snapshot was saved")
+
+# while a pull is in flight, a prompt is not even shown
+window.open_file(other)
+edit_rendered(window, 1)
+busy_page(window, 600)
+window.on_save()
+ASKED.clear()
+window.on_new()
+window.close()
+check(not ASKED and window.loaded_path == other and window.isVisible(), "New and close are dropped while a pull is in flight")
+check(pump(lambda: not window._pending_pull and not window.dirty, 5) and other.read_bytes() == b"# Other\n", "the save completes")
+
+# a pull with no answer asks; Retry waits again and the action goes on
+edit_rendered(window, 2)
+richview.PULL_TIMEOUT_MS = 300
+busy_page(window, 1200)
+ASKED.clear()
+BOXES.clear()
+ANSWERS[:] = [S.Save, lambda: (setattr(richview, "PULL_TIMEOUT_MS", saved_timeout), S.Retry)[1]]
+window.on_new()
+check(pump(lambda: len(ASKED) >= 2, 3) and ASKED[1] == STOPPED_HUNG, f"a pull with no answer asks ({ASKED[1:]})")
+box = BOXES[1]
+check(sorted(b.text() for b in box.buttons()) == ["Retry", "Switch to Source"], "the box offers Switch to Source and Retry")
+check(box.defaultButton() is box.button(S.Retry), "Retry is the default")
+check(pump(lambda: window.loaded_path is None, 5), "Retry: New goes on once the page answers")
+check(other.read_bytes() == b"## Other\n" and len(ASKED) == 2, f"the edit is saved ({len(ASKED)} asks)")
+
+# Switch to Source: the last pulled text, still dirty; the page restarts
+window.open_file(other)
+edit_rendered(window, 3)
+richview.PULL_TIMEOUT_MS = 300
+busy_page(window, 1200)
+ASKED.clear()
+ANSWERS[:] = [S.Discard]
+page_loads: list = []
+window.rich.loadStarted.connect(lambda: page_loads.append(1))
+window.act_source.trigger()
+check(pump(lambda: window.mode == "source", 3) and ASKED == [STOPPED_HUNG], "Switch to Source shows Source mode")
+richview.PULL_TIMEOUT_MS = saved_timeout
+check(window.buffer == "## Other\n" and window.editor.document().isModified() and window.dirty,
+      "with the last loaded text, marked unsaved")
+check(other.read_bytes() == b"## Other\n", "nothing was saved")
+check(page_loads and pump(lambda: window.rich.is_ready, 6) and not window.rich.modified, "the abandoned page restarts")
+window.act_rendered.trigger()
+check(window.mode == "rendered" and pump(lambda: page_js(window.rich, "document.querySelector('#editor h2')?.textContent") == "Other", 3),
+      "switching back shows the Source text")
+
+# a crash in Rendered mode asks; Retry reloads the last loaded text into a fresh page
+CRASHES: list = []
+window.rich.crashed.connect(lambda: CRASHES.append(1))
+FAKE["answer"] = S.Discard
+window.open_file(other)
+edit_rendered(window, 1)
+ASKED.clear()
+ANSWERS[:] = [S.Retry]
+os.kill(window.rich.page().renderProcessPid(), signal.SIGTERM)
+check(pump(lambda: ASKED, 5) and ASKED == [STOPPED_CRASHED], f"a crash in Rendered mode asks ({ASKED})")
+check(pump(lambda: window.rich.is_ready, 5) and window.mode == "rendered", "Retry restarts the page in Rendered mode")
+check(pump(lambda: page_js(window.rich, "document.querySelector('#editor h2')?.textContent") == "Other", 3),
+      "the restarted page shows the last loaded text")
+check(window.dirty and not window.rich.modified, "the lost edit leaves the buffer marked unsaved")
+edit_rendered(window, 3)
+window.on_save()
+check(pump(lambda: not window.dirty, 5) and other.read_bytes() == b"### Other\n", "the restarted page edits and saves")
+
+# a crash during a pull asks once; Switch to Source keeps the last pulled text
+edit_rendered(window, 1)
+busy_page(window, 3000)
+ASKED.clear()
+ANSWERS[:] = [S.Discard]
+window.on_save()
+os.kill(window.rich.page().renderProcessPid(), signal.SIGTERM)
+check(pump(lambda: window.mode == "source", 5) and ASKED == [STOPPED_CRASHED], f"a crash during a pull asks once ({ASKED})")
+check(window.buffer == "### Other\n" and other.read_bytes() == b"### Other\n", "Switch to Source: the last pulled text, nothing saved")
+check(pump(lambda: window.rich.is_ready, 5), "the page restarts")
+
+# a crash in Source mode restarts the page without asking
+CRASHES.clear()
+ASKED.clear()
+os.kill(window.rich.page().renderProcessPid(), signal.SIGTERM)
+check(pump(lambda: CRASHES and window.rich.is_ready, 5) and not ASKED and window.mode == "source",
+      "a crash in Source mode restarts the page quietly")
+window.act_rendered.trigger()
+check(pump(lambda: page_js(window.rich, "document.querySelector('#editor h3')?.textContent") == "Other", 3),
+      "switching to Rendered after it shows the document")
+
+# window close and Exit: the save finishes after the pull, then the window closes
+cw = main_window.MainWindow({"theme": "light", "window": None, "preview_zoom": 1.0})
+cw.show()
+check(pump(lambda: cw.rich.is_ready, 5), "a second window's page is ready")
+exit_md = TMP / "exit.md"
+for label, close, level in [("closing the window", cw.close, 2), ("File > Exit", cw.act_exit.trigger, 3)]:
+    exit_md.write_bytes(b"# Exit\n")
+    cw.show()
+    cw.open_file(exit_md)
+    edit_rendered(cw, level)
+    ASKED.clear()
+    ANSWERS[:] = [S.Save]
+    close()
+    check(cw.isVisible() and ASKED == ["Save changes to exit.md?"], f"{label}: asks, and waits for the pull")
+    check(pump(lambda: not cw.isVisible(), 5), f"{label}: closes once the document is saved")
+    check(exit_md.read_bytes() == b"#" * level + b" Exit\n", f"{label}: the Rendered edit is saved")
+cw.show()
+cw.open_file(exit_md)
+edit_rendered(cw, 1)
+ANSWERS[:] = [S.Discard]
+check(cw.close() and not cw.isVisible(), "Don't Save closes at once")
+check(exit_md.read_bytes() == b"### Exit\n", "and saves nothing")
+
+# a page that stays hung: Switch to Source works, and Rendered is greyed once the restart times out
+cw.show()
+cw.open_file(exit_md)
+edit_rendered(cw, 2)
+saved_ready = richview.READY_TIMEOUT_MS
+richview.PULL_TIMEOUT_MS, richview.READY_TIMEOUT_MS = 300, 300
+busy_page(cw, 2000)
+ANSWERS[:] = [S.Discard]
+cw.on_save()
+check(pump(lambda: cw.rich.failed, 3) and cw.mode == "source" and cw.buffer == "### Exit\n",
+      "a page that stays hung: Source mode with the last loaded text")
+check(not cw.act_rendered.isEnabled() and cw.statusBar().currentMessage() == main_window.EDITOR_FAILED_NOTE,
+      "Rendered is greyed with a warning")
+richview.PULL_TIMEOUT_MS, richview.READY_TIMEOUT_MS = saved_timeout, saved_ready
+cw.hide()
+
+# table edits and unsafe paste reach the saved file through the window
+FAKE["answer"] = S.Discard
+table_md = TMP / "table.md"
+table_md.write_bytes(b"intro\n")
+window.open_file(table_md)
+page_js(window.rich, "(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.setSelection("
+                     "window.mdEditor.view.state.selection.constructor.atEnd(window.mdEditor.view.state.doc))), 0)")
+window.rich.command("insertTable", {"rows": 2, "cols": 2})
+pump(lambda: window.dirty, 3)
+page_js(window.rich, "(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('h ')), 0)")
+window.rich.command("addRowAfter")
+page_js(window.rich, """(window.mdEditor.view.pasteHTML('<p><b>bold</b> <a href="javascript:alert(1)">bad</a> '
+  + '<a href="https://ok.example/">ok</a><script>parent.pasted = 1</script></p>'), 0)""")
+window.on_save()
+check(pump(lambda: not window.dirty, 5), "Save after table edits and a paste")
+saved_table = table_md.read_bytes().decode("utf-8")
+check(saved_table == "intro\n\n| h **bold** bad [ok](https://ok.example/) |  |\n| --- | --- |\n|  |  |\n|  |  |\n",
+      f"the saved file has the table, and the paste without its javascript: link or script ({saved_table!r})")
+check(page_js(window.rich, "window.pasted === undefined") is True, "the pasted script never ran")
+```
+
+- [ ] **Step 2: Run the smoke to verify it fails**
+
+Run: `.venv/Scripts/python scripts/smoke_ui.py; echo "exit $?"`
+Expected: no `SMOKE OK` and no `SMOKE FAILED`. The process dies with a
+segmentation fault (`exit 139` in Git Bash), because Task 13 never restarts
+the page that the drop section kills. Without that crash the smoke would stop
+at `AttributeError: module 'mdviewer.main_window' has no attribute
+'STOPPED_TEXT'`.
+
+- [ ] **Step 3: Continue prompts after async saves and handle a stopped editor in `mdviewer/main_window.py`**
+
+Make these replacements, in file order:
+
+**Module constants.** Replace:
+
+```python
+EDITOR_FAILED_NOTE = "Rendered mode is unavailable: the rendered editor did not start."
+PULL_FAILED_NOTE = "The rendered editor did not answer; nothing was saved or switched."
+```
+
+with:
+
+```python
+EDITOR_FAILED_NOTE = "Rendered mode is unavailable: the rendered editor did not start."
+STOPPED_TEXT = "The rendered editor stopped responding."  # spec section 7
+HUNG_DETAIL = (
+    "Retry waits for it again. Switch to Source continues with the document as it was last "
+    "opened, saved or switched between modes: Rendered edits made since then are lost."
+)
+CRASHED_DETAIL = (
+    "Rendered edits made since the document was last opened, saved or switched between modes "
+    "are lost. Retry reloads the rendered editor; Switch to Source continues in Source mode."
+)
+```
+
+**Crash signal.** Replace:
+
+```python
+        self.rich.load_failed.connect(self._on_editor_failed)
+```
+
+with:
+
+```python
+        self.rich.load_failed.connect(self._on_editor_failed)
+        self.rich.crashed.connect(self._on_editor_crashed)
+```
+
+**New, Open, Save, Save As, Close.** Replace:
+
+```python
+    def on_new(self) -> None:
+        if not self._ok_to_replace():
+            return
+        self._load(None, b"")
+        self._show_mode(self.RENDERED)
+
+    def on_open(self) -> None:
+        if not self._ok_to_replace():
+            return
+        path = pick_open_path(self)
+        if path:
+            self.open_file(path)
+
+    def on_save(self) -> bool:
+        """True when the file was written before returning. In Rendered mode with edits not
+        yet pulled, the save finishes after the pull and this returns False."""
+        if self.loaded_path is None:
+            return self.on_save_as()
+        return self._save_when_ready(self.loaded_path)
+
+    def on_save_as(self) -> bool:
+        start = str(self.loaded_path) if self.loaded_path else "Untitled.md"
+        path = pick_save_path(self, start)
+        if not path:
+            return False
+        target = Path(path)
+        if not target.suffix:
+            target = target.with_suffix(".md")
+        return self._save_when_ready(target)
+
+    def on_close(self) -> None:
+        if not self._ok_to_replace():
+            return
+        self._load(None, b"")
+        self._show_mode(self.RENDERED)
+
+    def _save_when_ready(self, path: Path) -> bool:
+        saved: list[bool] = []
+        self.with_buffer(lambda _text: saved.append(self._save_to(path)))
+        return saved == [True]
+```
+
+with:
+
+```python
+    def on_new(self) -> None:
+        self._confirm_replace(self._new_document)
+
+    def _new_document(self) -> None:
+        self._load(None, b"")
+        self._show_mode(self.RENDERED)
+
+    def on_open(self) -> None:
+        self._confirm_replace(self._pick_and_open)
+
+    def _pick_and_open(self) -> None:
+        path = pick_open_path(self)
+        if path:
+            self.open_file(path)
+
+    def on_save(self, *, then: Callable[[], None] | None = None) -> bool:
+        """True when the file was written before returning. In Rendered mode with edits not
+        yet pulled, the save finishes after the pull and this returns False. then() runs once
+        the file is written, now or after the pull; never when the save fails."""
+        if self.loaded_path is None:
+            return self.on_save_as(then=then)
+        return self._save_when_ready(self.loaded_path, then)
+
+    def on_save_as(self, *, then: Callable[[], None] | None = None) -> bool:
+        start = str(self.loaded_path) if self.loaded_path else "Untitled.md"
+        path = pick_save_path(self, start)
+        if not path:
+            return False
+        target = Path(path)
+        if not target.suffix:
+            target = target.with_suffix(".md")
+        return self._save_when_ready(target, then)
+
+    def on_close(self) -> None:
+        self._confirm_replace(self._new_document)
+
+    def _save_when_ready(self, path: Path, then: Callable[[], None] | None = None) -> bool:
+        saved: list[bool] = []
+
+        def save(_text: str) -> None:
+            saved.append(self._save_to(path))
+            if saved[0] and then is not None:
+                then()
+
+        self.with_buffer(save)
+        return saved == [True]
+```
+
+**`_prompt_save` docstring.** Replace:
+
+```python
+    def _prompt_save(self) -> str:
+        """Ask 'Save changes to <name>?'. Returns 'save' (saved OK), 'discard' or 'cancel'."""
+```
+
+with:
+
+```python
+    def _prompt_save(self, then: Callable[[], None]) -> None:
+        """Ask 'Save changes to <name>?'. Don't Save: then() at once. Save: then() once the file
+        is written (after a Rendered pull), asking again if an edit came in meanwhile."""
+```
+
+**`_prompt_save` answers and `_confirm_replace`.** Replace:
+
+```python
+        answer = ask(box)
+        if answer == buttons.Save:
+            return "save" if self.on_save() else "cancel"
+        if answer == buttons.Discard:
+            return "discard"
+        return "cancel"
+
+    def _ok_to_replace(self) -> bool:
+        """True when the buffer may be replaced: it is clean, was saved, or was discarded."""
+        return not self.dirty or self._prompt_save() != "cancel"
+```
+
+with:
+
+```python
+        answer = ask(box)
+        if answer == buttons.Save:
+            self.on_save(then=lambda: self._confirm_replace(then))
+        elif answer == buttons.Discard:
+            then()
+
+    def _confirm_replace(self, then: Callable[[], None]) -> None:
+        """then() once the buffer may be replaced: it is clean, was saved or was discarded.
+        Nothing on Cancel or a failed save; dropped while a pull is in flight (spec 6.4)."""
+        if self._pending_pull:
+            return
+        if self.dirty:
+            self._prompt_save(then)
+        else:
+            then()
+```
+
+**A pull with no answer.** Replace:
+
+```python
+        self._pending_pull = False
+        if doc is None:
+            self._warn(PULL_FAILED_NOTE)  # Task 14: the stopped-responding dialog
+            return
+```
+
+with:
+
+```python
+        self._pending_pull = False
+        if doc is None:
+            # A crash answers pulls before rich.crashed, with the page no longer ready:
+            # _on_editor_crashed asks then. Otherwise the page hangs (spec section 7).
+            if self.rich.is_ready:
+                if self._ask_stopped(HUNG_DETAIL):
+                    self.with_buffer(fn)
+                else:
+                    self._abandon_rendered()
+            return
+```
+
+**The dialog and Switch to Source.** Replace:
+
+```python
+    def _warn(self, text: str) -> None:
+```
+
+with:
+
+```python
+    def _ask_stopped(self, detail: str) -> bool:
+        """Spec section 7: the editor stopped responding. True for Retry, False for Switch to Source."""
+        buttons = QMessageBox.StandardButton
+        box = QMessageBox(
+            QMessageBox.Icon.Warning, APP_NAME, f"{STOPPED_TEXT}\n\n{detail}",
+            buttons.Discard | buttons.Retry, self,
+        )
+        box.button(buttons.Discard).setText("Switch to Source")
+        box.setDefaultButton(buttons.Retry)
+        return ask(box) == buttons.Retry
+
+    def _abandon_rendered(self) -> None:
+        """Switch to Source with the text last loaded into the page or pulled from it. The page
+        is restarted: its later edits are dropped, and a hung page may never answer again."""
+        self.rich.restart()  # also clears rich.modified, so _enter_source does not pull
+        self._enter_source(self._rendered_text)
+
+    def _warn(self, text: str) -> None:
+```
+
+**Crash handler.** Replace:
+
+```python
+    def _on_editor_failed(self) -> None:
+```
+
+with:
+
+```python
+    def _on_editor_crashed(self) -> None:
+        """The page's process died with its unpulled edits. Source mode restarts it quietly;
+        Rendered mode asks, then reloads the buffer (Retry) or switches to Source (spec 7)."""
+        if self.mode == self.RENDERED and not self._ask_stopped(CRASHED_DETAIL):
+            self._abandon_rendered()
+            return
+        self.rich.restart()
+        if self.mode == self.RENDERED and not self._show_mode(self.RENDERED):
+            self._warn(OPEN_FAILED_NOTE)
+
+    def _on_editor_failed(self) -> None:
+```
+
+**`_on_editor_failed` greys Rendered from Source mode too** (Task 13 only
+updated the menu when it switched away from Rendered; a restart after a hang
+fails while Source is shown). Replace:
+
+```python
+        if self.mode == self.RENDERED:
+            self._show_mode(self.SOURCE)
+        self._warn(EDITOR_FAILED_NOTE)
+```
+
+with:
+
+```python
+        if self.mode == self.RENDERED:
+            self._show_mode(self.SOURCE)
+        self._update_chrome()  # greys Rendered, also when Source was already shown (a restart after a hang)
+        self._warn(EDITOR_FAILED_NOTE)
+```
+
+**Drops.** Replace:
+
+```python
+    def _open_dropped(self, paths: list[str]) -> None:
+        if paths and self._ok_to_replace():
+            self.open_file(paths[0])
+```
+
+with:
+
+```python
+    def _open_dropped(self, paths: list[str]) -> None:
+        if paths:
+            self._confirm_replace(lambda: self.open_file(paths[0]))
+```
+
+**`closeEvent`.** Replace:
+
+```python
+    def closeEvent(self, event) -> None:
+        if self._ok_to_replace():
+            event.accept()
+        else:
+            event.ignore()
+```
+
+with:
+
+```python
+    def closeEvent(self, event) -> None:
+        """Asks about unsaved changes. When Save needs a Rendered pull, this close is refused and
+        close() is called again once the file is written (spec 6.4): the buffer is clean then."""
+        inside = True
+        allowed: list[bool] = []
+
+        def allow() -> None:
+            if inside:
+                allowed.append(True)
+            else:
+                self.close()  # Qt ignores a close() made from inside closeEvent; this one is not
+
+        self._confirm_replace(allow)
+        inside = False
+        event.setAccepted(bool(allowed))
+```
+
+**Open Recent.** Replace:
+
+```python
+    def _open_recent(self, path: str) -> None:
+        if not self._ok_to_replace():
+            return
+        if not self.open_file(path) and not Path(path).exists():
+            self._forget_recent(path)  # the file is gone; don't keep offering it
+```
+
+with:
+
+```python
+    def _open_recent(self, path: str) -> None:
+        self._confirm_replace(lambda: self._open_recent_now(path))
+
+    def _open_recent_now(self, path: str) -> None:
+        if not self.open_file(path) and not Path(path).exists():
+            self._forget_recent(path)  # the file is gone; don't keep offering it
+```
+
+- [ ] **Step 4: Run the smoke to verify it passes**
+
+Run:
+
+```bash
+.venv/Scripts/python scripts/smoke_ui.py
+rg -n "_ok_to_replace|PULL_FAILED_NOTE" mdviewer scripts
+```
+
+Expected: `SMOKE OK`; the `rg` line prints nothing.
+
+- [ ] **Step 5: Run the full verification**
+
+Run:
+
+```bash
+.venv/Scripts/python -m pytest -v
+.venv/Scripts/python scripts/smoke_ui.py
+.venv/Scripts/python scripts/check_web.py
+rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests
+```
+
+Expected: all tests pass (730 at the time of writing); `SMOKE OK`;
+`WEB OK`; the `rg` line prints nothing.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add mdviewer/main_window.py scripts/smoke_ui.py
+git commit -m "feat: continue save prompts after Rendered pulls and handle a stopped editor"
+```
+
+**Review Focus:**
+
+- **Closing with unsaved Rendered edits** (title-bar X, Alt+F4, File > Exit)
+  is the flow users meet most.
+  - Save writes the pulled document, then the window closes.
+  - Don't Save closes at once.
+  - Further close clicks while the pull is in flight do nothing.
+  - Pinned by the `cw` loop and by `New and close are dropped while a pull
+    is in flight`.
+- **An edit typed while the prompt's save is pulling** must not be closed or
+  replaced over. The continuation runs `_confirm_replace` again, so it asks
+  again. Pinned by `an edit made during the save asks again`.
+- **A save that cannot finish stops the action and keeps the edits:** a
+  read-only file, a cancelled Save As on Untitled, or a serializer error
+  (Task 13's box; same `_pulled` path). It asks exactly once: a `then()`
+  run after a failed save would prompt again forever (that break ends in a
+  `RecursionError` that Qt swallows inside the pull callback, hence the
+  `asks once` check).
+- **A page that stays hung:**
+  - Switch to Source keeps the last loaded or pulled text.
+  - If the restarted page sends no `ready()` in 5 s, `load_failed` greys
+    Rendered for the session, with `EDITOR_FAILED_NOTE`. Pinned on `cw`
+    with short timeouts.
+- **A crash during a pull asks once, not twice:** `_pulled` stays silent
+  when the page is no longer ready. A crash in Source mode asks nothing.
+  An unhandled crash leaves a dead page, and the next drop on it kills the
+  process (Step 2).
+- **Accepted behaviors:**
+  - After Switch to Source, or a crash, `dirty` stays True even when the
+    remaining text equals the file on disk. A later prompt may ask about it.
+  - The pending action (save, switch, open, close) is dropped after Switch
+    to Source and after any crash. The user repeats it with the text in
+    front of them.
+  - Each Retry on a hang waits a full pull timeout again. A page that
+    crashes on every load asks after every crash; Switch to Source ends it.
+  - The stopped-responding box has no Cancel and no Escape answer: the spec
+    offers two choices.
+- **Handed on:**
+  - **Task 15:** the toolbar's visibility hooks into `_update_chrome`,
+    which now also runs on `load_failed` in Source mode.
+  - **Task 16:** `openLink` still needs `open_external`.
+  - **Task 17:** the Edit menu is still Source-only apart from Copy.
+  - **Task 19:** add to the README manual checklist:
+    - close the real app with unsaved Rendered edits, answer Save: the
+      file is written, then the app exits and saves its settings;
+    - end a `QtWebEngineProcess.exe` in Task Manager while editing: the
+      dialog appears, and Retry brings the page back.
+- **No regressions:**
+  - The v1 close checks in Source mode (Cancel keeps the window, Don't Save
+    accepts the event) still settle inside `closeEvent`.
+  - `on_save()` / `on_save_as()` return what they did in Task 13 and still
+    work as `triggered` slots.
 
 ### Task 15: Format toolbar
 
