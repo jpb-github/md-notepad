@@ -29,6 +29,7 @@ def default_settings() -> dict:
         "preview_zoom": 1.0,
         "recent_files": [],
         "editor_font": dict(DEFAULT_FONT),
+        "show_toolbar": True,
     }
 
 
@@ -91,6 +92,8 @@ def _clean(data) -> dict:
         result["preview_zoom"] = float(min(max(zoom, _ZOOM_MIN), _ZOOM_MAX))
     result["recent_files"] = _clean_recent(data.get("recent_files"))
     result["editor_font"] = _clean_font(data.get("editor_font"))
+    if isinstance(data.get("show_toolbar"), bool):
+        result["show_toolbar"] = data["show_toolbar"]
     return result
 
 

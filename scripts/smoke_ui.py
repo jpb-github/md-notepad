@@ -366,6 +366,7 @@ data = {
     "preview_zoom": 1.5,
     "recent_files": [str(TMP / "r1.md"), str(TMP / "r2.md")],
     "editor_font": {"family": "Courier New", "size": 14},
+    "show_toolbar": False,
 }
 restored = main_window.MainWindow(data)
 check(restored.settings_snapshot() == data, "settings snapshot round-trips constructor data")
@@ -1626,6 +1627,146 @@ check(pump(lambda: window.dirty, 3), "typing a language in a code block marks th
 window.on_save()
 check(pump(lambda: not window.dirty, 5) and lang_md.read_bytes() == b"```go\nx\n```\n",
       f"Save takes a language that was typed but not committed ({lang_md.read_bytes()!r})")
+
+# --- WYSIWYG Task 15: format toolbar ----------------------------------------------
+from PySide6.QtWidgets import QToolBar  # noqa: E402
+
+tb = window.toolbar
+FAKE["answer"] = S.Discard
+window.on_new()
+check(isinstance(tb, QToolBar) and tb.isVisible(), "the format toolbar shows in Rendered mode")
+check(window.toolBarArea(tb) == Qt.ToolBarArea.TopToolBarArea and not tb.isMovable() and not tb.isFloatable(),
+      "one fixed toolbar row under the menu bar")
+layout = ["combo" if tb.widgetForAction(a) is tb.block_box else "|" if a.isSeparator() else a.text() for a in tb.actions()]
+check(layout == ["combo", "|", "Bold", "Italic", "Strikethrough", "Inline code", "Link", "|",
+                 "Bulleted list", "Numbered list", "Task list", "|",
+                 "Quote", "Code block", "Table", "Image", "Horizontal rule", "|", "Clear formatting"],
+      f"the toolbar layout is the spec's ({layout})")
+check([a.toolTip() for a in tb.buttons.values()] == [
+    "Bold (Ctrl+B)", "Italic (Ctrl+I)", "Strikethrough (Ctrl+Shift+X)", "Inline code (Ctrl+`)", "Link (Ctrl+K)",
+    "Bulleted list (Ctrl+Shift+8)", "Numbered list (Ctrl+Shift+7)", "Task list (Ctrl+Shift+9)",
+    "Quote (Ctrl+Shift+.)", "Code block", "Table", "Image", "Horizontal rule", "Clear formatting (Ctrl+Space)",
+], "button tooltips name their shortcuts")
+check(all(a.shortcut().isEmpty() for a in tb.buttons.values()), "the shortcuts stay with the page's keymap")
+box = tb.block_box
+
+
+def pick_block(number: int) -> None:
+    """What a user's pick in the block combo does: the combo moves, then activated(number)."""
+    box.setCurrentIndex(number)
+    box.activated.emit(number)
+
+
+check([box.itemText(i) for i in range(box.count())] == ["Normal", *(f"Heading {n}" for n in range(1, 7)), "Code block"],
+      "the block combo offers Normal, Heading 1-6 and Code block")
+check([box.itemData(i, Qt.ItemDataRole.ToolTipRole) for i in range(box.count())]
+      == ["Normal (Ctrl+Alt+0)", *(f"Heading {n} (Ctrl+Alt+{n})" for n in range(1, 7)), "Code block"],
+      "block combo tooltips name their shortcuts")
+check(all(not a.icon().isNull() for a in tb.buttons.values()), "every button has a glyph icon")
+check([a.isCheckable() for a in tb.buttons.values()] == [True] * 5 + [False] * 9, "mark and link buttons are checkable")
+popup = window.createPopupMenu()
+check(popup is None or popup.isEmpty(), "no context menu hides the toolbar behind View > Toolbar's back")
+
+# View > Toolbar, Source mode and the saved choice
+window.act_source.trigger()
+check(window.mode == "source" and not tb.isVisible(), "the toolbar hides in Source mode")
+window.act_rendered.trigger()
+check(tb.isVisible(), "and comes back in Rendered mode")
+check(window.act_toolbar in window.menu_view.actions() and window.act_toolbar.isChecked(), "View > Toolbar is on by default")
+window.act_toolbar.trigger()
+check(not tb.isVisible() and window.settings_snapshot()["show_toolbar"] is False, "View > Toolbar hides it; the choice is saved")
+window.act_source.trigger()
+window.act_rendered.trigger()
+check(not tb.isVisible(), "a hidden toolbar stays hidden across mode switches")
+window.act_toolbar.trigger()
+check(tb.isVisible() and window.settings_snapshot()["show_toolbar"] is True, "View > Toolbar shows it again")
+check(not fw.toolbar.isVisibleTo(fw) and fw.mode == "source", "a page that failed leaves the toolbar hidden")
+check(not restored.act_toolbar.isChecked() and not restored.toolbar.isVisibleTo(restored),
+      "a saved hidden toolbar starts hidden")
+
+# every control sends its command; nothing runs while the page reports nothing
+SENT: list = []
+window.rich.command = lambda name, args=None: SENT.append((name, args))
+tb.update_state({})
+check(not box.isEnabled() and not any(a.isEnabled() for a in tb.buttons.values()), "with no selection state every control is disabled")
+tb.buttons["bold"].trigger()
+check(SENT == [], "a disabled button sends nothing")
+CAN_ALL = {name: True for name in ("toggleMark", "linkDialog", "toggleList", "toggleQuote", "insertCodeBlock",
+                                   "insertTable", "imageDialog", "insertRule", "clearFormatting", "setBlock")}
+tb.update_state({"marks": [], "block": {"type": "paragraph"}, "can": CAN_ALL})
+for act in tb.buttons.values():
+    act.trigger()
+check(not any(a.isChecked() for a in tb.buttons.values()), "a click alone checks nothing: the page's report does")
+for number in range(box.count()):
+    pick_block(number)
+del window.rich.command
+check(SENT == [
+    ("toggleMark", "strong"), ("toggleMark", "em"), ("toggleMark", "strike"), ("toggleMark", "code"), ("linkDialog", None),
+    ("toggleList", "bullet"), ("toggleList", "ordered"), ("toggleList", "task"),
+    ("toggleQuote", None), ("insertCodeBlock", None), ("insertTable", {"rows": 3, "cols": 3}), ("imageDialog", None),
+    ("insertRule", None), ("clearFormatting", None),
+    ("setBlock", {"type": "paragraph"}), *(("setBlock", {"type": "heading", "level": n}) for n in range(1, 7)),
+    ("setBlock", {"type": "code_block"}),
+], f"each control sends its command ({SENT})")
+check(box.currentText() == "Normal", "picking a block type leaves the combo to the page's report")
+
+# the real page: commands apply, the controls follow the selection, Save writes them
+tool_md = TMP / "toolbar.md"
+tool_md.write_bytes(b"alpha\n\nbeta\n\n---\n")
+window.open_file(tool_md)
+check(pump(lambda: box.isEnabled() and tb.buttons["bold"].isEnabled() and box.currentText() == "Normal", 3),
+      "the page's selection state enables the toolbar")
+window.rich.focus_block(0)
+pick_block(2)
+check(pump(lambda: box.currentText() == "Heading 2", 3), "Heading 2 from the combo; the combo follows")
+window.rich.focus_block(1)
+page_js(window.rich, "(() => { const v = window.mdEditor.view; const s = v.state.selection;"
+                     " v.dispatch(v.state.tr.setSelection(s.constructor.create(v.state.doc, s.from, s.from + 4))); return 0; })()")
+check(pump(lambda: box.currentText() == "Normal" and not tb.buttons["bold"].isChecked(), 3), "a plain selection")
+tb.buttons["bold"].trigger()
+check(pump(lambda: tb.buttons["bold"].isChecked(), 3), "Bold applies and is checked")
+tb.buttons["bullets"].trigger()
+check(pump(lambda: window.dirty, 3), "the toolbar edit marks the document dirty")
+window.rich.focus_block(2)
+check(pump(lambda: box.currentIndex() == -1 and box.currentText() == "", 3), "a selected rule shows no block type")
+window.rich.focus_block(1)
+check(pump(lambda: tb.buttons["table"].isEnabled(), 3), "Table applies in a list")
+tb.buttons["table"].trigger()
+pump(lambda: False, 0.2)
+window.on_save()
+check(pump(lambda: not window.dirty, 5), "Save after toolbar edits")
+saved_tool = tool_md.read_bytes().decode("utf-8")
+check(saved_tool == "## alpha\n\n- **beta**\n\n|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |\n\n---\n",
+      f"the saved file has the toolbar's heading, bold, list and table ({saved_tool!r})")
+tb.buttons["code_block"].trigger()
+check(pump(lambda: box.currentText() == "Code block", 3), "{} inserts a code block; the combo shows it")
+check(not tb.buttons["bold"].isEnabled() and not tb.buttons["link"].isEnabled() and box.isEnabled(),
+      "marks and Link are disabled in a code block")
+
+# the shortcuts work with the toolbar hidden (the page's keymap)
+window.act_toolbar.trigger()
+window.rich.focus_block(0)
+pump(lambda: False, 0.2)
+QTest.keyClick(window.rich.focusProxy(), Qt.Key.Key_B, Qt.KeyboardModifier.ControlModifier)
+check(pump(lambda: "strong" in (page_js(window.rich, "window.mdEditor.selectionState().marks") or []), 3),
+      "Ctrl+B works with the toolbar hidden")
+window.act_toolbar.trigger()
+
+
+# glyphs follow the theme's text color
+def glyph_lightness(act) -> int:
+    image = act.icon().pixmap(16, 16).toImage()
+    pixels = [image.pixelColor(x, y) for x in range(16) for y in range(16)]
+    return max(pixels, key=lambda c: c.alpha()).lightness()
+
+
+check(glyph_lightness(tb.buttons["bold"]) < 100, "light theme: dark glyphs")
+choose_theme("dark")
+check(pump(lambda: glyph_lightness(tb.buttons["bold"]) > 150, 2), "dark theme: light glyphs")
+choose_theme("system")
+check(pump(lambda: glyph_lightness(tb.buttons["bold"]) < 100, 2), "back to light glyphs")
+FAKE["answer"] = S.Discard
+window.on_new()
 
 # --- Later tasks insert their checks directly above this line. ---
 

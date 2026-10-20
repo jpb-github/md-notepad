@@ -10,6 +10,7 @@ def test_default_settings():
         "preview_zoom": 1.0,
         "recent_files": [],
         "editor_font": {"family": "Consolas", "size": 11},
+        "show_toolbar": True,
     }
 
 
@@ -42,6 +43,7 @@ def test_save_and_load_roundtrip(tmp_path):
         "preview_zoom": 1.5,
         "recent_files": ["C:/docs/a.md", "C:/docs/b.md"],
         "editor_font": {"family": "Cascadia Mono", "size": 14},
+        "show_toolbar": False,
     }
     settings.save(path, data)
     assert settings.load(path) == data
@@ -93,6 +95,19 @@ def test_load_unknown_keys_dropped(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text('{"theme": "light", "bogus": 1}', encoding="utf-8")
     assert settings.load(path) == {**settings.default_settings(), "theme": "light"}
+
+
+def test_load_show_toolbar_false(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text('{"show_toolbar": false}', encoding="utf-8")
+    assert settings.load(path)["show_toolbar"] is False
+
+
+def test_load_show_toolbar_must_be_a_bool(tmp_path):
+    for raw in ('"no"', "0", "1", "null", "[]"):
+        path = tmp_path / "settings.json"
+        path.write_text('{"show_toolbar": %s}' % raw, encoding="utf-8")
+        assert settings.load(path)["show_toolbar"] is True
 
 
 def _font(tmp_path, raw):

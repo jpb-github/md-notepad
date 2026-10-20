@@ -28,6 +28,7 @@ from mdviewer.editor import MarkdownEditor
 from mdviewer.findbar import FindBar
 from mdviewer.preferences import PreferencesDialog
 from mdviewer.richview import RichView
+from mdviewer.toolbar import FormatToolbar
 
 APP_NAME = "MD Viewer"
 ZOOM_MIN = 0.25
@@ -206,6 +207,7 @@ class MainWindow(QMainWindow):
         self._theme_choice = data.get("theme") or "system"
         self._recent: list[str] = list(data.get("recent_files") or [])
         self._editor_font = {**settings.DEFAULT_FONT, **(data.get("editor_font") or {})}
+        self._show_toolbar = data.get("show_toolbar", True) is not False
         self._effective_theme = "light"  # Task 13 makes this follow System/Light/Dark
         # Rendered mode: the buffer is the text last loaded into the editor page or pulled
         # from it; _block_lines are its top-level blocks' source lines (None: not parsed yet).
@@ -241,6 +243,11 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.rich)  # index 0
         self.stack.addWidget(editor_page)  # index 1: editor + find bar
         self.setCentralWidget(self.stack)
+
+        self.toolbar = FormatToolbar(self)
+        self.addToolBar(self.toolbar)
+        self.toolbar.commandRequested.connect(self._run_format_command)
+        self.rich.selectionState.connect(self.toolbar.update_state)
 
         self._left_label = QLabel()
         self._right_label = QLabel()
@@ -343,6 +350,9 @@ class MainWindow(QMainWindow):
         modes.addAction(self.act_rendered)
         modes.addAction(self.act_source)
         m.addSeparator()
+        self.act_toolbar = self._action(m, "&Toolbar", checkable=True)
+        self.act_toolbar.setChecked(self._show_toolbar)
+        self.act_toolbar.toggled.connect(self._toggle_toolbar)
         self.act_wrap = self._action(m, "&Word Wrap", checkable=True)
         self.act_wrap.setChecked(True)
         self.act_wrap.toggled.connect(self._toggle_wrap)
@@ -648,6 +658,15 @@ class MainWindow(QMainWindow):
             QPlainTextEdit.LineWrapMode.WidgetWidth if checked else QPlainTextEdit.LineWrapMode.NoWrap
         )
 
+    def _toggle_toolbar(self, checked: bool) -> None:
+        self._show_toolbar = checked
+        self._update_chrome()
+
+    def _run_format_command(self, name: str, args) -> None:
+        """A toolbar button or the block combo: run it in the page, which keeps the focus."""
+        self.rich.command(name, args)
+        self.rich.setFocus()
+
     def _zoom_in(self) -> None:
         self._set_zoom(self._zoom * ZOOM_STEP)
 
@@ -686,6 +705,7 @@ class MainWindow(QMainWindow):
             act.setEnabled(source)
         for act in self._rendered_only_actions:
             act.setEnabled(not source)
+        self.toolbar.setVisible(not source and self._show_toolbar)
 
         pct = round(self._zoom * 100)
         if source:
@@ -808,6 +828,7 @@ class MainWindow(QMainWindow):
             "preview_zoom": self._zoom,
             "recent_files": list(self._recent),
             "editor_font": dict(self._editor_font),
+            "show_toolbar": self._show_toolbar,
         }
 
     # --- Recent files --------------------------------------------------------
