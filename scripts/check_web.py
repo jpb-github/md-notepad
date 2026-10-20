@@ -327,6 +327,10 @@ def check_editor(app: QApplication, view: QWebEngineView, folder: Path, bridge: 
           f"code block shows plain text while the caret is inside ({state})")
     run_js(app, view, "(window.mdEditor.focusBlock(1), 0)")
     check(code_block_state(app, view)["overlay"] == "block", "the highlight comes back when the caret leaves")
+    run_js(app, view, "(window.mdEditor.setFinding(true), 0)")
+    check(code_block_state(app, view)["overlay"] == "none", "the find bar shows code blocks as plain text (one copy to find)")
+    run_js(app, view, "(window.mdEditor.setFinding(false), 0)")
+    check(code_block_state(app, view)["overlay"] == "block", "closing the find bar brings the highlight back")
     run_js(app, view, "(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('y', 2)), 0)")
     check(get_doc(app, view)["content"][1]["content"][0]["text"] == "yTitle"
           and code_block_state(app, view)["highlight"] == HIGHLIGHT,

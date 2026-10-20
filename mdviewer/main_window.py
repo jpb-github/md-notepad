@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QRect, QTimer, QUrl
+from PySide6.QtCore import QEvent, QPoint, QRect, QTimer, QUrl
 from PySide6.QtGui import (
     QActionGroup,
     QColor,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QStackedWidget,
@@ -105,6 +106,27 @@ ENCODING_LABELS = {
     "windows-1252": "Windows-1252",
 }
 _DROP_EVENTS = (QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop)
+_WEB = QWebEnginePage.WebAction
+# Edit items in Rendered mode: a page command (ProseMirror's history and selection: Chromium's
+# own Undo never reaches it) or a web action (Chromium's clipboard; the page handles the
+# events). Their keys reach the page first, which handles them itself.
+RENDERED_EDITS = {
+    "undo": "undo", "redo": "redo", "cut": _WEB.Cut, "copy": _WEB.Copy, "paste": _WEB.Paste,
+    "paste_plain": _WEB.PasteAndMatchStyle, "select_all": "selectAll",
+}
+# Edit items in Source mode: MarkdownEditor methods (its paste is plain text already).
+SOURCE_EDITS = {
+    "undo": "undo", "redo": "redo", "cut": "cut", "copy": "copy", "paste": "paste",
+    "paste_plain": "paste", "select_all": "selectAll",
+}
+# The cell context menu's table items (spec section 4), in groups: (text, command, args).
+TABLE_MENU = (
+    (("Insert row above", "addRowBefore", None), ("Insert row below", "addRowAfter", None)),
+    (("Insert column left", "addColumnBefore", None), ("Insert column right", "addColumnAfter", None)),
+    (("Delete row", "deleteRow", None), ("Delete column", "deleteColumn", None), ("Delete table", "deleteTable", None)),
+    (("Align column left", "setColumnAlign", "left"), ("Align column center", "setColumnAlign", "center"),
+     ("Align column right", "setColumnAlign", "right")),
+)
 
 
 # --- Dialog seams: every modal goes through these (scripts/smoke_ui.py fakes them).
@@ -248,6 +270,8 @@ class MainWindow(QMainWindow):
         self._doc_number = 0  # counts loads; a pull started before the latest one is discarded
         self._in_dialog = False  # a link or image dialog is open; the page's further requests are dropped
         self._hovered = ""  # the link URL shown in the status bar
+        self._page_can: dict = {}  # selectionState.can from the page: Undo/Redo enablement
+        self.context_menu: QMenu | None = None  # the last context menu shown over the page
 
         self.editor = MarkdownEditor()
         self._apply_editor_font()
@@ -265,21 +289,24 @@ class MainWindow(QMainWindow):
         self.rich.openLink.connect(self._open_link)
         self.rich.hoverLink.connect(self._show_hovered_link)
         self.rich.editProtected.connect(self._edit_protected)
+        self.rich.selectionState.connect(self._on_selection_state)
+        self.rich.customContextMenuRequested.connect(self._on_context_menu)
         self._watch_rich_drops()
 
-        self.find_bar = FindBar(self.editor)
+        self.find_bar = FindBar(self.editor, self.rich)  # under both editors
+        self.find_bar.set_web_mode(True)
         self.find_bar.hide()
-        editor_page = QWidget()
-        page_layout = QVBoxLayout(editor_page)
-        page_layout.setContentsMargins(0, 0, 0, 0)
-        page_layout.setSpacing(0)
-        page_layout.addWidget(self.editor)
-        page_layout.addWidget(self.find_bar)
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self.rich)  # index 0
-        self.stack.addWidget(editor_page)  # index 1: editor + find bar
-        self.setCentralWidget(self.stack)
+        self.stack.addWidget(self.editor)  # index 1
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self.stack)
+        central_layout.addWidget(self.find_bar)
+        self.setCentralWidget(central)
 
         self.toolbar = FormatToolbar(self)
         self.addToolBar(self.toolbar)
@@ -365,16 +392,17 @@ class MainWindow(QMainWindow):
         self.act_exit = self._action(m, "E&xit", "Alt+F4", self.close)
 
         m = self.menu_edit = bar.addMenu("&Edit")
-        self.act_undo = self._action(m, "&Undo", "Ctrl+Z", self.editor.undo)
-        self.act_redo = self._action(m, "&Redo", "Ctrl+Y", self.editor.redo)
+        self.act_undo = self._action(m, "&Undo", "Ctrl+Z", lambda: self._edit("undo"))
+        self.act_redo = self._action(m, "&Redo", "Ctrl+Y", lambda: self._edit("redo"))
         m.addSeparator()
-        self.act_cut = self._action(m, "Cu&t", "Ctrl+X", self.editor.cut)
-        self.act_copy = self._action(m, "&Copy", "Ctrl+C", self._copy)
-        self.act_paste = self._action(m, "&Paste", "Ctrl+V", self.editor.paste)
+        self.act_cut = self._action(m, "Cu&t", "Ctrl+X", lambda: self._edit("cut"))
+        self.act_copy = self._action(m, "&Copy", "Ctrl+C", lambda: self._edit("copy"))
+        self.act_paste = self._action(m, "&Paste", "Ctrl+V", lambda: self._edit("paste"))
+        self.act_paste_plain = self._action(m, "Paste as P&lain Text", "Ctrl+Shift+V", lambda: self._edit("paste_plain"))
         m.addSeparator()
         self.act_find = self._action(m, "&Find...", "Ctrl+F", self.find_bar.open_find)
-        self.act_replace = self._action(m, "&Replace...", "Ctrl+H", self.find_bar.open_replace)
-        self.act_select_all = self._action(m, "Select &All", "Ctrl+A", self.editor.selectAll)
+        self.act_replace = self._action(m, "&Replace...", "Ctrl+H", self._on_replace)
+        self.act_select_all = self._action(m, "Select &All", "Ctrl+A", lambda: self._edit("select_all"))
 
         m = self.menu_view = bar.addMenu("&View")
         modes = QActionGroup(self)
@@ -405,11 +433,6 @@ class MainWindow(QMainWindow):
 
         self._refresh_recent_menu()
 
-        # Task 17 routes the Edit menu to the Rendered editor; until then its keys go to the page.
-        self._source_only_actions = [
-            self.act_undo, self.act_redo, self.act_cut, self.act_paste, self.act_select_all,
-            self.act_find, self.act_replace,
-        ]
         self._rendered_only_actions = [self.act_zoom_in, self.act_zoom_out, self.act_zoom_reset]
 
     # --- File operations ---------------------------------------------------
@@ -597,15 +620,19 @@ class MainWindow(QMainWindow):
             self._block_lines = None
         fn(text)
 
-    def _enter_source(self, text: str) -> None:
-        """Rendered -> Source with `text`, the Rendered buffer (unchanged text keeps the editor's)."""
+    def _enter_source(self, text: str, then: Callable[[], None] | None = None) -> None:
+        """Rendered -> Source with `text`, the Rendered buffer (unchanged text keeps the editor's);
+        then() once Source is shown."""
         if self.mode == self.RENDERED and self.rich.modified:
-            self.with_buffer(self._enter_source)  # typed since the pull's snapshot: pull again
+            # typed since the pull's snapshot: pull again
+            self.with_buffer(lambda pulled: self._enter_source(pulled, then))
             return
         line = self._line_of_block(self._caret_block)
         self._show_mode(self.SOURCE)  # puts `text` (== _rendered_text) into the editor
         self.editor.setTextCursor(QTextCursor(self.editor.document().findBlockByNumber(line - 1)))
         self.editor.ensureCursorVisible()
+        if then is not None:
+            then()
 
     def _show_mode(self, mode: str, keep_scroll: bool = False) -> bool:
         """Show `mode`; Rendered first loads the buffer into the editor page. False (and Source
@@ -619,6 +646,7 @@ class MainWindow(QMainWindow):
             self._sync_editor()  # a pull or save moved the Rendered buffer past the editor's text
             self._show_hovered_link("")  # the page sends no mouseleave once hidden
         self.mode = mode
+        self.find_bar.set_web_mode(mode == self.RENDERED)  # a switch closes the find bar
         self.stack.setCurrentIndex(0 if mode == self.RENDERED else 1)
         (self.rich if mode == self.RENDERED else self.editor).setFocus()
         self._update_chrome()
@@ -798,11 +826,71 @@ class MainWindow(QMainWindow):
     def _apply_zoom(self, _ok: bool = True) -> None:
         self.rich.setZoomFactor(self._zoom)
 
-    def _copy(self) -> None:
-        if self.mode == self.RENDERED:
-            self.rich.page().triggerAction(QWebEnginePage.WebAction.Copy)
+    # --- Edit menu and context menu ---
+
+    def _edit(self, name: str) -> None:
+        """An Edit item: the text editor in Source mode; in Rendered mode a page command or a web
+        action, and the page keeps the focus."""
+        if self.mode == self.SOURCE:
+            getattr(self.editor, SOURCE_EDITS[name])()
+            return
+        target = RENDERED_EDITS[name]
+        if isinstance(target, str):
+            self.rich.command(target, None)
         else:
-            self.editor.copy()
+            self.rich.page().triggerAction(target)
+        self.rich.setFocus()
+
+    def _on_replace(self) -> None:
+        if self.mode == self.SOURCE:
+            self.find_bar.open_replace()
+        else:  # Replace works on the text: Source, with the Rendered edits pulled first
+            self.with_buffer(lambda text: self._enter_source(text, self.find_bar.open_replace))
+
+    def _on_selection_state(self, state: dict) -> None:
+        self._page_can = state.get("can") or {}
+        self._update_undo_actions()
+
+    def _update_undo_actions(self) -> None:
+        """Rendered: Undo and Redo follow the page's history; Source keeps v1 (always enabled)."""
+        rendered = self.mode == self.RENDERED
+        self.act_undo.setEnabled(not rendered or bool(self._page_can.get("undo")))
+        self.act_redo.setEnabled(not rendered or bool(self._page_can.get("redo")))
+
+    def _on_context_menu(self, pos: QPoint) -> None:
+        if not self.rich.is_ready:
+            return
+        at = self.rich.mapToGlobal(pos)
+        # the throttled selectionState lags the right-click that moved the caret: read it fresh
+        self.rich.selection_state(lambda state: self._show_context_menu(state, at))
+
+    def _show_context_menu(self, state: dict, at: QPoint) -> None:
+        if self.mode != self.RENDERED:
+            return
+        self._on_selection_state(state)
+        if self.context_menu is not None:
+            self.context_menu.deleteLater()
+        self.context_menu = self._build_context_menu(state)
+        self.context_menu.popup(at)
+
+    def _build_context_menu(self, state: dict) -> QMenu:
+        """Edit items, then the table items when the caret is in a cell (spec section 4)."""
+        menu = QMenu(self)
+        for act in (self.act_undo, self.act_redo, None, self.act_cut, self.act_copy, self.act_paste,
+                    self.act_paste_plain, None, self.act_select_all):
+            if act is None:
+                menu.addSeparator()
+            else:
+                menu.addAction(act)
+        can = state.get("can") or {}
+        if can.get("addRowAfter"):
+            for group in TABLE_MENU:
+                menu.addSeparator()
+                for text, command, args in group:
+                    act = menu.addAction(text)
+                    act.setEnabled(bool(can.get(command)))
+                    act.triggered.connect(lambda _checked=False, c=command, a=args: self._run_format_command(c, a))
+        return menu
 
     def _show_about(self) -> None:
         QMessageBox.about(
@@ -815,13 +903,13 @@ class MainWindow(QMainWindow):
         source = self.mode == self.SOURCE
         (self.act_source if source else self.act_rendered).setChecked(True)
         self.act_rendered.setEnabled(not self.rich.failed)
-        for act in self._source_only_actions:
-            act.setEnabled(source)
         for act in self._rendered_only_actions:
             act.setEnabled(not source)
         self.toolbar.setVisible(not source and self._show_toolbar)
         if not self.rich.is_ready:
             self.toolbar.update_state({})  # a click would queue behind the page's setDocument
+            self._page_can = {}
+        self._update_undo_actions()
 
         pct = round(self._zoom * 100)
         if source:

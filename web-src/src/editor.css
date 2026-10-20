@@ -9,11 +9,12 @@
 .ProseMirror li.task-list-item > .task-list-item-checkbox { position: absolute; left: -1.4em; top: .3em; margin: 0; }
 
 /* Code blocks: the source <pre> is edited; the highlight <pre> is laid over it while
-   the caret is elsewhere. Both use the same font, padding and wrapping. */
+   the caret is elsewhere and the find bar is closed (find-in-page would count both
+   copies). Both use the same font, padding and wrapping. */
 .md-code-block { position: relative; margin: 0 0 16px; }
 .md-code-block > pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .md-code-highlight { display: none; position: absolute; inset: 0; pointer-events: none; }
-.md-code-block.md-has-highlight:not(.md-code-active) > .md-code-highlight { display: block; }
+body:not(.md-finding) .md-code-block.md-has-highlight:not(.md-code-active) > .md-code-highlight { display: block; }
 .md-code-tools { position: absolute; top: 4px; right: 4px; z-index: 1; opacity: 0; }
 .md-code-block:hover > .md-code-tools,
 .md-code-block.md-code-active > .md-code-tools,

@@ -6,6 +6,7 @@ import "prosemirror-view/style/prosemirror.css";
 import "prosemirror-gapcursor/style/gapcursor.css";
 import "prosemirror-tables/style/tables.css";
 import "./editor.css";
+import { selectAll } from "prosemirror-commands";
 import { history, redo, redoDepth, undo, undoDepth } from "prosemirror-history";
 import { EditorState, NodeSelection, Plugin, Selection } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
@@ -28,6 +29,9 @@ const CELL_EXTRAS = ["colspan", "rowspan", "colwidth"];
 const COMMANDS = {
   undo: { run: (state, dispatch) => undo(state, dispatch), can: (state) => undoDepth(state) > 0 },
   redo: { run: (state, dispatch) => redo(state, dispatch), can: (state) => redoDepth(state) > 0 },
+  // Edit > Select All: what Ctrl+A does (baseKeymap). Chromium's own select-all reaches the
+  // editor state only after a selectionchange, too late for a Paste right after it.
+  selectAll: { run: (state, dispatch) => selectAll(state, dispatch) },
   ...FORMATTING_COMMANDS,
   ...TABLE_COMMANDS,
 };
@@ -230,6 +234,11 @@ window.mdEditor = {
   setTheme(css) {
     document.getElementById("theme").textContent = css;
     refreshFrames();
+  },
+  // Find bar open: code blocks show their plain text only, so find-in-page counts and
+  // highlights each match once, in the editable copy (editor.css).
+  setFinding(on) {
+    document.body.classList.toggle("md-finding", on);
   },
   // Caret at the start of top-level block `index`; atoms (protected blocks, rules) are selected.
   focusBlock(index) {

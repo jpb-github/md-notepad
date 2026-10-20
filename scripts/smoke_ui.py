@@ -145,7 +145,8 @@ for act, keys in [
 check([a.text() for a in window.menu_view.actions()[:2]] == ["&Rendered", "&Source"], "View menu starts with Rendered / Source")
 check(window.act_rendered.isChecked() and window.act_rendered.actionGroup().isExclusive(), "the two modes are a radio pair")
 check(window.act_copy.isEnabled(), "Copy enabled in Rendered mode")
-check(not window.act_paste.isEnabled(), "Paste disabled in Rendered mode (its keys go to the page)")
+check(window.act_cut.isEnabled() and window.act_paste.isEnabled() and window.act_select_all.isEnabled(),
+      "Cut, Paste and Select All enabled in Rendered mode")
 check(window.act_zoom_in.isEnabled(), "Zoom enabled in Rendered mode")
 check(window.act_wrap.isChecked(), "Word Wrap on by default")
 
@@ -823,7 +824,7 @@ check(window._watcher is None, "no watcher for Untitled")
 bar = window.find_bar
 FAKE["answer"] = S.Discard
 window.on_close()
-check(not window.act_find.isEnabled() and not window.act_replace.isEnabled(), "Find/Replace disabled in Rendered mode")
+check(window.act_find.isEnabled() and window.act_replace.isEnabled(), "Find and Replace enabled in Rendered mode")
 window.on_new()
 window.act_source.trigger()
 check(window.act_find.isEnabled() and window.act_replace.isEnabled(), "Find/Replace enabled in Source mode")
@@ -1148,7 +1149,7 @@ seen = record(rich)
 rich.resize(800, 600)
 rich.show()  # hidden pages throttle timers: selectionState would arrive late (plan Task 9)
 check(rich.settings().testAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled), "JavaScript is enabled in the editor")
-check(rich.contextMenuPolicy() == Qt.ContextMenuPolicy.NoContextMenu, "no Chromium context menu (Reload, View Source)")
+check(rich.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu, "our own context menu replaces Chromium's (Reload, View Source)")
 before_ready = docmodel.from_markdown("# Early\n")
 rich.set_document(before_ready)
 early = []
@@ -2001,6 +2002,245 @@ check(pump(lambda: page_js(window.rich, HAS_HL), 3), "leaving the edited code bl
 check(page_js(window.rich, "document.querySelector('#editor .md-code-highlight').textContent").strip() == "yx = 1",
       "the restored highlight is for the edited text")
 check(window.dirty, "restoring the highlight leaves the edit pending")
+FAKE["answer"] = S.Discard
+window.on_new()
+
+# --- WYSIWYG Task 17: Edit menu, context menu and Find in Rendered mode -------------
+from PySide6.QtCore import QMimeData  # noqa: E402
+from PySide6.QtGui import QAction  # noqa: E402
+from PySide6.QtWidgets import QMenu  # noqa: E402
+
+CTRL = Qt.KeyboardModifier.ControlModifier
+SHIFT = Qt.KeyboardModifier.ShiftModifier
+SELECTED_JS = "(() => { const s = window.mdEditor.view.state.selection; return window.mdEditor.view.state.doc.textBetween(s.from, s.to); })()"
+FINDING_JS = "document.body.classList.contains('md-finding')"
+
+
+def page_text() -> str:
+    return page_js(window.rich, "window.mdEditor.view.state.doc.textContent")
+
+
+def page_key(key, modifiers, text: str) -> None:
+    """A key as a real keyboard sends it (Ctrl+Z carries the text "\\x1a"), into the page."""
+    window.rich.setFocus()
+    QTest.sendKeyEvent(QTest.KeyAction.Click, window.rich.focusProxy(), key, text, modifiers)
+
+
+def select_all_in_page() -> None:
+    """Edit > Select All, then wait for it: a web action sent at once may run before it."""
+    window.act_select_all.trigger()
+    check(pump(lambda: page_js(window.rich, "window.mdEditor.view.state.selection.from === 0 && window.mdEditor.view.state"
+                                            ".selection.to === window.mdEditor.view.state.doc.content.size"), 3),
+          "Edit > Select All selects the whole page document")
+
+
+def to_clipboard(html: str, text: str) -> None:
+    """A browser copy: the page reads the HTML only with CF_HTML's fragment markers (Task 11)."""
+    mime = QMimeData()
+    mime.setData("text/html", f"<html><body><!--StartFragment-->{html}<!--EndFragment--></body></html>".encode())
+    mime.setText(text)
+    QApplication.clipboard().setMimeData(mime)
+
+
+# the Edit menu: Paste as Plain Text after Paste; the page's formatting keys stay the page's
+check([a.text() for a in window.menu_edit.actions() if not a.isSeparator()]
+      == ["&Undo", "&Redo", "Cu&t", "&Copy", "&Paste", "Paste as P&lain Text", "&Find...", "&Replace...", "Select &All"],
+      "the Edit menu adds Paste as Plain Text after Paste")
+check(window.act_paste_plain.shortcut().toString() == "Ctrl+Shift+V", "Paste as Plain Text is Ctrl+Shift+V")
+PAGE_KEYS = {"Ctrl+B", "Ctrl+I", "Ctrl+K", "Ctrl+Shift+X", "Ctrl+`", "Ctrl+Space", "Ctrl+Shift+7", "Ctrl+Shift+8",
+             "Ctrl+Shift+9", "Ctrl+Shift+.", *(f"Ctrl+Alt+{n}" for n in range(7))}
+taken = {a.shortcut().toString() for a in window.findChildren(QAction)} & PAGE_KEYS
+check(not taken, f"no menu shortcut takes the page's formatting keys ({taken})")
+
+# Undo and Redo follow the page's history; their keys undo one step, as the menu does
+edit_md = TMP / "edit.md"
+edit_md.write_bytes(b"one\n")
+window.open_file(edit_md)
+check(pump(lambda: "undo" in window._page_can, 3) and not window.act_undo.isEnabled() and not window.act_redo.isEnabled(),
+      "Rendered: Undo and Redo are greyed with nothing to undo")
+window.rich.focus_block(0)
+type_rendered(window, "X")
+pump(lambda: False, 0.6)  # past prosemirror-history's 500 ms grouping: the next edit is its own step
+type_rendered(window, "Y")
+check(pump(lambda: window.act_undo.isEnabled(), 3) and not window.act_redo.isEnabled(), "an edit enables Undo")
+page_key(Qt.Key.Key_Z, CTRL, "\x1a")
+check(pump(lambda: page_text() == "Xone", 3), f"Ctrl+Z undoes one step ({page_text()!r})")
+check(pump(lambda: window.act_redo.isEnabled(), 3), "an undo enables Redo")
+page_key(Qt.Key.Key_Y, CTRL, "\x19")
+check(pump(lambda: page_text() == "XYone", 3), f"Ctrl+Y redoes it ({page_text()!r})")
+window.act_undo.trigger()
+check(pump(lambda: page_text() == "Xone", 3), "Edit > Undo undoes one step")
+window.act_redo.trigger()
+check(pump(lambda: page_text() == "XYone", 3), "Edit > Redo redoes it")
+window.act_undo.trigger()
+window.act_undo.trigger()
+check(pump(lambda: page_text() == "one" and not window.act_undo.isEnabled(), 3), "Undo greys out at the start of the history")
+
+# the clipboard: Paste keeps formatting (schema rules), Paste as Plain Text and Ctrl+Shift+V do not
+to_clipboard('<b>bold</b> <a href="javascript:alert(1)">bad</a>', "bold bad")
+select_all_in_page()
+window.act_paste.trigger()
+check(pump(lambda: page_text() == "bold bad", 3) and '"strong"' in page_doc() and "javascript" not in page_doc(),
+      f"Edit > Paste keeps bold and drops the unsafe link ({page_doc()})")
+select_all_in_page()
+window.act_paste_plain.trigger()
+check(pump(lambda: '"strong"' not in page_doc(), 3) and page_text() == "bold bad", "Paste as Plain Text drops the formatting")
+select_all_in_page()
+window.act_paste.trigger()
+pump(lambda: '"strong"' in page_doc(), 3)
+select_all_in_page()
+page_key(Qt.Key.Key_V, CTRL | SHIFT, "\x16")
+check(pump(lambda: '"strong"' not in page_doc(), 3) and page_text() == "bold bad",
+      f"Ctrl+Shift+V pastes plain text once ({page_text()!r})")
+select_all_in_page()
+window.act_copy.trigger()
+check(pump(lambda: QApplication.clipboard().text() == "bold bad", 3), "Edit > Copy copies the page selection")
+QApplication.clipboard().clear()
+select_all_in_page()
+window.act_cut.trigger()
+check(pump(lambda: page_text() == "" and QApplication.clipboard().text() == "bold bad", 3), "Edit > Cut cuts it")
+window.act_source.trigger()
+check(pump(lambda: window.mode == "source", 5) and window.act_undo.isEnabled() and window.act_redo.isEnabled(),
+      "Source: Undo and Redo stay enabled (v1)")
+window.editor.setPlainText("plain text")
+window.act_select_all.trigger()
+window.act_cut.trigger()
+check(window.buffer == "", "Source: Edit > Cut acts on the text editor")
+window.act_paste_plain.trigger()
+check(window.buffer == "plain text", "Source: Paste as Plain Text pastes the text")
+QApplication.clipboard().clear()  # a clipboard still owning our data crashes Qt at exit (Task 11)
+FAKE["answer"] = S.Discard
+window.on_new()
+
+# Find in Rendered mode: the page's find-in-page, find only
+bar = window.find_bar
+find_md = TMP / "find.md"
+find_md.write_bytes(b"alpha beta Alpha\n\n```python\nalpha = 1\n```\n\nalpha end\n")
+window.open_file(find_md)
+check(pump(lambda: window.rich.is_ready and page_js(window.rich, HAS_HL), 3), "a highlighted code block to search")
+window.act_find.trigger()
+check(bar.isVisible() and bar.web_mode and not bar.replace_row.isVisible(), "Ctrl+F in Rendered mode shows the find row only")
+check(pump(lambda: page_js(window.rich, FINDING_JS), 3), "code blocks show plain text while the bar is open")
+bar.find_edit.setText("alpha")
+check(pump(lambda: bar.count_label.text() == "1 of 4", 3), f"the match count counts the code block once ({bar.count_label.text()})")
+bar.find_next()
+check(pump(lambda: bar.count_label.text() == "2 of 4", 3), "Next moves to the second match")
+window.act_find.trigger()
+pump(lambda: False, 0.3)
+check(bar.count_label.text() == "2 of 4", "Ctrl+F on the open bar keeps the current match")
+bar.find_previous()
+check(pump(lambda: bar.count_label.text() == "1 of 4", 3), "Previous moves back")
+bar.find_previous()
+check(pump(lambda: bar.count_label.text() == "4 of 4", 3), "Previous wraps to the last match")
+bar.case_box.setChecked(True)
+check(pump(lambda: bar.count_label.text().endswith(" of 3"), 3), f"Match case narrows the matches ({bar.count_label.text()})")
+bar.case_box.setChecked(False)
+bar.find_edit.setText("zzz")
+check(pump(lambda: bar.count_label.text() == "No results", 3), "no hits shows No results")
+bar.find_edit.setText("")
+check(bar.count_label.text() == "", "an empty search clears the count")
+bar.find_edit.setText("beta")
+check(pump(lambda: bar.count_label.text() == "1 of 1", 3), "a new search")
+QTest.keyClick(bar.find_edit, Qt.Key.Key_Escape)
+check(not bar.isVisible() and pump(lambda: not page_js(window.rich, FINDING_JS), 3), "Esc closes the bar; the highlights come back")
+check(pump(lambda: page_js(window.rich, SELECTED_JS) == "beta", 3), "the found text stays selected in the editor")
+check(not window.dirty, "finding changes nothing")
+window.act_find.trigger()
+check(bar.find_edit.text() == "beta", "the page selection seeds the find field")
+window.act_source.trigger()
+check(window.mode == "source" and not bar.isVisible() and not bar.web_mode, "a mode switch closes the find bar")
+check(page_js(window.rich, FINDING_JS) is False, "and the page's code highlights come back")
+window.act_find.trigger()
+bar.find_edit.setText("alpha")
+check(bar.count_label.text() == "1 of 4" and selected() == "alpha", "Source mode searches the text editor again")
+QTest.keyClick(bar.find_edit, Qt.Key.Key_Escape)
+window.act_rendered.trigger()
+finder = richview.RichView("light")
+finder.show()
+pump(lambda: finder.is_ready, 5)
+finder.set_finding(True)
+finder.restart()
+check(pump(lambda: finder.is_ready, 5) and page_js(finder, FINDING_JS) is True, "a restarted page keeps the find bar's state")
+finder.close()
+finder.deleteLater()
+
+# Replace from Rendered mode: Source with the Rendered edits, Replace bar open
+window.rich.focus_block(2)
+type_rendered(window, "Z")
+window.act_replace.trigger()
+check(pump(lambda: window.mode == "source", 5) and bar.isVisible() and bar.replace_row.isVisible() and not bar.web_mode,
+      "Ctrl+H in Rendered mode switches to Source and opens Replace")
+check(window.dirty and "Zalpha end" in window.buffer, f"the Rendered edit came along ({window.buffer!r})")
+bar.find_edit.setText("alpha")
+bar.replace_edit.setText("omega")
+check(bar.replace_all() == 4, "Replace works on the switched text")
+bar.close_bar()
+FAKE["answer"] = S.Discard
+window.on_new()
+
+# the cell context menu: a native menu built from the page's state at the right-clicked place
+table_md = TMP / "table.md"
+table_md.write_bytes(b"intro\n\n| a | b |\n| --- | --- |\n")
+window.open_file(table_md)
+pump(lambda: window.rich.is_ready, 3)
+window.rich.focus_block(0)
+
+
+def right_click(selector: str) -> QMenu | None:
+    """A real right-click in the middle of `selector`; the menu it shows, if any."""
+    window.context_menu = None
+    point = page_js(window.rich, f"(() => {{ const b = document.querySelector({json.dumps(selector)}).getBoundingClientRect();"
+                                 " return [Math.round(b.left + b.width / 2), Math.round(b.top + b.height / 2)]; })()")
+    QTest.mouseClick(window.rich.focusProxy(), Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, QPoint(*point))
+    pump(lambda: window.context_menu is not None and window.context_menu.isVisible(), 3)
+    return window.context_menu
+
+
+def pick(menu: QMenu | None, text: str) -> None:
+    """Chooses the item `text` of a shown menu, if it has one, and closes the menu."""
+    for act in menu.actions() if menu else []:
+        if act.text() == text:
+            act.trigger()
+    if menu:
+        menu.close()
+
+
+EDIT_ITEMS = [window.act_undo, window.act_redo, None, window.act_cut, window.act_copy, window.act_paste,
+              window.act_paste_plain, None, window.act_select_all]
+window.rich.selectionState.disconnect(window._on_selection_state)  # only a fresh read sees the moved caret
+menu = right_click("#editor th:last-child")
+window.rich.selectionState.connect(window._on_selection_state)
+check(menu is not None, "a right-click in the page shows the context menu")
+items = [None if a.isSeparator() else a for a in menu.actions()] if menu else []
+check(items[:9] == EDIT_ITEMS, "it starts with the Edit menu's own items")
+TABLE_TEXTS = [None, "Insert row above", "Insert row below", None, "Insert column left", "Insert column right",
+               None, "Delete row", "Delete column", "Delete table",
+               None, "Align column left", "Align column center", "Align column right"]
+table_items = [None if a.isSeparator() else a.text() for a in menu.actions()[9:]] if menu else []
+check(table_items == TABLE_TEXTS and all(a.isEnabled() for a in menu.actions()[9:]),
+      f"right-clicking a cell (the caret was outside the table) adds the table items ({table_items})")
+crafted = window._build_context_menu({"can": {"addRowAfter": True, "deleteRow": False, "setColumnAlign": True}})
+check([None if a.isSeparator() else a.text() for a in crafted.actions()[9:]] == TABLE_TEXTS
+      and [a.text() for a in crafted.actions()[9:] if a.isEnabled() and not a.isSeparator()]
+      == ["Insert row below", "Align column left", "Align column center", "Align column right"],
+      "each table item is enabled from selectionState.can")
+crafted.deleteLater()
+pick(menu, "Align column right")
+pick(right_click("#editor th:last-child"), "Insert row below")
+check(pump(lambda: window.dirty, 3), "a table item edits the document")
+window.on_save()
+check(pump(lambda: not window.dirty, 5) and table_md.read_bytes() == b"intro\n\n| a | b |\n| --- | ---: |\n|  |  |\n",
+      f"the table items reach the saved file ({table_md.read_bytes()!r})")
+menu = right_click("#editor p")
+check(menu is not None and [None if a.isSeparator() else a for a in menu.actions()] == EDIT_ITEMS,
+      "outside a table: the edit items only")
+if menu:
+    menu.close()
+window.context_menu = None
+window.rich.customContextMenuRequested.emit(QPoint(5, 5))
+window.act_source.trigger()
+pump(lambda: False, 0.5)
+check(window.context_menu is None, "no menu once the window has left Rendered mode")
 FAKE["answer"] = S.Discard
 window.on_new()
 

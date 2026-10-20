@@ -36,6 +36,8 @@ _NO_FRAGMENT = QUrl.ComponentFormattingOption.PrettyDecoded | QUrl.UrlFormatting
 _PULL_JS = "(() => {{ const json = JSON.stringify(window.mdEditor.getDocument()); window.mdEditor.markClean({}); return json; }})()"
 # Edited code blocks the caret has left, as [{pos, language, code}] (nodeviews.js staleCodeBlocks).
 _STALE_CODE_JS = "JSON.stringify(window.mdEditor.staleCodeBlocks())"
+# The selection's toolbar and menu state, unthrottled (editor.js selectionState).
+_SELECTION_JS = "JSON.stringify(window.mdEditor.selectionState())"
 # Each top-level block's heading text, null for other blocks (in-page #anchor links).
 _HEADINGS_JS = (
     "(() => { const out = []; window.mdEditor.view.state.doc.forEach("
@@ -123,8 +125,9 @@ class RichView(QWebEngineView):
         # v1's preview disabled JavaScript; the editor needs it. Raw HTML stays script-free
         # (sandboxed frames, CSP script-src 'self').
         self.settings().setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
-        # Chromium's menu offers Reload and View Source; Task 17 adds our own menu.
-        self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        # Chromium's menu offers Reload and View Source; MainWindow shows its own (edit and table
+        # items) from customContextMenuRequested.
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._channel = QWebChannel(self.page())
         self._bridge = Bridge(self)
         self._channel.registerObject("bridge", self._bridge)
@@ -146,6 +149,7 @@ class RichView(QWebEngineView):
         self._pulls: dict[int, tuple[Callable[[dict | None], None], bool, int]] = {}
         self._waiting: list[int] = []  # pulls whose timeout starts when the page is idle
         self._next_pull = 0
+        self._finding = False  # the find bar is open over the page (set_finding)
         self.restart()
 
     # --- lifecycle -------------------------------------------------------------
@@ -159,6 +163,8 @@ class RichView(QWebEngineView):
         self._load_epoch = self._epoch
         self.modified = False
         self._queue.append((f"window.mdEditor.markClean({self._epoch}), 0", None))
+        if self._finding:
+            self._queue.append(("window.mdEditor.setFinding(true), 0", None))
         self.page().setBackgroundColor(QColor(render.PAGE_BACKGROUND[self._theme]))
         try:
             folder = self.page_file.parent
@@ -320,6 +326,20 @@ class RichView(QWebEngineView):
             if isinstance(value, str):
                 callback(json.loads(value))
         self._call(_HEADINGS_JS, done)
+
+    def selection_state(self, callback: Callable[[dict], None]) -> None:
+        """callback(the selection's {marks, block, can}), read now rather than throttled (the
+        context menu). Never called when the page fails, crashes or restarts first."""
+        def done(value):
+            if isinstance(value, str):
+                callback(json.loads(value))
+        self._call(_SELECTION_JS, done)
+
+    def set_finding(self, on: bool) -> None:
+        """While the find bar is open, code blocks show plain text only, so find-in-page counts
+        each match once; kept across restart()."""
+        self._finding = on
+        self._call(f"window.mdEditor.setFinding({json.dumps(on)}), 0")
 
     def _refresh_highlights(self) -> None:
         """The caret moved to another top-level block: edited code blocks it left get their

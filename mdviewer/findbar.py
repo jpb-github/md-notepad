@@ -1,11 +1,16 @@
-"""Find/Replace bar under the editor: plain-text search via QTextDocument.find.
+"""Find/Replace bar under the editors, in two modes.
 
-QTextDocument positions count UTF-16 units, so all matching stays in Qt;
-Python string offsets would drift after any emoji.
+Source: plain-text Find/Replace via QTextDocument.find. QTextDocument positions count
+UTF-16 units, so all matching stays in Qt; Python string offsets would drift after any
+emoji.
+
+Rendered (web mode): find only, in the page via QWebEnginePage.findText; its
+findTextFinished reports the match count.
 """
 
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QTextCursor, QTextDocument
+from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -21,9 +26,11 @@ RECOUNT_MS = 200
 
 
 class FindBar(QWidget):
-    def __init__(self, editor, parent=None):
+    def __init__(self, editor, view=None, parent=None):
         super().__init__(parent)
         self.editor = editor
+        self.view = view  # the RichView searched in web mode
+        self.web_mode = False
 
         self.find_edit = QLineEdit()
         self.find_edit.setPlaceholderText("Find")
@@ -73,6 +80,8 @@ class FindBar(QWidget):
         self.replace_all_button.clicked.connect(self.replace_all)
         close_button.clicked.connect(self.close_bar)
         self.editor.document().contentsChanged.connect(self._on_text_edited)
+        if view is not None:
+            view.page().findTextFinished.connect(self._on_page_result)
         for edit in (self.find_edit, self.replace_edit):
             edit.installEventFilter(self)
 
@@ -84,9 +93,19 @@ class FindBar(QWidget):
     def open_replace(self) -> None:
         self._open(replace=True)
 
+    def set_web_mode(self, on: bool) -> None:
+        """Rendered mode (True) searches the page and has no Replace row; a change closes the bar."""
+        if on == self.web_mode:
+            return
+        if self.isVisible():
+            self._hide()
+        self.web_mode = on
+
     def _open(self, replace: bool) -> None:
-        selected = self.editor.textCursor().selectedText()
-        if selected and "\u2029" not in selected:  # single-line selections only
+        was_open = self.isVisible()
+        before = self.find_edit.text()
+        selected = self.view.selectedText() if self.web_mode else self.editor.textCursor().selectedText()
+        if selected and "\u2029" not in selected and "\n" not in selected:  # single-line selections only
             self.find_edit.blockSignals(True)  # it is already selected in the editor
             self.find_edit.setText(selected)
             self.find_edit.blockSignals(False)
@@ -94,11 +113,22 @@ class FindBar(QWidget):
         self.show()
         self.find_edit.setFocus()
         self.find_edit.selectAll()
-        self._update_count()
+        if self.web_mode:
+            self.view.set_finding(True)
+            if not was_open or self.find_edit.text() != before:  # Ctrl+F on the open bar keeps the match
+                self._find(backward=False)
+        else:
+            self._update_count()
 
     def close_bar(self) -> None:
+        self._hide()
+        (self.view if self.web_mode else self.editor).setFocus()
+
+    def _hide(self) -> None:
+        if self.web_mode:
+            self.view.page().findText("")  # clears the highlights; the active match stays selected
+            self.view.set_finding(False)
         self.hide()
-        self.editor.setFocus()
 
     def eventFilter(self, obj, event) -> bool:
         if event.type() == QEvent.Type.KeyPress:
@@ -134,10 +164,22 @@ class FindBar(QWidget):
         return flags
 
     def _find(self, backward: bool) -> bool:
+        """Source: moves the editor's selection. Web mode: asks the page, True at once; the count
+        arrives in _on_page_result."""
         needle = self.find_edit.text()
         if not needle:
             self.count_label.setText("")
+            if self.web_mode:
+                self.view.page().findText("")
             return False
+        if self.web_mode:
+            flags = QWebEnginePage.FindFlag(0)
+            if self.case_box.isChecked():
+                flags |= QWebEnginePage.FindFlag.FindCaseSensitively
+            if backward:
+                flags |= QWebEnginePage.FindFlag.FindBackward
+            self.view.page().findText(needle, flags)
+            return True
         doc = self.editor.document()
         flags = self._flags(backward)
         found = doc.find(needle, self.editor.textCursor(), flags)
@@ -153,6 +195,9 @@ class FindBar(QWidget):
 
     def _search_as_typed(self, *_args) -> None:
         """Re-search from the start of the current selection so typing extends the match."""
+        if self.web_mode:  # a new text or case flag starts a new search in the page
+            self._find(backward=False)
+            return
         cursor = self.editor.textCursor()
         cursor.setPosition(cursor.selectionStart())
         self.editor.setTextCursor(cursor)
@@ -187,8 +232,15 @@ class FindBar(QWidget):
         self.count_label.setText(text)
 
     def _on_text_edited(self) -> None:
-        if self.isVisible():
+        if self.isVisible() and not self.web_mode:
             self._recount.start()
+
+    def _on_page_result(self, result) -> None:
+        # findText("") answers too; only a search the field asks for counts
+        if not (self.web_mode and self.isVisible() and self.find_edit.text()):
+            return
+        count = result.numberOfMatches()
+        self.count_label.setText(f"{result.activeMatch()} of {count}" if count else "No results")
 
     # --- replacing -------------------------------------------------------------
 
