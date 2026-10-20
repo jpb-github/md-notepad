@@ -313,9 +313,10 @@ drop_on_page(QUrl.fromLocalFile(str(sample)))
 check(window.loaded_path == sample and window.mode == "rendered", "a file dropped on the Rendered page opens")
 drop_on_page(QUrl("https://example.com/page.md"))
 check(window.loaded_path == sample, "a web link dropped on the page opens nothing")
+ASKED.clear()
+FAKE["answer"] = S.Retry  # the crash dialog (Task 14): reload the page
 os.kill(window.rich.page().renderProcessPid(), signal.SIGTERM)  # a crash replaces the focus proxy
-pump(lambda: window.rich.focusProxy() is None, 5)
-window.rich.restart()
+check(pump(lambda: ASKED, 5), "a crash asks")
 check(pump(lambda: window.rich.is_ready and window.rich.focusProxy() is not None, 5), "the restarted page is ready")
 drop_on_page(QUrl.fromLocalFile(str(legacy)))
 check(window.loaded_path == legacy, "files dropped on a restarted page still open")
@@ -435,20 +436,12 @@ check(window.mode == "rendered", "a large file can still be switched to Rendered
 main_window.LARGE_FILE_BYTES = saved_limit
 check(saved_limit == 5 * 1024 * 1024, "the limit is 5 MB")
 
-# a Rendered pull that gets no answer saves nothing and keeps the edits
+# a Rendered edit, not yet saved (pulls that get no answer: Task 14 section)
 window.open_file(doc_md)
 window.rich.focus_block(0)
 window.rich.command("setBlock", {"type": "heading", "level": 3})
 pump(lambda: window.dirty, 3)
 saved_timeout = richview.PULL_TIMEOUT_MS
-richview.PULL_TIMEOUT_MS = 300
-window.rich.page().runJavaScript("(() => { const t = Date.now(); while (Date.now() - t < 1200); })()", 0)
-window.statusBar().clearMessage()
-window.on_save()
-check(pump(lambda: window.statusBar().currentMessage() == main_window.PULL_FAILED_NOTE, 3), "a pull with no answer warns")
-richview.PULL_TIMEOUT_MS = saved_timeout
-pump(lambda: False, 1.2)
-check(doc_md.read_text(encoding="utf-8").startswith("# Title") and window.dirty, "nothing was saved; still dirty")
 
 # a serializer failure saves nothing and keeps the edits for the next try
 def bad_to_text(doc):
@@ -1361,6 +1354,250 @@ late.set_document(docmodel.from_markdown("x\n"))
 late.command("toggleMark", "strong")
 check(nothing == [None], "after load_failed, request_document answers None at once")
 richview.READY_TIMEOUT_MS = saved_ready
+
+# --- WYSIWYG Task 14: save prompts, stopped and crashed editors ------------------
+import stat  # noqa: E402
+
+BOXES: list = []
+ANSWERS: list = []  # answers for the next asks, in order; then FAKE["answer"]
+
+
+def ask_in_turn(box):
+    BOXES.append(box)
+    answer = fake_ask(box)
+    if ANSWERS:
+        answer = ANSWERS.pop(0)
+    return answer() if callable(answer) else answer  # a callable acts "while the dialog is open"
+
+
+main_window.ask = ask_in_turn
+richview.PULL_TIMEOUT_MS = saved_timeout
+STOPPED_HUNG = main_window.STOPPED_TEXT + "\n\n" + main_window.HUNG_DETAIL
+STOPPED_CRASHED = main_window.STOPPED_TEXT + "\n\n" + main_window.CRASHED_DETAIL
+check(main_window.STOPPED_TEXT == "The rendered editor stopped responding.", "the stopped-responding text is the spec's")
+
+
+def edit_rendered(win, level: int) -> None:
+    """A Rendered edit not yet pulled: the first block becomes a heading of `level`."""
+    win.rich.focus_block(0)
+    win.rich.command("setBlock", {"type": "heading", "level": level})
+    check(pump(lambda: win.rich.modified and win.dirty, 3), f"a Rendered edit (H{level}) is pending")
+
+
+def type_rendered(win, text: str) -> None:
+    page_js(win.rich, f"(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText({json.dumps(text)})), 0)")
+    check(pump(lambda: win.rich.modified and win.dirty, 3), f"typing {text!r} in Rendered mode is pending")
+
+
+def busy_page(win, ms: int) -> None:
+    win.rich.page().runJavaScript(f"(() => {{ const t = Date.now(); while (Date.now() - t < {ms}); }})()", 0)
+
+
+# "Save changes?" answered Save: each action goes on once the pulled document is saved
+flow, other = TMP / "flow.md", TMP / "other.md"
+other.write_bytes(b"# Other\n")
+
+
+def save_prompt_flow(label: str, trigger, done) -> None:
+    flow.write_bytes(b"# Flow\n")
+    window.open_file(flow)
+    edit_rendered(window, 2)
+    ASKED.clear()
+    FAKE["answer"] = S.Save
+    trigger()
+    check(ASKED == ["Save changes to flow.md?"], f"{label}: asks to save the Rendered edits ({ASKED})")
+    check(pump(done, 5), f"{label}: goes on once the pulled document is saved")
+    check(flow.read_bytes() == b"## Flow\n", f"{label}: the Rendered edit is saved ({flow.read_bytes()!r})")
+
+
+FAKE["open_path"] = str(other)
+save_prompt_flow("New", window.on_new, lambda: window.loaded_path is None and window.mode == "rendered")
+save_prompt_flow("Open", window.on_open, lambda: window.loaded_path == other)
+save_prompt_flow("Drop", lambda: window._open_dropped([str(other)]), lambda: window.loaded_path == other)
+save_prompt_flow("Open Recent", lambda: window._open_recent(os.path.abspath(other)), lambda: window.loaded_path == other)
+save_prompt_flow("Close", window.on_close, lambda: window.loaded_path is None and window.buffer == "")
+
+# Untitled: Save goes through Save As (cancelling it stops the action), then the action goes on
+FAKE["answer"] = S.Discard
+window.on_new()
+type_rendered(window, "untitled words")
+FAKE["save_path"] = ""
+FAKE["answer"] = S.Save
+window.on_open()
+pump(lambda: False, 0.3)
+check(window.loaded_path is None and window.dirty and window.rich.modified, "Untitled: cancelling Save As stops Open")
+FAKE["save_path"] = str(TMP / "named")
+window.on_open()
+check(pump(lambda: window.loaded_path == other, 5), "Untitled: Open goes on after Save As")
+check((TMP / "named.md").read_bytes() == b"untitled words\n", "Untitled: the Rendered text is saved as named.md")
+
+# Cancel, or a save that fails, stops the action and keeps the edits
+edit_rendered(window, 3)
+FAKE["answer"] = S.Cancel
+window.on_new()
+pump(lambda: False, 0.3)
+check(window.loaded_path == other and window.dirty and window.rich.modified, "Cancel keeps the Rendered edits")
+os.chmod(other, stat.S_IREAD)
+ERRORS.clear()
+ASKED.clear()
+FAKE["answer"] = S.Save
+window.on_new()
+check(pump(lambda: ERRORS, 5) and window.loaded_path == other and window.dirty, "a save that fails stops the action")
+check(len(ASKED) == 1 and len(ERRORS) == 1, f"and asks once ({len(ASKED)} asks)")
+os.chmod(other, stat.S_IREAD | stat.S_IWRITE)
+check(other.read_bytes() == b"# Other\n", "and wrote nothing")
+
+# an edit that lands after the save's snapshot is asked about again
+edit_rendered(window, 2)
+ASKED.clear()
+edit_after_next_snapshot()
+window.on_new()
+check(pump(lambda: window.loaded_path is None, 5) and len(ASKED) == 2, f"an edit made during the save asks again ({ASKED})")
+check(other.read_bytes() == b"## Other\n", "the snapshot was saved")
+
+# while a pull is in flight, a prompt is not even shown
+window.open_file(other)
+edit_rendered(window, 1)
+busy_page(window, 600)
+window.on_save()
+ASKED.clear()
+window.on_new()
+window.close()
+check(not ASKED and window.loaded_path == other and window.isVisible(), "New and close are dropped while a pull is in flight")
+check(pump(lambda: not window._pending_pull and not window.dirty, 5) and other.read_bytes() == b"# Other\n", "the save completes")
+
+# a pull with no answer asks; Retry waits again and the action goes on
+edit_rendered(window, 2)
+richview.PULL_TIMEOUT_MS = 300
+busy_page(window, 1200)
+ASKED.clear()
+BOXES.clear()
+ANSWERS[:] = [S.Save, lambda: (setattr(richview, "PULL_TIMEOUT_MS", saved_timeout), S.Retry)[1]]
+window.on_new()
+check(pump(lambda: len(ASKED) >= 2, 3) and ASKED[1] == STOPPED_HUNG, f"a pull with no answer asks ({ASKED[1:]})")
+box = BOXES[1]
+check(sorted(b.text() for b in box.buttons()) == ["Retry", "Switch to Source"], "the box offers Switch to Source and Retry")
+check(box.defaultButton() is box.button(S.Retry), "Retry is the default")
+check(pump(lambda: window.loaded_path is None, 5), "Retry: New goes on once the page answers")
+check(other.read_bytes() == b"## Other\n" and len(ASKED) == 2, f"the edit is saved ({len(ASKED)} asks)")
+
+# Switch to Source: the last pulled text, still dirty; the page restarts
+window.open_file(other)
+edit_rendered(window, 3)
+richview.PULL_TIMEOUT_MS = 300
+busy_page(window, 1200)
+ASKED.clear()
+ANSWERS[:] = [S.Discard]
+page_loads: list = []
+window.rich.loadStarted.connect(lambda: page_loads.append(1))
+window.act_source.trigger()
+check(pump(lambda: window.mode == "source", 3) and ASKED == [STOPPED_HUNG], "Switch to Source shows Source mode")
+richview.PULL_TIMEOUT_MS = saved_timeout
+check(window.buffer == "## Other\n" and window.editor.document().isModified() and window.dirty,
+      "with the last loaded text, marked unsaved")
+check(other.read_bytes() == b"## Other\n", "nothing was saved")
+check(page_loads and pump(lambda: window.rich.is_ready, 6) and not window.rich.modified, "the abandoned page restarts")
+window.act_rendered.trigger()
+check(window.mode == "rendered" and pump(lambda: page_js(window.rich, "document.querySelector('#editor h2')?.textContent") == "Other", 3),
+      "switching back shows the Source text")
+
+# a crash in Rendered mode asks; Retry reloads the last loaded text into a fresh page
+CRASHES: list = []
+window.rich.crashed.connect(lambda: CRASHES.append(1))
+FAKE["answer"] = S.Discard
+window.open_file(other)
+edit_rendered(window, 1)
+ASKED.clear()
+ANSWERS[:] = [S.Retry]
+os.kill(window.rich.page().renderProcessPid(), signal.SIGTERM)
+check(pump(lambda: ASKED, 5) and ASKED == [STOPPED_CRASHED], f"a crash in Rendered mode asks ({ASKED})")
+check(pump(lambda: window.rich.is_ready, 5) and window.mode == "rendered", "Retry restarts the page in Rendered mode")
+check(pump(lambda: page_js(window.rich, "document.querySelector('#editor h2')?.textContent") == "Other", 3),
+      "the restarted page shows the last loaded text")
+check(window.dirty and not window.rich.modified, "the lost edit leaves the buffer marked unsaved")
+edit_rendered(window, 3)
+window.on_save()
+check(pump(lambda: not window.dirty, 5) and other.read_bytes() == b"### Other\n", "the restarted page edits and saves")
+
+# a crash during a pull asks once; Switch to Source keeps the last pulled text
+edit_rendered(window, 1)
+busy_page(window, 3000)
+ASKED.clear()
+ANSWERS[:] = [S.Discard]
+window.on_save()
+os.kill(window.rich.page().renderProcessPid(), signal.SIGTERM)
+check(pump(lambda: window.mode == "source", 5) and ASKED == [STOPPED_CRASHED], f"a crash during a pull asks once ({ASKED})")
+check(window.buffer == "### Other\n" and other.read_bytes() == b"### Other\n", "Switch to Source: the last pulled text, nothing saved")
+check(pump(lambda: window.rich.is_ready, 5), "the page restarts")
+
+# a crash in Source mode restarts the page without asking
+CRASHES.clear()
+ASKED.clear()
+os.kill(window.rich.page().renderProcessPid(), signal.SIGTERM)
+check(pump(lambda: CRASHES and window.rich.is_ready, 5) and not ASKED and window.mode == "source",
+      "a crash in Source mode restarts the page quietly")
+window.act_rendered.trigger()
+check(pump(lambda: page_js(window.rich, "document.querySelector('#editor h3')?.textContent") == "Other", 3),
+      "switching to Rendered after it shows the document")
+
+# window close and Exit: the save finishes after the pull, then the window closes
+cw = main_window.MainWindow({"theme": "light", "window": None, "preview_zoom": 1.0})
+cw.show()
+check(pump(lambda: cw.rich.is_ready, 5), "a second window's page is ready")
+exit_md = TMP / "exit.md"
+for label, close, level in [("closing the window", cw.close, 2), ("File > Exit", cw.act_exit.trigger, 3)]:
+    exit_md.write_bytes(b"# Exit\n")
+    cw.show()
+    cw.open_file(exit_md)
+    edit_rendered(cw, level)
+    ASKED.clear()
+    ANSWERS[:] = [S.Save]
+    close()
+    check(cw.isVisible() and ASKED == ["Save changes to exit.md?"], f"{label}: asks, and waits for the pull")
+    check(pump(lambda: not cw.isVisible(), 5), f"{label}: closes once the document is saved")
+    check(exit_md.read_bytes() == b"#" * level + b" Exit\n", f"{label}: the Rendered edit is saved")
+cw.show()
+cw.open_file(exit_md)
+edit_rendered(cw, 1)
+ANSWERS[:] = [S.Discard]
+check(cw.close() and not cw.isVisible(), "Don't Save closes at once")
+check(exit_md.read_bytes() == b"### Exit\n", "and saves nothing")
+
+# a page that stays hung: Switch to Source works, and Rendered is greyed once the restart times out
+cw.show()
+cw.open_file(exit_md)
+edit_rendered(cw, 2)
+saved_ready = richview.READY_TIMEOUT_MS
+richview.PULL_TIMEOUT_MS, richview.READY_TIMEOUT_MS = 300, 300
+busy_page(cw, 2000)
+ANSWERS[:] = [S.Discard]
+cw.on_save()
+check(pump(lambda: cw.rich.failed, 3) and cw.mode == "source" and cw.buffer == "### Exit\n",
+      "a page that stays hung: Source mode with the last loaded text")
+check(not cw.act_rendered.isEnabled() and cw.statusBar().currentMessage() == main_window.EDITOR_FAILED_NOTE,
+      "Rendered is greyed with a warning")
+richview.PULL_TIMEOUT_MS, richview.READY_TIMEOUT_MS = saved_timeout, saved_ready
+cw.hide()
+
+# table edits and unsafe paste reach the saved file through the window
+FAKE["answer"] = S.Discard
+table_md = TMP / "table.md"
+table_md.write_bytes(b"intro\n")
+window.open_file(table_md)
+page_js(window.rich, "(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.setSelection("
+                     "window.mdEditor.view.state.selection.constructor.atEnd(window.mdEditor.view.state.doc))), 0)")
+window.rich.command("insertTable", {"rows": 2, "cols": 2})
+pump(lambda: window.dirty, 3)
+page_js(window.rich, "(window.mdEditor.view.dispatch(window.mdEditor.view.state.tr.insertText('h ')), 0)")
+window.rich.command("addRowAfter")
+page_js(window.rich, """(window.mdEditor.view.pasteHTML('<p><b>bold</b> <a href="javascript:alert(1)">bad</a> '
+  + '<a href="https://ok.example/">ok</a><script>parent.pasted = 1</script></p>'), 0)""")
+window.on_save()
+check(pump(lambda: not window.dirty, 5), "Save after table edits and a paste")
+saved_table = table_md.read_bytes().decode("utf-8")
+check(saved_table == "intro\n\n| h **bold** bad [ok](https://ok.example/) |  |\n| --- | --- |\n|  |  |\n|  |  |\n",
+      f"the saved file has the table, and the paste without its javascript: link or script ({saved_table!r})")
+check(page_js(window.rich, "window.pasted === undefined") is True, "the pasted script never ran")
 
 # --- Later tasks insert their checks directly above this line. ---
 

@@ -42,7 +42,15 @@ LARGE_FILE_NOTE = "Large file: opened in Source mode"
 OPEN_FAILED_NOTE = "Opened in Source mode: the rendered editor could not load this file."
 SWITCH_FAILED_NOTE = "Staying in Source mode: the rendered editor could not load this document."
 EDITOR_FAILED_NOTE = "Rendered mode is unavailable: the rendered editor did not start."
-PULL_FAILED_NOTE = "The rendered editor did not answer; nothing was saved or switched."
+STOPPED_TEXT = "The rendered editor stopped responding."  # spec section 7
+HUNG_DETAIL = (
+    "Retry waits for it again. Switch to Source continues with the document as it was last "
+    "opened, saved or switched between modes: Rendered edits made since then are lost."
+)
+CRASHED_DETAIL = (
+    "Rendered edits made since the document was last opened, saved or switched between modes "
+    "are lost. Retry reloads the rendered editor; Switch to Source continues in Source mode."
+)
 DARK_PALETTE_COLORS = {
     "window": "#202020",
     "window_text": "#f0f0f0",
@@ -216,6 +224,7 @@ class MainWindow(QMainWindow):
         self.rich.changed.connect(self._on_rendered_changed)
         self.rich.caretBlock.connect(self._on_caret_block)
         self.rich.load_failed.connect(self._on_editor_failed)
+        self.rich.crashed.connect(self._on_editor_crashed)
         self.rich.ready.connect(self._watch_rich_drops)
         self._watch_rich_drops()
 
@@ -375,26 +384,29 @@ class MainWindow(QMainWindow):
         return True
 
     def on_new(self) -> None:
-        if not self._ok_to_replace():
-            return
+        self._confirm_replace(self._new_document)
+
+    def _new_document(self) -> None:
         self._load(None, b"")
         self._show_mode(self.RENDERED)
 
     def on_open(self) -> None:
-        if not self._ok_to_replace():
-            return
+        self._confirm_replace(self._pick_and_open)
+
+    def _pick_and_open(self) -> None:
         path = pick_open_path(self)
         if path:
             self.open_file(path)
 
-    def on_save(self) -> bool:
+    def on_save(self, *, then: Callable[[], None] | None = None) -> bool:
         """True when the file was written before returning. In Rendered mode with edits not
-        yet pulled, the save finishes after the pull and this returns False."""
+        yet pulled, the save finishes after the pull and this returns False. then() runs once
+        the file is written, now or after the pull; never when the save fails."""
         if self.loaded_path is None:
-            return self.on_save_as()
-        return self._save_when_ready(self.loaded_path)
+            return self.on_save_as(then=then)
+        return self._save_when_ready(self.loaded_path, then)
 
-    def on_save_as(self) -> bool:
+    def on_save_as(self, *, then: Callable[[], None] | None = None) -> bool:
         start = str(self.loaded_path) if self.loaded_path else "Untitled.md"
         path = pick_save_path(self, start)
         if not path:
@@ -402,17 +414,20 @@ class MainWindow(QMainWindow):
         target = Path(path)
         if not target.suffix:
             target = target.with_suffix(".md")
-        return self._save_when_ready(target)
+        return self._save_when_ready(target, then)
 
     def on_close(self) -> None:
-        if not self._ok_to_replace():
-            return
-        self._load(None, b"")
-        self._show_mode(self.RENDERED)
+        self._confirm_replace(self._new_document)
 
-    def _save_when_ready(self, path: Path) -> bool:
+    def _save_when_ready(self, path: Path, then: Callable[[], None] | None = None) -> bool:
         saved: list[bool] = []
-        self.with_buffer(lambda _text: saved.append(self._save_to(path)))
+
+        def save(_text: str) -> None:
+            saved.append(self._save_to(path))
+            if saved[0] and then is not None:
+                then()
+
+        self.with_buffer(save)
         return saved == [True]
 
     def _save_to(self, path: Path) -> bool:
@@ -452,8 +467,9 @@ class MainWindow(QMainWindow):
         box.setDefaultButton(QMessageBox.StandardButton.Yes)
         return ask(box) == QMessageBox.StandardButton.Yes
 
-    def _prompt_save(self) -> str:
-        """Ask 'Save changes to <name>?'. Returns 'save' (saved OK), 'discard' or 'cancel'."""
+    def _prompt_save(self, then: Callable[[], None]) -> None:
+        """Ask 'Save changes to <name>?'. Don't Save: then() at once. Save: then() once the file
+        is written (after a Rendered pull), asking again if an edit came in meanwhile."""
         name = self.loaded_path.name if self.loaded_path else "Untitled"
         buttons = QMessageBox.StandardButton
         box = QMessageBox(
@@ -467,14 +483,19 @@ class MainWindow(QMainWindow):
         box.button(buttons.Discard).setText("Don't Save")
         answer = ask(box)
         if answer == buttons.Save:
-            return "save" if self.on_save() else "cancel"
-        if answer == buttons.Discard:
-            return "discard"
-        return "cancel"
+            self.on_save(then=lambda: self._confirm_replace(then))
+        elif answer == buttons.Discard:
+            then()
 
-    def _ok_to_replace(self) -> bool:
-        """True when the buffer may be replaced: it is clean, was saved, or was discarded."""
-        return not self.dirty or self._prompt_save() != "cancel"
+    def _confirm_replace(self, then: Callable[[], None]) -> None:
+        """then() once the buffer may be replaced: it is clean, was saved or was discarded.
+        Nothing on Cancel or a failed save; dropped while a pull is in flight (spec 6.4)."""
+        if self._pending_pull:
+            return
+        if self.dirty:
+            self._prompt_save(then)
+        else:
+            then()
 
     # --- Modes -------------------------------------------------------------
 
@@ -510,7 +531,13 @@ class MainWindow(QMainWindow):
             return  # another document was loaded meanwhile: this one is gone
         self._pending_pull = False
         if doc is None:
-            self._warn(PULL_FAILED_NOTE)  # Task 14: the stopped-responding dialog
+            # A crash answers pulls before rich.crashed, with the page no longer ready:
+            # _on_editor_crashed asks then. Otherwise the page hangs (spec section 7).
+            if self.rich.is_ready:
+                if self._ask_stopped(HUNG_DETAIL):
+                    self.with_buffer(fn)
+                else:
+                    self._abandon_rendered()
             return
         try:
             text = serialize.to_text(doc)
@@ -586,6 +613,23 @@ class MainWindow(QMainWindow):
             if block_line is not None and start < block_line <= line:
                 best, start = index, block_line
         return best
+
+    def _ask_stopped(self, detail: str) -> bool:
+        """Spec section 7: the editor stopped responding. True for Retry, False for Switch to Source."""
+        buttons = QMessageBox.StandardButton
+        box = QMessageBox(
+            QMessageBox.Icon.Warning, APP_NAME, f"{STOPPED_TEXT}\n\n{detail}",
+            buttons.Discard | buttons.Retry, self,
+        )
+        box.button(buttons.Discard).setText("Switch to Source")
+        box.setDefaultButton(buttons.Retry)
+        return ask(box) == buttons.Retry
+
+    def _abandon_rendered(self) -> None:
+        """Switch to Source with the text last loaded into the page or pulled from it. The page
+        is restarted: its later edits are dropped, and a hung page may never answer again."""
+        self.rich.restart()  # also clears rich.modified, so _enter_source does not pull
+        self._enter_source(self._rendered_text)
 
     def _warn(self, text: str) -> None:
         """Transient status-bar warning (render fallback, missing file, read failure)."""
@@ -663,17 +707,28 @@ class MainWindow(QMainWindow):
     def _on_caret_block(self, index: int) -> None:
         self._caret_block = index
 
+    def _on_editor_crashed(self) -> None:
+        """The page's process died with its unpulled edits. Source mode restarts it quietly;
+        Rendered mode asks, then reloads the buffer (Retry) or switches to Source (spec 7)."""
+        if self.mode == self.RENDERED and not self._ask_stopped(CRASHED_DETAIL):
+            self._abandon_rendered()
+            return
+        self.rich.restart()
+        if self.mode == self.RENDERED and not self._show_mode(self.RENDERED):
+            self._warn(OPEN_FAILED_NOTE)
+
     def _on_editor_failed(self) -> None:
         """No ready() in time: Source only for this session. Nothing was edited in the page."""
         if self.mode == self.RENDERED:
             self._show_mode(self.SOURCE)
+        self._update_chrome()  # greys Rendered, also when Source was already shown (a restart after a hang)
         self._warn(EDITOR_FAILED_NOTE)
 
     # --- Drag and drop -----------------------------------------------------
 
     def _open_dropped(self, paths: list[str]) -> None:
-        if paths and self._ok_to_replace():
-            self.open_file(paths[0])
+        if paths:
+            self._confirm_replace(lambda: self.open_file(paths[0]))
 
     def _defer_drop(self, event) -> None:
         # Defer so a save prompt does not block Explorer's drag-and-drop loop.
@@ -713,10 +768,20 @@ class MainWindow(QMainWindow):
     # --- Window lifecycle and settings -------------------------------------
 
     def closeEvent(self, event) -> None:
-        if self._ok_to_replace():
-            event.accept()
-        else:
-            event.ignore()
+        """Asks about unsaved changes. When Save needs a Rendered pull, this close is refused and
+        close() is called again once the file is written (spec 6.4): the buffer is clean then."""
+        inside = True
+        allowed: list[bool] = []
+
+        def allow() -> None:
+            if inside:
+                allowed.append(True)
+            else:
+                self.close()  # Qt ignores a close() made from inside closeEvent; this one is not
+
+        self._confirm_replace(allow)
+        inside = False
+        event.setAccepted(bool(allowed))
 
     def _restore_geometry(self, rect: dict | None) -> None:
         if not rect:
@@ -770,8 +835,9 @@ class MainWindow(QMainWindow):
         menu.setEnabled(bool(self._recent))
 
     def _open_recent(self, path: str) -> None:
-        if not self._ok_to_replace():
-            return
+        self._confirm_replace(lambda: self._open_recent_now(path))
+
+    def _open_recent_now(self, path: str) -> None:
         if not self.open_file(path) and not Path(path).exists():
             self._forget_recent(path)  # the file is gone; don't keep offering it
 
