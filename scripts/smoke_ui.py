@@ -1781,6 +1781,205 @@ check(pump(lambda: glyph_lightness(tb.buttons["bold"]) < 100, 2), "back to light
 FAKE["answer"] = S.Discard
 window.on_new()
 
+# --- WYSIWYG Task 16: link and image dialogs, link navigation, protected blocks -----
+from PySide6.QtCore import QTimer  # noqa: E402
+from PySide6.QtGui import QImage  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialogButtonBox  # noqa: E402
+
+from mdviewer import dialogs  # noqa: E402
+
+DIALOGS: list = []
+OPENED: list = []
+real_run_link_dialog = main_window.run_link_dialog
+real_run_image_dialog = main_window.run_image_dialog
+
+
+def fake_dialog(*call):
+    """Stand-in for a page-requested dialog: records the call, runs FAKE["during_dialog"]
+    "while it is open", then answers FAKE[kind]."""
+    DIALOGS.append(call)
+    hook = FAKE.pop("during_dialog", None)
+    if hook:
+        hook()
+    return FAKE[call[0]]
+
+
+main_window.run_link_dialog = lambda parent, text, url: fake_dialog("link", text, url)
+main_window.run_image_dialog = lambda parent, base_dir: fake_dialog("image", base_dir)
+main_window.open_external = OPENED.append
+dialogs.pick_image_path = lambda parent, start: (DIALOGS.append(("browse", start)), FAKE["image_path"])[-1]
+FAKE.update(link=None, image=None, image_path="")
+
+# the dialogs themselves
+link_box = dialogs.LinkDialog("word", "")
+check(link_box.windowTitle() == "Insert Link" and link_box.remove_button is None and link_box.text_edit.text() == "word",
+      "a new link: Insert Link with the selected text, no Remove link")
+check(not link_box.ok_button.isEnabled(), "OK waits for a URL")
+link_box.url_edit.setText("java\tscript:alert(1)")
+check(not link_box.ok_button.isEnabled(), "a javascript: URL cannot be accepted")
+link_box.url_edit.setText("  https://example.com/  ")
+check(link_box.ok_button.isEnabled() and link_box.values() == ("word", "https://example.com/"), "OK gives (text, trimmed URL)")
+edit_box = dialogs.LinkDialog("old", "https://o.test/")
+check(edit_box.windowTitle() == "Edit Link" and edit_box.remove_button.text() == "&Remove link"
+      and edit_box.ok_button.isEnabled(), "editing a link offers Remove link")
+image_box = dialogs.ImageDialog(TMP)
+check(image_box.windowTitle() == "Insert Image" and not image_box.ok_button.isEnabled(), "OK waits for a path")
+picked = TMP / "pics" / "a b.png"
+FAKE["image_path"] = picked.as_posix()
+image_box.browse_button.click()
+check(DIALOGS[-1] == ("browse", str(TMP)) and image_box.path_edit.text() == str(picked),
+      "Browse... starts in the document's folder and fills the path")
+image_box.alt_edit.setText("Alt")
+check(image_box.ok_button.isEnabled() and image_box.values() == ("pics/a b.png", "Alt"),
+      "a picked file is stored relative to the document's folder")
+untitled_box = dialogs.ImageDialog(None)
+untitled_box.path_edit.setText(str(picked))
+check(untitled_box.values()[0] == picked.as_uri(), "Untitled: the image is an absolute file: URI")
+image_box.path_edit.setText("javascript:alert(1)")
+check(not image_box.ok_button.isEnabled(), "a javascript: image cannot be accepted")
+
+
+# the real seams map the buttons to their answers (a timer presses them)
+def press_when_open(button_of, tries: int = 100) -> None:
+    """Clicks button_of(dialog) once a modal dialog is open (polled every 20 ms, up to 2 s)."""
+    dialog = QApplication.activeModalWidget()
+    if dialog is not None:
+        button_of(dialog).click()
+    elif tries:
+        QTimer.singleShot(20, lambda: press_when_open(button_of, tries - 1))
+
+
+def page_doc() -> str:
+    """The page's document as JSON text, read without a pull (a pull marks the page clean)."""
+    return json.dumps(page_js(window.rich, "window.mdEditor.view.state.doc.toJSON()"))
+
+
+CANCEL = QDialogButtonBox.StandardButton.Cancel
+press_when_open(lambda d: d.remove_button)
+check(real_run_link_dialog(window, "old", "https://o.test/") == "remove", "Remove link answers 'remove'")
+press_when_open(lambda d: d.ok_button)
+check(real_run_link_dialog(window, "old", "https://o.test/") == ("old", "https://o.test/"), "OK answers (text, url)")
+press_when_open(lambda d: d.findChild(QDialogButtonBox).button(CANCEL))
+check(real_run_link_dialog(window, "", "") is None, "Cancel answers None")
+press_when_open(lambda d: (d.path_edit.setText("https://e.test/a.png"), d.ok_button)[1])
+check(real_run_image_dialog(window, TMP) == ("https://e.test/a.png", ""), "the image dialog answers (src, alt)")
+
+# Link and Image through the page: the saved Markdown
+picked.parent.mkdir()
+QImage(4, 4, QImage.Format.Format_ARGB32).save(str(picked))
+links_md = TMP / "links.md"
+links_md.write_bytes(b"word here\n\n# Intro\n\nend\n")
+window.open_file(links_md)
+check(pump(lambda: tb.buttons["link"].isEnabled(), 3), "the page enables Link")
+SELECT_JS = ("(() => {{ const v = window.mdEditor.view; const s = v.state.selection;"
+             " v.dispatch(v.state.tr.setSelection(s.constructor.create(v.state.doc, s.from + {}, s.from + {}))); return 0; }})()")
+window.rich.focus_block(0)
+page_js(window.rich, SELECT_JS.format(0, 4))
+FAKE["link"] = ("word", "https://example.com/")
+tb.buttons["link"].trigger()
+check(pump(lambda: window.dirty, 3) and DIALOGS[-1] == ("link", "word", ""), "Link opens the dialog with the selected text")
+window.rich.focus_block(2)
+pump(lambda: window._caret_block == 2, 3)
+FAKE["image"] = ("pics/a b.png", "Alt")
+check(pump(lambda: tb.buttons["image"].isEnabled(), 3), "the page enables Image")
+tb.buttons["image"].trigger()
+check(pump(lambda: DIALOGS[-1] == ("image", TMP), 3), "Image opens the dialog with the document's folder")
+check(pump(lambda: page_js(window.rich, "document.querySelector('#editor .md-image img')?.naturalWidth") == 4, 3),
+      "the inserted image displays: display_src is its resolved file: URI")
+window.on_save()
+check(pump(lambda: not window.dirty, 5), "Save after the dialogs")
+saved_links = links_md.read_bytes().decode("utf-8")
+check(saved_links == "[word](https://example.com/) here\n\n# Intro\n\n![Alt](<pics/a b.png>)end\n",
+      f"the saved file has the dialogs' link and image ({saved_links!r})")
+window.rich.focus_block(0)
+page_js(window.rich, SELECT_JS.format(1, 1))
+FAKE["link"] = "remove"
+tb.buttons["link"].trigger()
+check(pump(lambda: window.dirty, 3) and DIALOGS[-1] == ("link", "word", "https://example.com/"),
+      "on a link, the dialog gets its text and URL")
+FAKE["link"] = None
+count = len(DIALOGS)
+FAKE["during_dialog"] = lambda: window.rich.requestLinkDialog.emit("again", "")
+tb.buttons["link"].trigger()
+check(pump(lambda: len(DIALOGS) > count, 3) and len(DIALOGS) == count + 1, "a request made while a dialog is open is dropped")
+window.on_save()
+check(pump(lambda: not window.dirty, 5) and links_md.read_bytes().startswith(b"word here\n"),
+      "Remove link; Cancel changes nothing")
+FAKE["link"] = ("zzz", "https://z.test/")
+FAKE["during_dialog"] = lambda: window.open_file(links_md)
+tb.buttons["link"].trigger()
+pump(lambda: False, 0.5)
+check(not window.dirty and "z.test" not in page_doc(), "an answer for a document replaced meanwhile is dropped")
+FAKE["link"] = None
+
+# the real dialog, run from inside the page's bridge call
+main_window.run_link_dialog = real_run_link_dialog
+check(pump(lambda: tb.buttons["link"].isEnabled(), 3), "Link is enabled again")
+window.rich.focus_block(0)
+page_js(window.rich, SELECT_JS.format(0, 4))
+press_when_open(lambda d: (d.url_edit.setText("https://real.test/"), d.ok_button)[1])
+tb.buttons["link"].trigger()
+check(pump(lambda: "https://real.test/" in page_doc(), 3), "a real dialog opened from the page's request applies its answer")
+main_window.run_link_dialog = lambda parent, text, url: fake_dialog("link", text, url)
+
+# Ctrl+click: external links, relative files, #anchors; unsafe ones are ignored
+OPENED.clear()
+for href in ("https://example.com/a", "javascript:alert(1)", " java\tscript:x", "other.md#part", "mailto:me@example.com"):
+    window.rich.openLink.emit(href)
+check(OPENED == [QUrl("https://example.com/a"), QUrl((TMP / "other.md").as_uri() + "#part"), QUrl("mailto:me@example.com")],
+      f"safe links open outside the app, relative ones next to the file ({OPENED})")
+anchors_md = TMP / "anchors.md"
+anchors_md.write_bytes(b"[go](#section-two) [nowhere](#missing)\n\n# Intro\n\ntext\n\n## Section Two\n\nend\n")
+window.open_file(anchors_md)
+pump(lambda: window._caret_block == 0 and window.rich.is_ready, 3)
+OPENED.clear()
+point = page_js(window.rich, "(() => { const b = document.querySelector('#editor a').getBoundingClientRect();"
+                             " return [Math.round(b.left + b.width / 2), Math.round(b.top + b.height / 2)]; })()")
+QTest.mouseClick(window.rich.focusProxy(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, QPoint(*point))
+check(pump(lambda: window._caret_block == 3, 3) and OPENED == [], "Ctrl+click on #section-two moves to that heading")
+window.rich.openLink.emit("#missing")
+pump(lambda: False, 0.3)
+check(window._caret_block == 3 and OPENED == [], "an anchor with no heading does nothing")
+window.on_new()
+window.rich.openLink.emit("other.md")
+window.rich.openLink.emit("https://example.com/b")
+check(OPENED == [QUrl("https://example.com/b")], "Untitled: a relative link has nowhere to open")
+
+# hovering a link shows its URL; leaving clears only that message
+bar = window.statusBar()
+window.rich.hoverLink.emit("https://example.com/h")
+check(bar.currentMessage() == "https://example.com/h", "a hovered link shows its URL in the status bar")
+window.rich.hoverLink.emit("")
+check(bar.currentMessage() == "", "leaving the link clears it")
+window.rich.hoverLink.emit("https://example.com/h")
+bar.showMessage("a warning", 10000)
+window.rich.hoverLink.emit("")
+check(bar.currentMessage() == "a warning", "leaving a link keeps a warning shown meanwhile")
+window.rich.hoverLink.emit("https://example.com/h")
+window.act_source.trigger()
+check(window.mode == "source" and bar.currentMessage() == "", "Source mode drops the hovered URL")
+count = len(DIALOGS)
+window.rich.requestLinkDialog.emit("late", "")
+window.rich.requestImageDialog.emit()
+check(len(DIALOGS) == count, "a dialog request that arrives in Source mode is dropped")
+window.act_rendered.trigger()
+
+# double-click on a protected block: Source mode, caret on its first line
+protected_md = TMP / "protected.md"
+protected_md.write_bytes(b"intro\n\n<div>\nraw\n</div>\n\nafter\n")
+window.open_file(protected_md)
+pump(lambda: window.rich.is_ready and page_js(window.rich, "document.querySelector('#editor .md-shield') !== null"), 3)
+page_js(window.rich, "(() => { const v = window.mdEditor.view; v.dispatch(v.state.tr.insertText('X', v.state.doc.content.size - 1)); return 0; })()")
+check(pump(lambda: window.dirty, 3), "an edit after the raw HTML block")
+# QTest cannot double-click in the page (see Task 16): dispatch the DOM event the page handles.
+page_js(window.rich, "document.querySelector('#editor .md-shield')"
+                     ".dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }))")
+check(pump(lambda: window.mode == "source", 3) and window.act_source.isChecked(), "double-clicking raw HTML switches to Source")
+check(window.editor.textCursor().blockNumber() + 1 == 3, f"the caret is on the block's first line ({window.editor.textCursor().blockNumber() + 1})")
+check(window.dirty and window.buffer == "intro\n\n<div>\nraw\n</div>\n\nafterX\n", f"the edit came along ({window.buffer!r})")
+FAKE["answer"] = S.Discard
+window.on_new()
+
 # --- Later tasks insert their checks directly above this line. ---
 
 shutil.rmtree(TMP, ignore_errors=True)

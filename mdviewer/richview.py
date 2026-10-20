@@ -34,6 +34,11 @@ _MAIN_WORLD = 0  # QWebEngineScript.ScriptWorldId.MainWorld: where window.mdEdit
 _NO_FRAGMENT = QUrl.ComponentFormattingOption.PrettyDecoded | QUrl.UrlFormattingOption.RemoveFragment
 # A pull reads the document and marks the page clean in one step: no edit falls in between.
 _PULL_JS = "(() => {{ const json = JSON.stringify(window.mdEditor.getDocument()); window.mdEditor.markClean({}); return json; }})()"
+# Each top-level block's heading text, null for other blocks (in-page #anchor links).
+_HEADINGS_JS = (
+    "(() => { const out = []; window.mdEditor.view.state.doc.forEach("
+    "(node) => out.push(node.type.name === 'heading' ? node.textContent : null)); return JSON.stringify(out); })()"
+)
 
 
 class Bridge(QObject):
@@ -304,3 +309,11 @@ class RichView(QWebEngineView):
     def focus_block(self, index: int) -> None:
         """Caret at the start of top-level block `index` (mode-switch caret mapping)."""
         self._call(f"window.mdEditor.focusBlock({int(index)}), 0")
+
+    def heading_texts(self, callback: Callable[[list], None]) -> None:
+        """callback(each top-level block's heading text, None for other blocks). Never called when
+        the page fails, crashes or restarts first."""
+        def done(value):
+            if isinstance(value, str):
+                callback(json.loads(value))
+        self._call(_HEADINGS_JS, done)

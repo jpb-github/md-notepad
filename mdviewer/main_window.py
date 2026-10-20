@@ -6,8 +6,17 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QRect, QTimer
-from PySide6.QtGui import QActionGroup, QColor, QFont, QGuiApplication, QKeySequence, QPalette, QTextCursor
+from PySide6.QtCore import QEvent, QRect, QTimer, QUrl
+from PySide6.QtGui import (
+    QActionGroup,
+    QColor,
+    QDesktopServices,
+    QFont,
+    QGuiApplication,
+    QKeySequence,
+    QPalette,
+    QTextCursor,
+)
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWidgets import (
     QApplication,
@@ -22,8 +31,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mdviewer.core import docmodel, encoding, frontmatter, serialize, settings, themeservice
+from mdviewer.core import docmodel, encoding, frontmatter, serialize, settings, themeservice, urls
 from mdviewer.core.filewatch import Watcher, WatchEvent
+from mdviewer.dialogs import ImageDialog, LinkDialog
 from mdviewer.editor import MarkdownEditor
 from mdviewer.findbar import FindBar
 from mdviewer.preferences import PreferencesDialog
@@ -125,6 +135,26 @@ def run_preferences(dialog) -> bool:
     return dialog.exec() == QDialog.DialogCode.Accepted
 
 
+def run_link_dialog(parent, text: str, url: str) -> tuple[str, str] | str | None:
+    """Run the modal link dialog: (text, url) for OK, "remove" for Remove link, None for Cancel."""
+    dialog = LinkDialog(text, url, parent)
+    result = dialog.exec()
+    if result == LinkDialog.REMOVE:
+        return "remove"
+    return dialog.values() if result == QDialog.DialogCode.Accepted else None
+
+
+def run_image_dialog(parent, base_dir: Path | None) -> tuple[str, str] | None:
+    """Run the modal image dialog: (src, alt) for OK, None for Cancel."""
+    dialog = ImageDialog(base_dir, parent)
+    return dialog.values() if dialog.exec() == QDialog.DialogCode.Accepted else None
+
+
+def open_external(url: QUrl) -> None:
+    """Hand a Ctrl+clicked link to Windows (browser, mail client, default app)."""
+    QDesktopServices.openUrl(url)
+
+
 def read_system_theme() -> str:
     """Seam: the Windows app theme; 'light' on any failure or off Windows."""
     try:
@@ -216,6 +246,8 @@ class MainWindow(QMainWindow):
         self._caret_block = 0  # top-level block of the Rendered caret (RichView.caretBlock)
         self._pending_pull = False  # a with_buffer pull is in flight; re-triggers are dropped
         self._doc_number = 0  # counts loads; a pull started before the latest one is discarded
+        self._in_dialog = False  # a link or image dialog is open; the page's further requests are dropped
+        self._hovered = ""  # the link URL shown in the status bar
 
         self.editor = MarkdownEditor()
         self._apply_editor_font()
@@ -228,6 +260,11 @@ class MainWindow(QMainWindow):
         self.rich.load_failed.connect(self._on_editor_failed)
         self.rich.crashed.connect(self._on_editor_crashed)
         self.rich.ready.connect(self._watch_rich_drops)
+        self.rich.requestLinkDialog.connect(self._on_link_request)
+        self.rich.requestImageDialog.connect(self._on_image_request)
+        self.rich.openLink.connect(self._open_link)
+        self.rich.hoverLink.connect(self._show_hovered_link)
+        self.rich.editProtected.connect(self._edit_protected)
         self._watch_rich_drops()
 
         self.find_bar = FindBar(self.editor)
@@ -580,6 +617,7 @@ class MainWindow(QMainWindow):
                 mode = self.SOURCE
         if mode == self.SOURCE and self.mode == self.RENDERED:
             self._sync_editor()  # a pull or save moved the Rendered buffer past the editor's text
+            self._show_hovered_link("")  # the page sends no mouseleave once hidden
         self.mode = mode
         self.stack.setCurrentIndex(0 if mode == self.RENDERED else 1)
         (self.rich if mode == self.RENDERED else self.editor).setFocus()
@@ -609,7 +647,11 @@ class MainWindow(QMainWindow):
 
     def _parse(self, text: str) -> dict:
         front, body = frontmatter.split(text)
-        return docmodel.from_markdown(body, front, self.loaded_path.parent if self.loaded_path else None)
+        return docmodel.from_markdown(body, front, self._base_dir())
+
+    def _base_dir(self) -> Path | None:
+        """The folder relative links and images resolve against; None for Untitled."""
+        return self.loaded_path.parent if self.loaded_path else None
 
     def _line_of_block(self, index: int) -> int:
         """First source line (1-based) of top-level block `index` of the Rendered buffer."""
@@ -666,6 +708,74 @@ class MainWindow(QMainWindow):
         """A toolbar button or the block combo: run it in the page, which keeps the focus."""
         self.rich.command(name, args)
         self.rich.setFocus()
+
+    # --- Links, images and protected blocks (Rendered mode) ---
+
+    def _run_dialog(self, run: Callable[[], object]):
+        """run() a page-requested dialog; None when another is open, or when the document was
+        replaced or left meanwhile (the answer belongs to the old selection)."""
+        if self._in_dialog or self.mode != self.RENDERED:
+            return None
+        number = self._doc_number
+        self._in_dialog = True
+        try:
+            result = run()
+        finally:
+            self._in_dialog = False
+        self.rich.setFocus()
+        if number != self._doc_number or self.mode != self.RENDERED:
+            return None
+        return result
+
+    def _on_link_request(self, text: str, href: str) -> None:
+        """Ctrl+K or the Link button: ask for the link, then tell the page."""
+        answer = self._run_dialog(lambda: run_link_dialog(self, text, href))
+        if answer == "remove":
+            self.rich.command("removeLink")
+        elif answer:
+            link_text, url = answer
+            self.rich.command("setLink", {"text": link_text, "href": url})
+
+    def _on_image_request(self) -> None:
+        """The Image button: ask for the image, then tell the page."""
+        base_dir = self._base_dir()
+        answer = self._run_dialog(lambda: run_image_dialog(self, base_dir))
+        if answer:
+            src, alt = answer
+            self.rich.command("insertImage", {"src": src, "display_src": urls.resolve(src, base_dir), "alt": alt})
+
+    def _open_link(self, href: str) -> None:
+        """Ctrl+click in the page: a #fragment moves the caret to its heading, a safe link opens
+        outside the app. Anything else (unsafe, unknown anchor, relative in Untitled) does nothing."""
+        if href.startswith("#"):
+            self.rich.heading_texts(lambda texts: self._go_to_anchor(texts, href[1:]))
+            return
+        if not urls.is_safe(href):
+            return
+        target = QUrl(urls.resolve(href, self._base_dir()))
+        if not target.isRelative():  # Untitled: a relative link has no folder to resolve against
+            open_external(target)
+
+    def _go_to_anchor(self, headings: list, fragment: str) -> None:
+        index = urls.anchor_block(headings, fragment)
+        if index is not None and self.mode == self.RENDERED:
+            self.rich.focus_block(index)
+
+    def _show_hovered_link(self, href: str) -> None:
+        """Show the hovered link's URL; leaving clears it only while it is still shown."""
+        bar = self.statusBar()
+        if href:
+            self._hovered = href
+            bar.showMessage(href)
+            return
+        if self._hovered and bar.currentMessage() == self._hovered:
+            bar.clearMessage()
+        self._hovered = ""
+
+    def _edit_protected(self, index: int) -> None:
+        """Double-click on a protected block (raw HTML, ...): edit it in Source, caret on its line."""
+        self._caret_block = index
+        self.set_mode(self.SOURCE)
 
     def _zoom_in(self) -> None:
         self._set_zoom(self._zoom * ZOOM_STEP)
