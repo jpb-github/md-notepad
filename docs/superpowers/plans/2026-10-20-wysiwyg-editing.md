@@ -17057,7 +17057,7 @@ Results:
   the version goes from 1.1.0 to 2.0.0 (the user's call, 2026-10-21) so the
   new MSI replaces a 1.1.0 install; the MSI file name carries it (Steps 6-7).
 
-- [ ] **Step 1: Add the pre-build check**
+- [x] **Step 1: Add the pre-build check**
 
 In `scripts/build_exe.py` add `WEB_DIR`, `WEB_FILES = ("editor.html",
 "editor.js", "editor.css", "qwebchannel.js")` and `missing_web_files()`. At
@@ -17071,7 +17071,7 @@ back.
 Expected: exit code 1 within a second, the message names `editor.js` only, no
 PyInstaller output.
 
-- [ ] **Step 2: Add the post-build check (red)**
+- [x] **Step 2: Add the post-build check (red)**
 
 Add `missing_bundle_files(app_dir)`: it returns the entries of
 `_internal/mdviewer/web/<name>` for every `WEB_FILES` name and
@@ -17086,7 +17086,7 @@ Run: `.venv\Scripts\python scripts\build_exe.py` (~200 s).
 Expected: exit code 1, the message lists the four `mdviewer/web/...` paths
 and not `QtWebChannel.pyd`.
 
-- [ ] **Step 3: Bundle the web folder (green)**
+- [x] **Step 3: Bundle the web folder (green)**
 
 In `main()`, after the icon `--add-data`, add
 `cmd += ["--add-data", f"{WEB_DIR}{os.pathsep}mdviewer/web"]` with the
@@ -17098,7 +17098,7 @@ Expected: exit code 0, `Built ...\dist\MDViewer\MDViewer.exe`, and
 `dist\MDViewer\_internal\mdviewer\web` holds the five files of
 `mdviewer/web`.
 
-- [ ] **Step 4: Launch the built exe on a sample file**
+- [x] **Step 4: Launch the built exe on a sample file**
 
 Create a folder outside the repo with `sample.md`:
 
@@ -17120,18 +17120,18 @@ and the title shows no unsaved marker. Check the window alone (see the findings)
 whole screen. Without a desktop session, hand this step and Step 5 to the
 user and say so in the commit body.
 
-- [ ] **Step 5: Launch it from a path with a space and an accent**
+- [x] **Step 5: Launch it from a path with a space and an accent**
 
 Copy `dist\MDViewer` to `%TEMP%\MD Viewer é\MDViewer` and `sample.md` to
 `%TEMP%\dossier é\résumé.md`; start the copied exe on that file. Expected:
 the same Rendered page, title `résumé.md - MD Viewer`. Delete both copies.
 
-- [ ] **Step 6: Bump the version to 2.0.0**
+- [x] **Step 6: Bump the version to 2.0.0**
 
 In `pyproject.toml` set `version = "2.0.0"`. Nothing else names the version
 (`installer\MDViewer.wxs` takes `-d Version=` from it; `UpgradeCode` stays).
 
-- [ ] **Step 7: Build the MSI and check it carries the web folder**
+- [x] **Step 7: Build the MSI and check it carries the web folder**
 
 Run: `.venv\Scripts\python scripts\build_msi.py --skip-exe`.
 Expected: `Built ...\dist\MDViewer-2.0.0-x64.msi (~148 MiB)`.
@@ -17155,7 +17155,7 @@ Expected: lines for `editor.html`, `editor.js`, `editor.css`,
 `qwebchannel.js`, `THIRD_PARTY.txt` and `QtWebChannel.pyd` (short names may
 precede a `|`). `installer\MDViewer.wxs` stays unchanged.
 
-- [ ] **Step 8: Run the regular checks and commit**
+- [x] **Step 8: Run the regular checks and commit**
 
 Run `.venv\Scripts\python -m pytest -q` (expect the suite unchanged and
 passing: this task touches no tested code) and the Qt-import `rg` check
