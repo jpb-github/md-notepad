@@ -9,7 +9,12 @@ from urllib.parse import unquote, urlsplit
 _BLOCKED_PREFIXES = ("javascript:", "vbscript:", "data:")
 _ALLOWED_DATA_PREFIX = "data:image/"
 _SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]+:")  # 2+ characters, so a drive letter is not one
-_NOT_IN_SLUG = re.compile(r"[^\w\- ]")
+# Files that Windows runs or hands to a script host when opened.
+_RUNNABLE_SUFFIXES = frozenset(
+    ".exe .com .bat .cmd .scr .pif .lnk .url .msi .msp .msc .cpl .reg .hta .jar"
+    " .ps1 .psm1 .vbs .vbe .js .jse .wsf .wsh .dll .appx .msix .application .gadget".split()
+)
+_NOT_IN_SLUG =re.compile(r"[^\w\- ]")
 
 
 def resolve(url: str, base_dir: Path | None) -> str:
@@ -37,6 +42,25 @@ def is_safe(url: str) -> bool:
     ("java\\tscript:"), so those are dropped before comparing."""
     compact = "".join(ch for ch in url if ord(ch) > 0x20).lower()
     return compact.startswith(_ALLOWED_DATA_PREFIX) or not compact.startswith(_BLOCKED_PREFIXES)
+
+
+def is_openable(url: str) -> bool:
+    """True when Ctrl+click may hand `url` to the operating system.
+
+    An allowlist: http(s) and mailto links, and files or folders (file: URIs, drive paths,
+    relative paths) unless the file would run code. Other schemes (ms-msdt:, search-ms:, ftp:, ...)
+    start external handlers, so they are refused. `url` is usually the result of resolve()."""
+    if not is_safe(url):
+        return False
+    compact = "".join(ch for ch in url if ord(ch) > 0x20)
+    parts = urlsplit(compact)
+    scheme = parts.scheme.lower()
+    if scheme in ("http", "https", "mailto"):
+        return True
+    if len(scheme) > 1 and scheme != "file":
+        return False
+    path = parts.path if len(scheme) != 1 else compact
+    return Path(unquote(path)).suffix.lower() not in _RUNNABLE_SUFFIXES
 
 
 def image_src(path: str, base_dir: Path | None) -> str:

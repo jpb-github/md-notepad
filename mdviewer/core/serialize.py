@@ -86,6 +86,8 @@ def to_text(doc: dict) -> str:
     front, body = front_matter(doc), to_markdown(doc)
     if front is not None and body and not front.endswith("\n"):
         front += "\n"
+    if front is None and frontmatter.split(body)[0] is not None:
+        body = "***" + body[3:]  # a leading rule plus a later "---" would read back as front matter
     return frontmatter.join(front, body)
 
 

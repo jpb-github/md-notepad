@@ -92,6 +92,14 @@ escaping. Raw HTML, footnote definitions and front matter are kept verbatim.
 A file you only view, or switch between modes without editing, is never rewritten.
 Source mode saves exactly what you typed.
 
+Some normalizations change more than style, so expect them in a diff:
+
+- Soft line breaks become a space: prose you hard-wrapped at 80 columns is
+  saved as one long line per paragraph.
+- Unused link reference definitions (`[1]: https://...`) are dropped, and used
+  ones become inline links.
+- Extra blank lines you add with Enter (empty paragraphs) are dropped.
+
 ## Settings
 
 View > Preferences... holds the theme (System (auto) / Light / Dark / Gray; Gray is a

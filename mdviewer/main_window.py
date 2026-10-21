@@ -774,14 +774,15 @@ class MainWindow(QMainWindow):
             self.rich.command("insertImage", {"src": src, "display_src": urls.resolve(src, base_dir), "alt": alt})
 
     def _open_link(self, href: str) -> None:
-        """Ctrl+click in the page: a #fragment moves the caret to its heading, a safe link opens
+        """Ctrl+click in the page: a #fragment moves the caret to its heading, a safe, non-runnable link opens
         outside the app. Anything else (unsafe, unknown anchor, relative in Untitled) does nothing."""
         if href.startswith("#"):
             self.rich.heading_texts(lambda texts: self._go_to_anchor(texts, href[1:]))
             return
-        if not urls.is_safe(href):
+        resolved = urls.resolve(href, self._base_dir())
+        if not urls.is_openable(resolved):  # scripts, programs and handler schemes never leave the app
             return
-        target = QUrl(urls.resolve(href, self._base_dir()))
+        target = QUrl(resolved)
         if not target.isRelative():  # Untitled: a relative link has no folder to resolve against
             open_external(target)
 

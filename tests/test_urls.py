@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from mdviewer.core.urls import anchor_block, image_src, is_safe, resolve, slug
+from mdviewer.core.urls import anchor_block, image_src, is_openable, is_safe, resolve, slug
 
 # --- resolve ---------------------------------------------------------------------
 
@@ -128,3 +128,22 @@ def test_anchor_block_ignores_case_and_decodes_escapes():
 @pytest.mark.parametrize("fragment", ["missing", "", "intro-1"])
 def test_anchor_block_without_a_match(fragment):
     assert anchor_block([None, "Intro"], fragment) is None
+
+
+# --- is_openable -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("url", ["https://example.com/a", "http://example.com", "mailto:a@b.co",
+                                 "file:///C:/docs/other.md", "file:///C:/docs/", "C:/docs/other.md",
+                                 "other.md", "notes/other.md#top"])
+def test_openable_links(url):
+    assert is_openable(url)
+
+
+@pytest.mark.parametrize("url", ["file:///C:/x/tool.exe", "file:///C:/x/RUN.BAT", "C:/x/setup.msi",
+                                 "setup.exe", "x/script.ps1?a=1", "file:///C:/x/a.LNK", "file:///C:/x/a.hta",
+                                 "ms-msdt:/id", "search-ms:query=x", "ftp://example.com/a",
+                                 "javascript:alert(1)", "java\tscript:alert(1)", "vbscript:x",
+                                 "data:text/html,x", "\\server\share\a.cmd"])
+def test_links_that_could_run_code_or_a_handler_are_not_openable(url):
+    assert not is_openable(url)

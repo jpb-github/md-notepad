@@ -1923,9 +1923,10 @@ tb.buttons["link"].trigger()
 check(pump(lambda: "https://real.test/" in page_doc(), 3), "a real dialog opened from the page's request applies its answer")
 main_window.run_link_dialog = lambda parent, text, url: fake_dialog("link", text, url)
 
-# Ctrl+click: external links, relative files, #anchors; unsafe ones are ignored
+# Ctrl+click: external links, relative files, #anchors; unsafe, runnable and handler-scheme ones are ignored
 OPENED.clear()
-for href in ("https://example.com/a", "javascript:alert(1)", " java\tscript:x", "other.md#part", "mailto:me@example.com"):
+for href in ("https://example.com/a", "javascript:alert(1)", " java\tscript:x", "other.md#part", "setup.exe",
+             "ms-msdt:/id", "file:///C:/x/tool.bat", "mailto:me@example.com"):
     window.rich.openLink.emit(href)
 check(OPENED == [QUrl("https://example.com/a"), QUrl((TMP / "other.md").as_uri() + "#part"), QUrl("mailto:me@example.com")],
       f"safe links open outside the app, relative ones next to the file ({OPENED})")

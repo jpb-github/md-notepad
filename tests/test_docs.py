@@ -28,6 +28,12 @@ def test_readme_states_the_normalization_rule():
     assert "A file you only view, or switch between modes without editing, is never rewritten." in flat
 
 
+def test_readme_names_the_lossy_normalizations():
+    flat = " ".join(README.split())
+    for needle in ("Soft line breaks", "link reference definitions", "empty paragraphs"):
+        assert needle in flat, needle
+
+
 def test_readme_quotes_the_large_file_note():
     note = re.search(r'LARGE_FILE_NOTE = "([^"]+)"', main_window_text).group(1)
     assert note in README and "5 MB" in README

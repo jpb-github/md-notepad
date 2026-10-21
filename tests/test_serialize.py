@@ -1068,3 +1068,10 @@ def test_random_inline_chips_round_trip(flanked):
         assert [block["type"] for block in blocks] == ["paragraph", "footnote_def"], markdown
         assert _units(blocks[0].get("content", [])) == _units(inline), markdown
         assert round_trip(markdown) == markdown
+
+
+def test_leading_rule_is_not_written_so_that_it_reads_back_as_front_matter():
+    first = to_text(from_markdown("***\n\ntext\n\n***\n"))
+    front, body = frontmatter.split(first)  # what the app does when it loads text
+    assert front is None
+    assert to_text(from_markdown(body, front)) == first
