@@ -30,8 +30,8 @@ watched and re-rendered when it changes on disk.
 
 Status: plan Tasks 1-14 are done, plus the user-requested Open Recent,
 Preferences and packaging (one-folder build, MSI, icon) work; WYSIWYG plan
-Tasks 1-19 are done (version 2.0.0, released; the manual desktop check was
-done by hand). Check `git log` for details.
+Tasks 1-19 are done (2.0.0 released; the manual desktop check was done by
+hand), then the Dark Gray / Light Gray themes (current version 2.1.0). Check `git log` for details.
 
 ## Repository layout
 
