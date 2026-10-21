@@ -1,7 +1,7 @@
 """Markdown -> themed HTML page for the preview (pure, Qt-free).
 
 GitHub-like styling: one shared stylesheet driven by CSS variables; light,
-dark and gray differ only in the variable set and the Pygments style, so the same body
+dark and the grays differ only in the variable set and the Pygments style, so the same body
 HTML is reused for both themes.
 """
 
@@ -16,7 +16,7 @@ from pygments.util import ClassNotFound
 
 from mdviewer.core import urls
 
-THEMES = ("light", "dark", "gray")
+THEMES = ("light", "dark", "darkgray", "lightgray")
 PLUGINS = ["table", "strikethrough", "footnotes", "task_lists", "url"]
 # file: is needed for resolved relative URLs; javascript:/vbscript: stay blocked.
 _ALLOWED_PROTOCOLS = ("file:", "data:image/")
@@ -40,7 +40,7 @@ _VARIABLES = {
         "--code-bg": "#151b23",
         "--row-alt": "#151b23",
     },
-    "gray": {
+    "darkgray": {
         "--bg": "#3a3d41",
         "--fg": "#e6e8eb",
         "--muted": "#a6adb5",
@@ -49,9 +49,18 @@ _VARIABLES = {
         "--code-bg": "#2f3236",
         "--row-alt": "#2f3236",
     },
+    "lightgray": {
+        "--bg": "#ececec",
+        "--fg": "#000000",
+        "--muted": "#4a4f55",
+        "--border": "#c2c2c2",
+        "--link": "#0550ae",
+        "--code-bg": "#dfdfdf",
+        "--row-alt": "#e2e2e2",
+    },
 }
 PAGE_BACKGROUND = {theme: values["--bg"] for theme, values in _VARIABLES.items()}
-_PYGMENTS_STYLES = {"light": "default", "dark": "native", "gray": "native"}
+_PYGMENTS_STYLES = {"light": "default", "dark": "native", "darkgray": "native", "lightgray": "default"}
 
 _SHARED_CSS = """
 html, body { margin: 0; background: var(--bg); color: var(--fg); }

@@ -941,18 +941,35 @@ FAKE["system_theme"] = "light"
 window._poll_theme()
 check(window._effective_theme == "dark", "forced Dark ignores the system theme")
 
-GRAY_WINDOW = main_window.GRAY_PALETTE_COLORS["window"]
-choose_theme("gray")
-check(window._effective_theme == "gray" and not window._theme_timer.isActive(), "forced Gray applies without polling")
-check(qt_app.style().name().lower() == "fusion" and window_color() == GRAY_WINDOW, "gray palette on the Fusion style")
+DARK_GRAY_WINDOW = main_window.DARK_GRAY_PALETTE_COLORS["window"]
+choose_theme("darkgray")
+check(window._effective_theme == "darkgray" and not window._theme_timer.isActive(), "forced Dark Gray applies without polling")
+check(qt_app.style().name().lower() == "fusion" and window_color() == DARK_GRAY_WINDOW, "dark gray palette on the Fusion style")
 check(pump(lambda: page_js(window.rich, "getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()")
-           == "#3a3d41", 3), "the editor page switches to the gray CSS")
+           == "#3a3d41", 3), "the editor page switches to the dark gray CSS")
 check(theme_loads == [], "theme changes never reload the editor page")
-check(heading_color(window) == editor_module.COLORS["gray"]["heading"], "editor recolored for gray")
+check(heading_color(window) == editor_module.COLORS["darkgray"]["heading"], "editor recolored for dark gray")
 FAKE["system_theme"] = "dark"
 window._poll_theme()
-check(window._effective_theme == "gray", "forced Gray ignores the system theme")
-check(window.settings_snapshot()["theme"] == "gray", "forced Gray is saved")
+check(window._effective_theme == "darkgray", "forced Dark Gray ignores the system theme")
+check(window.settings_snapshot()["theme"] == "darkgray", "forced Dark Gray is saved")
+FAKE["system_theme"] = "light"
+
+LIGHT_GRAY = main_window.LIGHT_GRAY_PALETTE_COLORS
+choose_theme("lightgray")
+check(window._effective_theme == "lightgray" and not window._theme_timer.isActive(), "forced Light Gray applies without polling")
+check(qt_app.style().name().lower() == "fusion" and window_color() == LIGHT_GRAY["window"], "light gray palette on the Fusion style")
+check(LIGHT_GRAY["window_text"] == "#000000" and LIGHT_GRAY["text"] == "#000000", "light gray draws black text")
+check(pump(lambda: page_js(window.rich, "getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()")
+           == "#ececec", 3), "the editor page switches to the light gray CSS")
+check(page_js(window.rich, "getComputedStyle(document.documentElement).getPropertyValue('--fg').trim()") == "#000000",
+      "the editor page has black text on light gray")
+check(theme_loads == [], "light gray does not reload the editor page")
+check(heading_color(window) == editor_module.COLORS["lightgray"]["heading"], "editor recolored for light gray")
+FAKE["system_theme"] = "dark"
+window._poll_theme()
+check(window._effective_theme == "lightgray", "forced Light Gray ignores the system theme")
+check(window.settings_snapshot()["theme"] == "lightgray", "forced Light Gray is saved")
 FAKE["system_theme"] = "light"
 
 choose_theme("system")
@@ -1082,7 +1099,8 @@ FAKE["prefs"] = inspect
 before_font = window.editor.font()
 window.act_preferences.trigger()
 check(seen["theme"] == "system" and window._theme_choice == "system", "dialog opens on the current theme")
-check(seen["labels"] == ["&System (auto)", "&Light", "&Dark", "&Gray"], "dialog offers System (auto) / Light / Dark / Gray")
+check(seen["labels"] == ["&System (auto)", "&Light", "&Dark", "Dark &Gray", "Li&ght Gray"],
+      "dialog offers System (auto) / Light / Dark / Dark Gray / Light Gray")
 check(seen["family"] == "Consolas" and seen["size"] == 11, "dialog opens on the current editor font")
 proportional = [f for f in QFontDatabase.families() if not QFontDatabase.isFixedPitch(f)]
 check(seen["entries"] and all(QFontDatabase.isFixedPitch(f) for f in seen["entries"]), "font list has only fixed-pitch fonts")

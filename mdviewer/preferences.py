@@ -16,7 +16,10 @@ from PySide6.QtWidgets import (
 
 from mdviewer.core import settings
 
-THEME_LABELS = (("system", "&System (auto)"), ("light", "&Light"), ("dark", "&Dark"), ("gray", "&Gray"))
+THEME_LABELS = (
+    ("system", "&System (auto)"), ("light", "&Light"), ("dark", "&Dark"),
+    ("darkgray", "Dark &Gray"), ("lightgray", "Li&ght Gray"),
+)
 SAMPLE_TEXT = "AaBbCc 0123456789 {}[]()<> # * `"
 
 

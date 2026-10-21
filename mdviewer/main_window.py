@@ -81,7 +81,7 @@ DARK_PALETTE_COLORS = {
     "placeholder": "#9a9a9a",
     "disabled_text": "#7a7a7a",
 }
-GRAY_PALETTE_COLORS = {
+DARK_GRAY_PALETTE_COLORS = {
     "window": "#3a3d41",
     "window_text": "#e6e8eb",
     "base": "#2f3236",
@@ -97,8 +97,29 @@ GRAY_PALETTE_COLORS = {
     "placeholder": "#a0a6ad",
     "disabled_text": "#85898e",
 }
-# Themes drawn on Fusion with a custom palette (and a dark Windows title bar).
-CUSTOM_PALETTES = {"dark": DARK_PALETTE_COLORS, "gray": GRAY_PALETTE_COLORS}
+LIGHT_GRAY_PALETTE_COLORS = {
+    "window": "#e4e4e4",
+    "window_text": "#000000",
+    "base": "#f2f2f2",
+    "alternate_base": "#ebebeb",
+    "text": "#000000",
+    "button": "#d8d8d8",
+    "button_text": "#000000",
+    "highlight": "#2f6fd6",
+    "highlighted_text": "#ffffff",
+    "link": "#0550ae",
+    "tooltip_base": "#f7f7f7",
+    "tooltip_text": "#000000",
+    "placeholder": "#5c5c5c",
+    "disabled_text": "#8a8a8a",
+}
+# Themes drawn on Fusion with a custom palette; the dark ones also get a dark Windows title bar.
+CUSTOM_PALETTES = {
+    "dark": DARK_PALETTE_COLORS,
+    "darkgray": DARK_GRAY_PALETTE_COLORS,
+    "lightgray": LIGHT_GRAY_PALETTE_COLORS,
+}
+DARK_THEMES = ("dark", "darkgray")
 OPEN_FILTER = "Markdown (*.md *.markdown *.mdown *.txt);;All files (*)"
 SAVE_FILTER = "Markdown (*.md);;Text (*.txt);;All files (*)"
 ENCODING_LABELS = {
@@ -1202,7 +1223,7 @@ class MainWindow(QMainWindow):
         if choice == "system":
             self._theme_timer.start()
         else:
-            self._theme_timer.stop()  # forced Light/Dark/Gray ignore the system theme
+            self._theme_timer.stop()  # forced themes ignore the system theme
         self._apply_theme(force=True)
 
     def _poll_theme(self) -> None:
@@ -1221,6 +1242,6 @@ class MainWindow(QMainWindow):
         else:
             QApplication.setStyle("windowsvista")
             QApplication.setPalette(QApplication.style().standardPalette())
-        _set_dark_title_bar(self, theme in CUSTOM_PALETTES)
+        _set_dark_title_bar(self, theme in DARK_THEMES)
         self.editor.set_theme(theme)
         self.rich.set_theme(theme)  # no reload: same document, undo history and scroll

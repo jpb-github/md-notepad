@@ -1,8 +1,8 @@
 # MD Viewer
 
 A Notepad-like Markdown editor for Windows 10/11. Files open in an editable,
-GitHub-styled **Rendered** view that follows the Windows light/dark/gray theme
-(live), with a one-row format toolbar. View > Source is the plain-text editor
+GitHub-styled **Rendered** view that follows the Windows light/dark theme
+(live; Dark Gray and Light Gray are also available), with a one-row format toolbar. View > Source is the plain-text editor
 with structural completion and syntax-check underlines. The open file is
 watched and reloads when it changes on disk.
 
@@ -102,8 +102,8 @@ Some normalizations change more than style, so expect them in a diff:
 
 ## Settings
 
-View > Preferences... holds the theme (System (auto) / Light / Dark / Gray; Gray is a
-mid-gray theme that is never picked automatically) and the
+View > Preferences... holds the theme (System (auto) / Light / Dark / Dark Gray / Light Gray; the grays are
+never picked automatically: Dark Gray is a mid-gray theme, Light Gray is black text on a very light gray) and the
 editor font (fixed-pitch fonts only, default Consolas 11). The theme, editor
 font, window position and size, zoom, toolbar visibility (View > Toolbar)
 and the recent-files list are
@@ -123,8 +123,8 @@ stored in `%APPDATA%\MDViewer\settings.json`. Delete that file to reset them.
 - Files over 5 MB open in Source mode (Rendered mode is slow on them).
 - Not supported: merged table cells, math or diagrams, spell checking, and
   Find/Replace inside Rendered mode (Replace works in Source).
-- Dark and Gray modes use Qt's Fusion style, because the native `windowsvista`
-  style cannot be darkened; light mode uses the native style.
+- Dark, Dark Gray and Light Gray modes use Qt's Fusion style, because the native `windowsvista`
+  style cannot be recolored; Light mode uses the native style.
 
 ## Development
 

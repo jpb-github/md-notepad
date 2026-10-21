@@ -5,7 +5,8 @@ import math
 import os
 from pathlib import Path
 
-_VALID_THEMES = ("system", "light", "dark", "gray")
+_VALID_THEMES = ("system", "light", "dark", "darkgray", "lightgray")
+_RENAMED_THEMES = {"gray": "darkgray"}  # what 1.1.0 to 2.0.0 saved
 _ZOOM_MIN = 0.25
 _ZOOM_MAX = 3.0
 _WINDOW_KEYS = ("x", "y", "width", "height")
@@ -82,8 +83,11 @@ def _clean(data) -> dict:
     result = default_settings()
     if not isinstance(data, dict):
         return result
-    if data.get("theme") in _VALID_THEMES:
-        result["theme"] = data["theme"]
+    theme = data.get("theme")
+    if isinstance(theme, str):
+        theme = _RENAMED_THEMES.get(theme, theme)
+    if theme in _VALID_THEMES:
+        result["theme"] = theme
     window = _clean_window(data.get("window"))
     if window is not None:
         result["window"] = window

@@ -95,16 +95,25 @@ def test_pygments_css_follows_theme():
 
 
 def test_page_background_per_theme():
-    assert render.PAGE_BACKGROUND == {"light": "#ffffff", "dark": "#0d1117", "gray": "#3a3d41"}
+    assert render.PAGE_BACKGROUND == {
+        "light": "#ffffff", "dark": "#0d1117", "darkgray": "#3a3d41", "lightgray": "#ececec",
+    }
 
 
-def test_gray_theme_renders_with_its_own_variables():
-    gray, ok = build_page("# Hi\n\n*there*", "gray")
+@pytest.mark.parametrize("theme, background", [("darkgray", "#3a3d41"), ("lightgray", "#ececec")])
+def test_gray_themes_render_with_their_own_variables(theme, background):
+    page, ok = build_page("# Hi\n\n*there*", theme)
     light, _ = build_page("# Hi\n\n*there*", "light")
     assert ok
-    assert "#3a3d41" in gray
-    assert gray.split("<body>", 1)[1] == light.split("<body>", 1)[1]
-    assert set(render.THEMES) == {"light", "dark", "gray"}
+    assert f"--bg: {background};" in page
+    assert page.split("<body>", 1)[1] == light.split("<body>", 1)[1]
+    assert set(render.THEMES) == {"light", "dark", "darkgray", "lightgray"}
+
+
+def test_light_gray_is_black_text_on_a_very_light_gray():
+    css = page_css("lightgray")
+    assert "--fg: #000000;" in css
+    assert HtmlFormatter(style="default").get_style_defs(".highlight") in css
 
 
 def test_render_failure_falls_back_to_escaped_pre(monkeypatch):
