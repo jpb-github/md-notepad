@@ -5,7 +5,7 @@
 > **Status: high-level outline.** Phases and tasks are fixed; each task's
 > bite-sized steps (tests, code, commands) are written out on request, task
 > by task, below its heading. Do not execute a task whose steps are not yet
-> detailed. Detailed so far: Tasks 1-18.
+> detailed. Detailed so far: Tasks 1-19 (all).
 
 **Goal:** Make the rendered view an editable WYSIWYG Markdown editor with a
 format toolbar, keeping the plain-text editor as Source mode.
@@ -17172,10 +17172,246 @@ git commit -m "chore: bump version to 2.0.0"
 
 ### Task 19: Docs and final verification
 
-- **Files:** `README.md`, `CLAUDE.md`, `docs/superpowers/specs/2026-10-16-md-viewer-design.md` (non-goals pointer to v2).
-- **Covers:** modes and toolbar shortcuts, normalization note, manual checklist from spec section 8, layout and schema-sync rule in CLAUDE.md, rebuild-bundle command.
-- **Test:** full `pytest -v`, `scripts/smoke_ui.py` prints `SMOKE OK`, Qt-import `rg` check prints nothing.
-- **Commit:** `docs: document WYSIWYG editing, shortcuts and manual checklist`
+**Status: steps detailed.** Baseline measured 2026-10-21 on `a3b5d52` (Task 18
+committed): `pytest -q` 763 passed, `scripts\smoke_ui.py` prints `SMOKE OK`,
+`scripts\check_web.py` prints `WEB OK`, the Qt-import `rg` check prints
+nothing. This task writes documentation and one Qt-free test file; no product
+code changes.
+
+**Files:**
+- Create: `tests/test_docs.py`
+- Modify: `README.md`, `CLAUDE.md`,
+  `docs/superpowers/specs/2026-10-16-md-viewer-design.md` (one pointer line in
+  its non-goals)
+
+**Interfaces:**
+- Consumes (read as text by the test, never imported): every
+  `"Ctrl+..."`/`"Alt+..."` literal in `mdviewer/main_window.py` and
+  `mdviewer/toolbar.py` (menu `_action` calls, `BLOCKS`, `BUTTONS`);
+  `LARGE_FILE_NOTE` in `main_window.py` (`Large file: opened in Source mode`);
+  the scripts `build_web.py`, `check_web.py`, `build_exe.py`, `build_msi.py`,
+  `smoke_ui.py`, `make_icon.py`.
+- Produces: nothing code calls. The docs become the contract the tests pin:
+  README heading `## Markdown normalization`; CLAUDE.md bullet starting
+  `- Non-goals (do not add):`.
+
+**Review Focus** (each line has its test in Step 1):
+- A shortcut added or changed in code but not in the README table (this
+  branch added the whole format toolbar's set and changed Ctrl+P and Ctrl+E's
+  meaning): the table must list every shortcut literal in the two files.
+- A user saves from Rendered mode and is surprised the file's Markdown
+  changed. The README states what is normalized and, in one fixed sentence,
+  that a file only viewed or mode-switched is never rewritten.
+- A stale v1 sentence survives (`Edit Mode`, `Preview Mode`, "Edit commands
+  work in Edit Mode only", the old checklist rows) and sends a tester to a
+  menu item that no longer exists.
+- A contributor edits the schema in `core/docschema.py` only, or edits
+  `web-src/` and forgets to rebuild and commit the bundle: CLAUDE.md states the
+  two rules and the `WEB OK` check.
+- CLAUDE.md still lists WYSIWYG and installers as non-goals, so an agent
+  refuses or reverts shipped work.
+- A command in the docs names a script that does not exist or was renamed.
+- A 5 MB+ file opens in Source mode and the user thinks Rendered is broken:
+  the README quotes the exact status note.
+
+- [x] **Step 1: Write the failing tests**
+
+Create `tests/test_docs.py` (no Qt, text reads only). Module constants:
+`ROOT`, `README`, `CLAUDE` (file texts, UTF-8), `V1_SPEC` (path of the v1
+spec), and
+`code_shortcuts() -> set[str]`: the union over `main_window.py` and
+`toolbar.py` of `re.findall(r'"((?:Ctrl|Alt)\+[^"\s{]+)"', text)` (the
+`{` keeps out the f-string `f"Ctrl+Alt+{level}"`), plus the literals
+`Ctrl+Alt+1` and `Ctrl+Alt+6` it hides.
+
+```python
+def test_readme_lists_every_shortcut_in_the_code():
+    assert sorted(s for s in code_shortcuts() if s not in README) == []
+
+def test_readme_states_the_normalization_rule():
+    flat = " ".join(README.split())
+    assert "## Markdown normalization" in README
+    assert "A file you only view, or switch between modes without editing, is never rewritten." in flat
+
+def test_readme_quotes_the_large_file_note():
+    note = re.search(r'LARGE_FILE_NOTE = "([^"]+)"', main_window_text).group(1)
+    assert note in README and "5 MB" in README
+
+def test_docs_name_no_removed_v1_wording():
+    for text in (README, CLAUDE):
+        for stale in ("Preview Mode", "Edit Mode", "preview.py", "Edit commands work in Edit Mode only"):
+            assert stale not in text
+
+def test_every_script_named_in_the_docs_exists():
+    names = set(re.findall(r"scripts[\\/](\w+\.py)", README + CLAUDE))
+    assert {"build_web.py", "check_web.py"} <= names
+    assert [n for n in sorted(names) if not (ROOT / "scripts" / n).is_file()] == []
+
+def test_claude_md_keeps_the_schema_bundle_and_seam_rules():
+    for needle in ("core/docschema.py", "web-src/src/schema.js", "scripts/build_web.py",
+                   "scripts/check_web.py", "WEB OK", "run_link_dialog", "run_image_dialog"):
+        assert needle in CLAUDE, needle
+    bullet = re.search(r"^- Non-goals \(do not add\):.*?(?=^- |\Z)", CLAUDE, re.S | re.M)
+    assert bullet and "merged table cells" in bullet.group(0)
+    assert "WYSIWYG" not in bullet.group(0) and "installers" not in bullet.group(0)
+
+def test_v1_spec_points_to_the_v2_spec():
+    assert "2026-10-20-wysiwyg-editing-design.md" in V1_SPEC.read_text(encoding="utf-8")
+```
+
+(`main_window_text` is `mdviewer/main_window.py` read as text.)
+
+- [x] **Step 2: Run the tests to verify they fail**
+
+Run: `.venv\Scripts\python -m pytest tests/test_docs.py -q`
+Expected: 7 failed (the docs name neither `build_web.py` nor `check_web.py`
+yet). Each failure names what is missing (the shortcut list, the heading, the
+stale words).
+
+- [x] **Step 3: Rewrite `README.md`**
+
+Keep the file's structure and its Development, Building and Installed-build
+parts; change exactly these:
+
+1. **Intro:** files open in an editable, GitHub-styled **Rendered** view that
+   follows the Windows light/dark/gray theme (live), with a one-row format
+   toolbar; View > Source is the plain-text editor with structural completion
+   and syntax-check underlines; the open file is watched and reloads when it
+   changes on disk.
+2. **Keyboard shortcuts:** the File, Edit and View rows from the menus in
+   `main_window._build_menus` (Edit gains `Paste as Plain Text`
+   `Ctrl+Shift+V`; View's pair is `Rendered / Source` `Ctrl+P / Ctrl+E`; add
+   `Toolbar` and `Word Wrap` without shortcuts), then a **Format toolbar**
+   table with one row per `toolbar.BUTTONS` entry and one for the block
+   combo: `Ctrl+Alt+0` (Normal), `Ctrl+Alt+1` to `Ctrl+Alt+6` (Heading 1-6).
+   Replace the sentence "Edit commands work in Edit Mode only..." with: in
+   Rendered mode Edit acts on the rendered editor (Find has no Replace there;
+   Ctrl+H switches to Source and opens Replace); Ctrl+click opens a link.
+3. **New section `## Rendered mode`** before the Source features: the input
+   rules from spec section 4 (one list), Tab/Shift+Tab in lists and tables,
+   the table right-click menu, code block language picker and highlight on
+   leaving, task checkbox click, Paste keeps formatting and Ctrl+Shift+V
+   pastes plain text, protected blocks (raw HTML, footnote definitions, front
+   matter; double-click opens Source at that block), `Large file: opened in
+   Source mode` for files over 5 MB (quote the note exactly).
+4. **Rename `## Editing features` to `## Source mode`** and leave its bullets.
+5. **New section `## Markdown normalization`:** saving from Rendered mode
+   rewrites the whole file in a canonical style: `#` headings, `-` bullets,
+   `1.` numbering, `**`/`*`/`~~` marks, fenced code, aligned pipe tables,
+   inline links, one blank line between blocks, minimal escaping; raw HTML,
+   footnote definitions and front matter are kept verbatim. Include the
+   sentence `A file you only view, or switch between modes without editing, is
+   never rewritten.` on one line, and say Source mode saves exactly what you
+   typed.
+6. **Settings:** add the toolbar visibility (View > Toolbar) to the stored
+   list.
+7. **Known limitations:** replace "JavaScript in raw HTML never runs in the
+   preview" with the same statement for the Rendered view (raw HTML shows in a
+   sandboxed frame, inline HTML as a chip); drop "Files above roughly 10 MB
+   render slowly" in favour of the 5 MB rule; add: no merged table cells,
+   math or diagrams, spell checking, or Find/Replace inside Rendered mode
+   (Replace works in Source).
+8. **Development:** add `python scripts\build_web.py` (Node.js 20+, only
+   after changing `web-src\`) and `python scripts\check_web.py` (prints
+   `WEB OK`) with one sentence: the bundle `mdviewer\web\editor.js` is
+   committed, so tests, the app and packaging need no Node.
+9. **Building:** one sentence that `build_exe.py` refuses to run when
+   `mdviewer\web` lacks a runtime file and tells you to run `build_web.py`.
+10. **Manual test checklist:** keep Opening, Theme and preferences, File
+    watching, Installed build; update File watching's first two rows to the
+    spec's table (Rendered clean: silent reload with scroll kept; Rendered
+    dirty and Source: `File changed on disk` dialog); replace Modes and files,
+    Editor and Preview with the groups below, each item a `- [ ]` line:
+    - **Modes and files:** Rendered <-> Source switching keeps an unedited
+      file byte-identical (compare on disk) and carries the dirty flag and
+      the caret's block; Save and Close from Rendered; Alt+F4 with unsaved
+      Rendered edits prompts; a file over 5 MB opens in Source mode with the
+      note; title `*` and status bar (`Rendered`, zoom, `Ln/Col` in Source).
+    - **Rendered editing:** each input rule; Tab and Shift+Tab in lists and
+      tables; table context menu (all items); code language picker and
+      highlight returning when the caret leaves; task checkbox click marks the
+      file dirty; every toolbar button and its shortcut; toolbar buttons grey
+      inside a code block; View > Toolbar hide/show persists across restarts.
+    - **Paste and links:** paste from a browser and from Word keeps headings,
+      bold and links and drops the rest; Ctrl+Shift+V pastes plain text;
+      Ctrl+click opens a web link and scrolls to a `#anchor`; hovering shows
+      the URL in the status bar.
+    - **Rendering and find:** tables, footnotes, task lists, strikethrough,
+      relative images and a missing image; a raw HTML block with a `<script>`
+      does nothing; Ctrl+F counts and steps through matches in Rendered;
+      Ctrl+H lands in Source with the Replace bar; live theme flip and zoom
+      while editing.
+
+- [x] **Step 4: Update `CLAUDE.md`**
+
+Edit in place, keeping its voice and length:
+
+1. **Project:** Rendered (editable WYSIWYG, ProseMirror in QtWebEngine, format
+   toolbar) and Source (plain-text editor) modes; file watching as before.
+2. **Source of truth:** add the WYSIWYG spec and plan paths; status line:
+   WYSIWYG plan Tasks 1-19 done (version 2.0.0), the manual desktop checklist
+   in `README.md` still not walked.
+3. **Layout:** add `richview.py`, `toolbar.py`, `dialogs.py`; `core/` gains
+   `docmodel.py`, `docschema.py`, `serialize.py`, `frontmatter.py`,
+   `urls.py`; `preview.py` is gone; add `mdviewer/web/` (committed build
+   output), `web-src/`, `scripts/build_web.py`, `scripts/check_web.py`,
+   `tests/corpus/`. Match the current file list from `git ls-files`.
+4. **Hard rules:** replace the `toPlainText()` rule's wording so `buffer`
+   covers Rendered mode (use `MainWindow.buffer`; `with_buffer(fn)` pulls
+   asynchronously when Rendered changed); add the seams `run_link_dialog` and
+   `run_image_dialog`; add three rules: schema names change in both
+   `core/docschema.py` and `web-src/src/schema.js` and the bundle is rebuilt
+   with `scripts/build_web.py`; `mdviewer/web/*` is committed build output,
+   never hand-edited, and `scripts/check_web.py` must print `WEB OK` after a
+   rebuild; raw HTML never gets `allow-scripts`, and `javascript:` URLs are
+   stripped in Python and JS. Reword the non-goals bullet to start
+   `- Non-goals (do not add):` and list: tabs/multiple documents, printing,
+   cross-file search, default `.md` handler registration, custom CSS/themes,
+   localization, signing/MSIX/auto-update, merged table cells, math and
+   diagrams, spell checking, Find/Replace inside Rendered mode, comments,
+   track changes, byte-exact source preservation.
+5. **Packaging:** add that `mdviewer/web` ships via one `--add-data` entry
+   (`_internal/mdviewer/web`) and `build_exe.py` checks for it before and
+   after the build; the version lives only in `pyproject.toml` and the MSI
+   must be bumped to replace an installed one.
+6. **Commands:** add `build_web.py` and `check_web.py` lines.
+7. **Testing conventions:** `FAKE` also has `link`, `image`, `image_path`,
+   `prefs`, `during_dialog`; page checks use `page_js`/`pump` helpers in
+   `scripts/smoke_ui.py`; `tests/test_docs.py` pins README shortcuts to the
+   code, so a shortcut change updates the README table.
+
+- [x] **Step 5: Point the v1 spec at v2**
+
+In `docs/superpowers/specs/2026-10-16-md-viewer-design.md`, after the
+"Non-goals (v1)" paragraph add one line:
+`WYSIWYG editing was added in v2: see 2026-10-20-wysiwyg-editing-design.md.`
+Change nothing else in that file; it stays the v1 record.
+
+- [x] **Step 6: Run the tests to verify they pass**
+
+Run: `.venv\Scripts\python -m pytest tests/test_docs.py -q`
+Expected: 7 passed. A failure names the missing shortcut or phrase: fix the
+document, not the test.
+
+- [x] **Step 7: Final verification**
+
+Run, in order, and read each result before claiming it:
+`.venv\Scripts\python -m pytest -v` (expect 770 passed: 763 + 7),
+`.venv\Scripts\python scripts\smoke_ui.py` (last line `SMOKE OK`; Chromium
+GPU log lines are noise),
+`.venv\Scripts\python scripts\check_web.py` (last line `WEB OK`), and
+`rg -n "import (PySide|Qt)|from PySide" mdviewer/core tests` (no output).
+Then `git status --short` lists only the four files of this task.
+
+- [x] **Step 8: Commit**
+
+```bash
+git add tests/test_docs.py README.md CLAUDE.md docs/superpowers/specs/2026-10-16-md-viewer-design.md
+git commit -m "docs: document WYSIWYG editing, shortcuts and manual checklist" -m "Manual desktop checklist in README.md is written, not walked."
+```
+
+Then tick this task's steps and the header status in this plan, and commit
+`docs: tick WYSIWYG plan Task 19 steps` as for Tasks 12-18.
 
 ## Dependency Order
 
