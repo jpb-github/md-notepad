@@ -30,8 +30,8 @@ watched and re-rendered when it changes on disk.
 
 Status: plan Tasks 1-14 are done, plus the user-requested Open Recent,
 Preferences and packaging (one-folder build, MSI, icon) work; WYSIWYG plan
-Tasks 1-19 are done (version 2.0.0). The manual desktop checklist in
-`README.md` is not yet walked. Check `git log` for details.
+Tasks 1-19 are done (version 2.0.0, released; the manual desktop check was
+done by hand). Check `git log` for details.
 
 ## Repository layout
 
@@ -155,8 +155,8 @@ The shell available to agents is Git Bash; use forward slashes there
   literals in `main_window.py` and `toolbar.py`: a shortcut change updates the
   README table.
 - Behavior that needs a real desktop (drag-and-drop from Explorer, live
-  Windows theme flips, scroll retention) is covered by the manual checklist
-  in `README.md`.
+  Windows theme flips, scroll retention, paste from Word or a browser) has no
+  automated test: check it by hand on a real desktop before a release.
 
 ## Commits
 

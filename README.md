@@ -143,7 +143,7 @@ The bundle `mdviewer\web\editor.js` is committed, so tests, the app and
 packaging need no Node.
 
 `mdviewer/core/` and `tests/` must never import Qt. UI behavior is covered by
-`scripts/smoke_ui.py` and the manual checklist below.
+`scripts/smoke_ui.py`; behavior that needs a real desktop (drag-and-drop, live theme flips) is checked by hand before a release.
 
 ## Building an executable and an installer
 
@@ -169,60 +169,3 @@ debugging), `--icon other.ico`, `--keep-build`.
 
 The app icon (`assets\mdviewer.ico`) is drawn in code; edit and rerun
 `python scripts\make_icon.py` to change it, then rebuild.
-
-## Manual test checklist
-
-Run on a real Windows desktop before a release; tick each item.
-
-### Opening
-- [ ] Open via command-line argument, File > Open..., File > Open Recent, and drag-and-drop (onto the Rendered view and onto the Source editor).
-- [ ] Drag-and-drop with unsaved edits first asks to save.
-- [ ] Opening a missing or locked file shows a Notepad-style message and the app stays usable.
-
-### Theme and preferences
-- [ ] In System (auto), flip the Windows app mode: chrome and page adapt within about 2 s.
-- [ ] Force Light and then Dark in Preferences: the system mode no longer matters. Restart: the choice persists, with no flash.
-- [ ] Preferences: cancel discards edits; OK applies the editor font and size immediately and persists them.
-
-### File watching
-- [ ] External edit in Rendered mode with no unsaved changes: silent reload within about 2 s, with the scroll position kept.
-- [ ] External edit in Rendered mode with unsaved changes, and in Source mode: the `File changed on disk` dialog appears and Reload works.
-- [ ] Keep my version keeps the text, and the next change asks again.
-- [ ] Saving from MD Viewer never triggers the dialog. Deleting the file shows one warning, and Save recreates it.
-
-### Modes and files
-- [ ] Rendered <-> Source switching keeps an unedited file byte-identical (compare on disk) and carries the dirty flag and the caret's block.
-- [ ] Save and Close from Rendered mode. Alt+F4 with unsaved Rendered edits prompts.
-- [ ] A file over 5 MB opens in Source mode with the `Large file: opened in Source mode` note.
-- [ ] The title shows `*` while dirty. The status bar shows `Rendered` and the zoom, or `Ln/Col` in Source mode.
-
-### Rendered editing
-- [ ] Each input rule from the Rendered mode section.
-- [ ] Tab and Shift+Tab in lists and tables; every item of the table context menu.
-- [ ] The code language picker works, and highlighting returns when the caret leaves the block.
-- [ ] Clicking a task checkbox marks the file dirty.
-- [ ] Every toolbar button and its shortcut; the buttons grey out inside a code block.
-- [ ] View > Toolbar hides and shows the toolbar, and the choice persists across restarts.
-
-### Paste and links
-- [ ] Paste from a browser and from Word keeps headings, bold and links and drops the rest.
-- [ ] Ctrl+Shift+V pastes plain text.
-- [ ] Ctrl+click opens a web link and scrolls to a `#anchor`; hovering a link shows its URL in the status bar.
-
-### Rendering and find
-- [ ] Tables, footnotes, task lists, strikethrough, relative images and a missing image render.
-- [ ] A raw HTML block containing a `<script>` does nothing.
-- [ ] Ctrl+F counts and steps through matches in Rendered mode; Ctrl+H lands in Source mode with the Replace bar.
-- [ ] A live theme flip and zoom work while editing.
-
-### Source mode
-- [ ] Every completion trigger: `#`, `|` + Ctrl+Space, backtick x3, `>`, `-`, `*`, `_`, `[`.
-- [ ] Auto-close and step-over; Backspace removes an empty pair; `snake_case` and `* bullet` type normally.
-- [ ] Enter continuation for `-`, `1.`, `>`; an empty item exits; nothing continues inside a fence.
-- [ ] Each underline type: unclosed fence, table column mismatch, missing separator row (red); `#Heading`, lone `**`, odd backticks (orange).
-- [ ] Find/Replace: Match case, count, Previous/Next wrap, Replace, Replace All + one Ctrl+Z, Esc.
-- [ ] Word Wrap toggles.
-
-### Installed build
-- [ ] The MSI installs without a UAC prompt, the Start menu shortcut and exe show the app icon, and the app launches in a few seconds.
-- [ ] Uninstalling from Settings > Apps removes the folder and the shortcut.
