@@ -33,7 +33,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mdviewer.core import docmodel, encoding, frontmatter, serialize, settings, themeservice, urls
+from mdviewer import __version__
+from mdviewer.core import docmodel,encoding, frontmatter, serialize, settings, themeservice, urls
 from mdviewer.core.filewatch import Watcher, WatchEvent
 from mdviewer.dialogs import ImageDialog, LinkDialog
 from mdviewer.editor import MarkdownEditor
@@ -901,7 +902,7 @@ class MainWindow(QMainWindow):
 
     def _show_about(self) -> None:
         QMessageBox.about(
-            self, f"About {APP_NAME}", f"{APP_NAME} 0.1.0\n\nA Notepad-like Markdown viewer for Windows."
+            self, f"About {APP_NAME}", f"{APP_NAME} {__version__}\n\nA Notepad-like Markdown viewer for Windows."
         )
 
     # --- Chrome: title, status bar, action state ---------------------------

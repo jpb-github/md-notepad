@@ -117,7 +117,7 @@ docs/superpowers/          specs and plans
   data files (bundle them explicitly; Pygments lexers are collected with
   `--collect-submodules pygments`). `mdviewer/web` ships via one `--add-data`
   entry (`_internal/mdviewer/web`), and `build_exe.py` checks for it before
-  and after the build. The version lives only in `pyproject.toml`; bump it so
+  and after the build. The version lives in `pyproject.toml` and `mdviewer/__init__.py` (a test keeps them equal); bump both so
   the MSI replaces an installed one. `build/` and `dist/` are git-ignored;
   never commit build output. Signing, MSIX and auto-update are out of scope.
 
