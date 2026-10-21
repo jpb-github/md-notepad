@@ -5,7 +5,7 @@
 > **Status: high-level outline.** Phases and tasks are fixed; each task's
 > bite-sized steps (tests, code, commands) are written out on request, task
 > by task, below its heading. Do not execute a task whose steps are not yet
-> detailed. Detailed so far: Tasks 1-17.
+> detailed. Detailed so far: Tasks 1-18.
 
 **Goal:** Make the rendered view an editable WYSIWYG Markdown editor with a
 format toolbar, keeping the plain-text editor as Source mode.
@@ -16993,10 +16993,182 @@ git commit -m "feat: route Edit menu and Find to the Rendered editor"
 
 ### Task 18: Packaging
 
-- **Files:** `scripts/build_exe.py`, `installer/MDViewer.wxs` (only if the harvest needs it).
-- **Covers:** `--add-data mdviewer/web`; QtWebChannel collected; devtools `.pak` removal kept; built exe opens a file in Rendered mode and saves an edit.
-- **Test:** `scripts/build_exe.py` then launch `dist/MDViewer/MDViewer.exe` on a sample file (manual, recorded in the commit body); `scripts/build_msi.py` succeeds.
-- **Commit:** `chore: bundle the web editor in the exe and MSI`
+**Status: steps detailed.** The design below was prototyped and run before
+being written into this plan (2026-10-21, PySide6 6.12.0, PyInstaller 6.22.3,
+WiX 5.0.2, on top of Task 17 as committed, `b49386d`), then reverted.
+Results:
+- **Only the data folder is missing.** The unchanged script already bundles
+  `QtWebChannel.pyd` and `Qt6WebChannel.dll` (PyInstaller's PySide6 hook
+  follows `richview.py`'s import) and every `mistune.plugins.*` module, so no
+  `--collect-submodules mistune` and no hidden import is needed. Without
+  `mdviewer/web` in the bundle, `RichView.restart()`'s `shutil.copyfile`
+  raises `OSError`, the view fails (`load_failed`) and the window offers
+  Source mode only.
+- **One `--add-data` entry fixes it.** `render.WEB_DIR` is
+  `Path(__file__).parent.parent / "web"`; frozen, `render`'s `__file__` is
+  `<bundle>/mdviewer/core/render.pyc`, so the files must sit in
+  `_internal/mdviewer/web` (`--add-data <repo>\mdviewer\web;mdviewer/web`).
+  The built exe then opened a file in Rendered mode (toolbar row, status bar
+  `Rendered`, styled heading, bold, list), also when run from a folder named
+  `MD Viewer é` on a file named `résumé.md` in a folder with an accent.
+- **The devtools `.pak` removal still applies** (none left in
+  `_internal/PySide6/resources`); only its comment is stale: the page now
+  runs JavaScript, and nothing opens DevTools.
+- **The MSI needs no `.wxs` change.** `<Files Include="$(SourceDir)\**" />`
+  harvested the new files: the `File` table (3108 rows) lists `editor.html`,
+  `editor.js`, `editor.css`, `qwebchannel.js`, `THIRD_PARTY.txt` and
+  `QtWebChannel.pyd`. The MSI is 148 MiB. `mdviewer/web` adds 325 KB.
+- A PyInstaller build takes ~200 s; `build_msi.py --skip-exe` ~30 s.
+- **Do not screenshot the whole screen** to check a launch: it is the
+  user's desktop. `PrintWindow` on the process's `MainWindowHandle` captures
+  only the app window (even behind other windows) and showed the page.
+
+**Files:**
+- Modify: `scripts/build_exe.py`, `pyproject.toml` (`version`; the only place
+  the version is written, `build_msi.py` reads it)
+
+**Interfaces:**
+- Consumes: `mdviewer/web/{editor.html, editor.js, editor.css, qwebchannel.js}`
+  (Tasks 1, 9-12, 17; the runtime files `richview.RUNTIME_FILES` copies plus
+  the shell `render.editor_page` reads) and `scripts/build_web.py`, whose name
+  the missing-file message gives.
+- Produces: `dist/MDViewer/_internal/mdviewer/web/*` in the one-folder build,
+  and so in the MSI. In `scripts/build_exe.py`:
+  `WEB_DIR: Path` (`ROOT / "mdviewer" / "web"`),
+  `WEB_FILES: tuple[str, ...]`,
+  `missing_web_files() -> list[str]` (names absent from `WEB_DIR`) and
+  `missing_bundle_files(app_dir: Path) -> list[str]` (paths relative to
+  `app_dir`, missing from a one-folder build).
+
+**Review Focus** (each line has its step below):
+- A checkout whose `mdviewer/web` lacks a runtime file builds an exe that
+  opens in Source mode only, with just a status warning: the build fails
+  before PyInstaller runs and names `scripts\build_web.py` (Step 1).
+- A bundle built without the data folder, or without QtWebChannel, is never
+  reported as built: the post-build check fails it (Steps 2-3).
+- The MSI installs to `%LOCALAPPDATA%\Programs\MD Viewer` (a space), and user
+  names and document paths can hold accents: the exe still opens a file in
+  Rendered mode from such paths (Step 5).
+- `--onefile` shares the `--add-data` entry but has no folder to check
+  afterwards, so the post-build check is skipped; it stays opt-in and
+  unverified by this task.
+- An MSI with the same version as an installed one does not replace it
+  (`MajorUpgrade`), and an older one is refused (`DowngradeErrorMessage`):
+  the version goes from 1.1.0 to 2.0.0 (the user's call, 2026-10-21) so the
+  new MSI replaces a 1.1.0 install; the MSI file name carries it (Steps 6-7).
+
+- [ ] **Step 1: Add the pre-build check**
+
+In `scripts/build_exe.py` add `WEB_DIR`, `WEB_FILES = ("editor.html",
+"editor.js", "editor.css", "qwebchannel.js")` and `missing_web_files()`. At
+the top of `main()`, after the PyInstaller check, return 1 when it is
+non-empty, printing to stderr `Missing from mdviewer\web: <names>. Run:
+python scripts\build_web.py` (names comma-separated).
+
+Run (PowerShell, repo root): rename `mdviewer\web\editor.js` to
+`editor.js.bak`, `.venv\Scripts\python scripts\build_exe.py`, then rename it
+back.
+Expected: exit code 1 within a second, the message names `editor.js` only, no
+PyInstaller output.
+
+- [ ] **Step 2: Add the post-build check (red)**
+
+Add `missing_bundle_files(app_dir)`: it returns the entries of
+`_internal/mdviewer/web/<name>` for every `WEB_FILES` name and
+`_internal/PySide6/QtWebChannel.pyd` that are not files under `app_dir`.
+In `main()`, in the existing `if not args.onefile:` block after the devtools
+`.pak` removal, call it on `ROOT / "dist" / NAME`; when non-empty, print to
+stderr `Build finished but the bundle lacks: <paths>` and return 1. In the
+same block, change the `.pak` comment to `# Chromium DevTools front-end (~80
+MiB); the app never opens it.`
+
+Run: `.venv\Scripts\python scripts\build_exe.py` (~200 s).
+Expected: exit code 1, the message lists the four `mdviewer/web/...` paths
+and not `QtWebChannel.pyd`.
+
+- [ ] **Step 3: Bundle the web folder (green)**
+
+In `main()`, after the icon `--add-data`, add
+`cmd += ["--add-data", f"{WEB_DIR}{os.pathsep}mdviewer/web"]` with the
+comment `# The editor page: render.WEB_DIR resolves to <bundle>/mdviewer/web
+when frozen.` It applies to `--onefile` too.
+
+Run: `.venv\Scripts\python scripts\build_exe.py`.
+Expected: exit code 0, `Built ...\dist\MDViewer\MDViewer.exe`, and
+`dist\MDViewer\_internal\mdviewer\web` holds the five files of
+`mdviewer/web`.
+
+- [ ] **Step 4: Launch the built exe on a sample file**
+
+Create a folder outside the repo with `sample.md`:
+
+```markdown
+# Hello
+
+Some **bold** text.
+
+- one
+- two
+```
+
+Start `dist\MDViewer\MDViewer.exe <that file>`. Expected: the window shows
+the heading, the bold word and the list in the Rendered page, the format
+toolbar row is visible and the status bar says `Rendered`. Then click after
+`two`, type `x` and press Ctrl+S. Expected: the file reads
+`# Hello`, blank line, `Some **bold** text.`, blank line, `- one`, `- twox`,
+and the title shows no unsaved marker. Check the window alone (see the findings), not the
+whole screen. Without a desktop session, hand this step and Step 5 to the
+user and say so in the commit body.
+
+- [ ] **Step 5: Launch it from a path with a space and an accent**
+
+Copy `dist\MDViewer` to `%TEMP%\MD Viewer é\MDViewer` and `sample.md` to
+`%TEMP%\dossier é\résumé.md`; start the copied exe on that file. Expected:
+the same Rendered page, title `résumé.md - MD Viewer`. Delete both copies.
+
+- [ ] **Step 6: Bump the version to 2.0.0**
+
+In `pyproject.toml` set `version = "2.0.0"`. Nothing else names the version
+(`installer\MDViewer.wxs` takes `-d Version=` from it; `UpgradeCode` stays).
+
+- [ ] **Step 7: Build the MSI and check it carries the web folder**
+
+Run: `.venv\Scripts\python scripts\build_msi.py --skip-exe`.
+Expected: `Built ...\dist\MDViewer-2.0.0-x64.msi (~148 MiB)`.
+
+Then list the MSI's file names without installing anything. Save as
+`%TEMP%\msifiles.ps1` (outside the repo) and run it with the MSI's full path:
+
+```powershell
+param($msi)
+$inst = New-Object -ComObject WindowsInstaller.Installer
+$db = $inst.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $inst, @($msi, 0))
+$view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @('SELECT FileName FROM File'))
+$view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+$names = while ($rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)) {
+  $rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, 1)
+}
+$names | Select-String 'editor\.(html|js|css)|qwebchannel\.js|THIRD_PARTY|QtWebChannel\.pyd'
+```
+
+Expected: lines for `editor.html`, `editor.js`, `editor.css`,
+`qwebchannel.js`, `THIRD_PARTY.txt` and `QtWebChannel.pyd` (short names may
+precede a `|`). `installer\MDViewer.wxs` stays unchanged.
+
+- [ ] **Step 8: Run the regular checks and commit**
+
+Run `.venv\Scripts\python -m pytest -q` (expect the suite unchanged and
+passing: this task touches no tested code) and the Qt-import `rg` check
+(expect no output).
+
+Two commits, as for 1.0.0 and 1.1.0:
+
+```bash
+git add scripts/build_exe.py
+git commit -m "chore: bundle the web editor in the exe and MSI" -m "<what Steps 4-5 and 7 showed: Rendered page, edit saved, accent path, MSI file list; or that Steps 4-5 were left to the user>"
+git add pyproject.toml
+git commit -m "chore: bump version to 2.0.0"
+```
 
 ### Task 19: Docs and final verification
 
