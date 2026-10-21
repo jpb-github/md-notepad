@@ -16,6 +16,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 NAME = "MDViewer"
 ICON = ROOT / "assets" / "mdviewer.ico"  # regenerate with scripts/make_icon.py
+WEB_DIR = ROOT / "mdviewer" / "web"  # committed output of scripts/build_web.py
+# What richview.RUNTIME_FILES copies next to the page, plus the shell render.editor_page reads.
+WEB_FILES = ("editor.html", "editor.js", "editor.css", "qwebchannel.js")
+
+
+def missing_web_files() -> list[str]:
+    return [name for name in WEB_FILES if not (WEB_DIR / name).is_file()]
+
+
+def missing_bundle_files(app_dir: Path) -> list[str]:
+    """Paths (relative to a one-folder build) the Rendered editor needs that the build lacks."""
+    needed = [f"_internal/mdviewer/web/{name}" for name in WEB_FILES] + ["_internal/PySide6/QtWebChannel.pyd"]
+    return [path for path in needed if not (app_dir / path).is_file()]
 
 
 def main() -> int:
@@ -28,6 +41,10 @@ def main() -> int:
 
     if importlib.util.find_spec("PyInstaller") is None:
         print('PyInstaller is not installed. Run: python -m pip install -e ".[build]"', file=sys.stderr)
+        return 1
+    missing = missing_web_files()
+    if missing:
+        print(f"Missing from mdviewer\\web: {', '.join(missing)}. Run: python scripts\\build_web.py", file=sys.stderr)
         return 1
 
     cmd = [
@@ -45,6 +62,8 @@ def main() -> int:
     if ICON.is_file():
         # Runtime window icon (mdviewer.app.icon_path); --icon below only brands the exe file.
         cmd += ["--add-data", f"{ICON}{os.pathsep}assets"]
+    # The editor page: render.WEB_DIR resolves to <bundle>/mdviewer/web when frozen.
+    cmd += ["--add-data", f"{WEB_DIR}{os.pathsep}mdviewer/web"]
     if args.icon.is_file():
         cmd += ["--icon", str(args.icon.resolve())]
     else:
@@ -60,9 +79,13 @@ def main() -> int:
         shutil.rmtree(ROOT / "build", ignore_errors=True)
 
     if not args.onefile:
-        # Chromium DevTools front-end (~80 MiB); the preview has JS disabled and never opens it.
+        # Chromium DevTools front-end (~80 MiB); the app never opens it.
         for pak in (ROOT / "dist" / NAME / "_internal" / "PySide6" / "resources").glob("qtwebengine_devtools_resources*.pak"):
             pak.unlink()
+        lacking = missing_bundle_files(ROOT / "dist" / NAME)
+        if lacking:
+            print(f"Build finished but the bundle lacks: {', '.join(lacking)}", file=sys.stderr)
+            return 1
 
     exe = ROOT / "dist" / f"{NAME}.exe" if args.onefile else ROOT / "dist" / NAME / f"{NAME}.exe"
     if not exe.is_file():
