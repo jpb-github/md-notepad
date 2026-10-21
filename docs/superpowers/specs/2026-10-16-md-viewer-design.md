@@ -29,6 +29,8 @@ Multiple documents/tabs; printing; cross-file search; registering as the
 default `.md` handler; WYSIWYG; custom user CSS or themes; localization;
 executable packaging (a PyInstaller note may be added to the README later).
 
+WYSIWYG editing was added in v2: see 2026-10-20-wysiwyg-editing-design.md.
+
 ## 2. Tech Stack
 
 - **Python 3.12+** - verify PySide6 wheel support for 3.14 during
